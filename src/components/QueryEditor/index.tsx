@@ -34,8 +34,11 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showChart, setShowChart] = useState(false);
+  const [editorHeight, setEditorHeight] = useState(250);
+  const [isResizingEditor, setIsResizingEditor] = useState(false);
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editorResizeRef = useRef({ startY: 0, startHeight: 0 });
   const updateTabContent = useTabStore((s) => s.updateTabContent);
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
 
@@ -46,6 +49,31 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
       }
     };
   }, []);
+
+  const handleEditorResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizingEditor(true);
+    editorResizeRef.current = { startY: e.clientY, startHeight: editorHeight };
+  }, [editorHeight]);
+
+  useEffect(() => {
+    if (!isResizingEditor) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const delta = e.clientY - editorResizeRef.current.startY;
+      setEditorHeight(Math.max(120, Math.min(500, editorResizeRef.current.startHeight + delta)));
+    };
+    const handleMouseUp = () => setIsResizingEditor(false);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizingEditor]);
 
   const handleContentChange = useCallback(
     (value: string | undefined) => {
@@ -187,7 +215,7 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
       </div>
 
       {/* Editor */}
-      <div className="h-[250px] min-h-[120px] shrink-0 border-b">
+      <div className="shrink-0" style={{ height: editorHeight, minHeight: 120, maxHeight: 500 }}>
         <Editor
           height="100%"
           defaultLanguage="sql"
@@ -209,6 +237,15 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
           }}
         />
       </div>
+
+      {/* Editor resize handle */}
+      <div
+        className={cn(
+          "h-1 shrink-0 cursor-row-resize transition-colors hover:bg-primary/20",
+          isResizingEditor && "bg-primary/30"
+        )}
+        onMouseDown={handleEditorResizeStart}
+      />
 
       {/* Result toolbar */}
       {result && result.columns.length > 0 && (

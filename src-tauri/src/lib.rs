@@ -41,6 +41,7 @@ pub fn run() {
             commands::schema::get_tables,
             commands::schema::get_columns,
             commands::schema::get_indexes,
+            commands::schema::get_enum_values,
             commands::tasks::list_tasks,
             commands::tasks::get_task,
             commands::tasks::cancel_task,

@@ -131,7 +131,26 @@
 .monaco-editor,
 .monaco-editor *,
 input,
-textarea {
+textarea,
+select {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+/* Native select/option dark mode support */
+select option {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+/* Ensure date/time input pickers respect dark mode */
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"] {
+  color-scheme: light;
+}
+.dark input[type="date"],
+.dark input[type="time"],
+.dark input[type="datetime-local"] {
+  color-scheme: dark;
 }

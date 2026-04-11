@@ -6,6 +6,10 @@ interface TabStore {
   activeTabKey: string | null;
   addTab: (tab: TabItem) => void;
   removeTab: (key: string) => void;
+  removeAllTabs: () => void;
+  removeOtherTabs: (key: string) => void;
+  removeLeftTabs: (key: string) => void;
+  removeRightTabs: (key: string) => void;
   setActiveTab: (key: string) => void;
   updateTabContent: (key: string, content: string) => void;
 }
@@ -38,6 +42,32 @@ export const useTabStore = create<TabStore>((set, get) => ({
             : null;
       }
       return { tabs: newTabs, activeTabKey: newActiveKey };
+    }),
+
+  removeAllTabs: () => set({ tabs: [], activeTabKey: null }),
+
+  removeOtherTabs: (key) =>
+    set((state) => {
+      const kept = state.tabs.filter((t) => t.key === key);
+      return { tabs: kept, activeTabKey: kept.length > 0 ? key : null };
+    }),
+
+  removeLeftTabs: (key) =>
+    set((state) => {
+      const idx = state.tabs.findIndex((t) => t.key === key);
+      if (idx <= 0) return state;
+      const newTabs = state.tabs.slice(idx);
+      const activeStillExists = newTabs.some((t) => t.key === state.activeTabKey);
+      return { tabs: newTabs, activeTabKey: activeStillExists ? state.activeTabKey : key };
+    }),
+
+  removeRightTabs: (key) =>
+    set((state) => {
+      const idx = state.tabs.findIndex((t) => t.key === key);
+      if (idx < 0 || idx >= state.tabs.length - 1) return state;
+      const newTabs = state.tabs.slice(0, idx + 1);
+      const activeStillExists = newTabs.some((t) => t.key === state.activeTabKey);
+      return { tabs: newTabs, activeTabKey: activeStillExists ? state.activeTabKey : key };
     }),
 
   setActiveTab: (key) => set({ activeTabKey: key }),

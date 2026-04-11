@@ -120,7 +120,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
         let pool = self.pool_for_db(database).await?;
         let sql = format!(
-            "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
+            "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, c.column_default, \
              CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END as is_pk \
              FROM information_schema.columns c \
              LEFT JOIN information_schema.key_column_usage kcu ON c.column_name = kcu.column_name AND c.table_name = kcu.table_name \
@@ -134,7 +134,14 @@ impl DatabaseDriver for PostgresDriver {
             .iter()
             .map(|row| ColumnInfo {
                 name: row.get::<String, _>("column_name"),
-                data_type: row.get::<String, _>("data_type"),
+                data_type: {
+                    let dt: String = row.get("data_type");
+                    if dt == "USER-DEFINED" {
+                        row.try_get::<String, _>("udt_name").unwrap_or(dt)
+                    } else {
+                        dt
+                    }
+                },
                 nullable: row.get::<String, _>("is_nullable") == "YES",
                 is_primary_key: row.try_get::<bool, _>("is_pk").unwrap_or(false),
                 default_value: row.try_get::<String, _>("column_default").ok(),
@@ -384,6 +391,16 @@ impl DatabaseDriver for PostgresDriver {
             })
             .collect();
         Ok(users)
+    }
+
+    async fn get_enum_values(&self, database: &str, enum_type: &str) -> anyhow::Result<Vec<String>> {
+        let pool = self.pool_for_db(database).await?;
+        let sql = format!(
+            "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON e.enumtypid = t.oid WHERE t.typname = '{}' ORDER BY e.enumsortorder",
+            enum_type
+        );
+        let rows: Vec<PgRow> = sqlx::query(&sql).fetch_all(&pool).await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("enumlabel")).collect())
     }
 
     async fn get_create_table_sql(&self, database: &str, table: &str) -> anyhow::Result<String> {

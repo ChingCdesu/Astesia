@@ -67,3 +67,20 @@ pub async fn get_indexes(
         .await
         .map_err(|e| format!("获取索引信息失败: {}", e))
 }
+
+#[tauri::command]
+pub async fn get_enum_values(
+    state: State<'_, AppState>,
+    connection_id: String,
+    database: String,
+    enum_type: String,
+) -> Result<Vec<String>, String> {
+    let connections = state.connections.lock().await;
+    let driver = connections
+        .get(&connection_id)
+        .ok_or("连接不存在")?;
+    driver
+        .get_enum_values(&database, &enum_type)
+        .await
+        .map_err(|e| format!("获取枚举值失败: {}", e))
+}

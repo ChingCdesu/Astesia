@@ -11,13 +11,20 @@ import Sidebar from '../Sidebar';
 import StatusBar from '../StatusBar';
 import { Database, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/ui/context-menu';
 
 const MIN_SIDEBAR_WIDTH = 200;
 const MAX_SIDEBAR_WIDTH = 600;
 const DEFAULT_SIDEBAR_WIDTH = 272;
 
 export default function AppLayout() {
-  const { tabs, activeTabKey, setActiveTab, removeTab } = useTabStore();
+  const { tabs, activeTabKey, setActiveTab, removeTab, removeAllTabs, removeOtherTabs, removeLeftTabs, removeRightTabs } = useTabStore();
   const connections = useConnectionStore((s) => s.connections);
 
   // Sidebar resize state
@@ -60,6 +67,52 @@ export default function AppLayout() {
       document.body.style.userSelect = '';
     };
   }, [isResizing, sidebarWidth]);
+
+  const hasUnsavedContent = useCallback((tab: (typeof tabs)[0]) => {
+    return tab.type === 'query' && tab.sqlContent && tab.sqlContent.trim();
+  }, []);
+
+  const handleCloseTab = useCallback((key: string) => {
+    const tab = tabs.find(t => t.key === key);
+    if (tab && hasUnsavedContent(tab)) {
+      if (!window.confirm('当前查询内容未保存，是否继续关闭？')) return;
+    }
+    removeTab(key);
+  }, [tabs, hasUnsavedContent, removeTab]);
+
+  const handleCloseAllTabs = useCallback(() => {
+    const unsavedTabs = tabs.filter(t => hasUnsavedContent(t));
+    if (unsavedTabs.length > 0) {
+      if (!window.confirm('存在未保存的查询内容，是否继续关闭所有标签页？')) return;
+    }
+    removeAllTabs();
+  }, [tabs, hasUnsavedContent, removeAllTabs]);
+
+  const handleCloseOtherTabs = useCallback((key: string) => {
+    const otherUnsaved = tabs.filter(t => t.key !== key && hasUnsavedContent(t));
+    if (otherUnsaved.length > 0) {
+      if (!window.confirm('存在未保存的查询内容，是否继续关闭其他标签页？')) return;
+    }
+    removeOtherTabs(key);
+  }, [tabs, hasUnsavedContent, removeOtherTabs]);
+
+  const handleCloseLeftTabs = useCallback((key: string) => {
+    const idx = tabs.findIndex(t => t.key === key);
+    const leftUnsaved = tabs.slice(0, idx).filter(t => hasUnsavedContent(t));
+    if (leftUnsaved.length > 0) {
+      if (!window.confirm('存在未保存的查询内容，是否继续关闭左边的标签页？')) return;
+    }
+    removeLeftTabs(key);
+  }, [tabs, hasUnsavedContent, removeLeftTabs]);
+
+  const handleCloseRightTabs = useCallback((key: string) => {
+    const idx = tabs.findIndex(t => t.key === key);
+    const rightUnsaved = tabs.slice(idx + 1).filter(t => hasUnsavedContent(t));
+    if (rightUnsaved.length > 0) {
+      if (!window.confirm('存在未保存的查询内容，是否继续关闭右边的标签页？')) return;
+    }
+    removeRightTabs(key);
+  }, [tabs, hasUnsavedContent, removeRightTabs]);
 
   const renderTabContent = (tab: (typeof tabs)[0]) => {
     const connDbType = connections.find((c) => c.id === tab.connectionId)?.db_type;
@@ -122,24 +175,35 @@ export default function AppLayout() {
               {/* Tab Bar */}
               <div className="flex h-10 shrink-0 items-end overflow-x-auto border-b bg-muted/30 px-1">
                 {tabs.map((tab) => (
-                  <div
-                    key={tab.key}
-                    className={cn(
-                      "group relative flex h-9 cursor-pointer items-center gap-2 rounded-t-md border-x border-t px-4 text-xs transition-colors",
-                      tab.key === activeTabKey
-                        ? "border-border bg-background text-foreground"
-                        : "border-transparent bg-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                    )}
-                    onClick={() => setActiveTab(tab.key)}
-                  >
-                    <span className="max-w-[150px] truncate">{tab.label}</span>
-                    <button
-                      className="ml-1 rounded-sm p-1 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
-                      onClick={(e) => { e.stopPropagation(); removeTab(tab.key); }}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
+                  <ContextMenu key={tab.key}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className={cn(
+                          "group relative flex h-9 cursor-pointer items-center gap-2 rounded-t-md border-x border-t px-4 text-xs transition-colors",
+                          tab.key === activeTabKey
+                            ? "border-border bg-background text-foreground"
+                            : "border-transparent bg-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                        )}
+                        onClick={() => setActiveTab(tab.key)}
+                      >
+                        <span className="max-w-[150px] truncate">{tab.label}</span>
+                        <button
+                          className="ml-1 rounded-sm p-1 opacity-0 transition-opacity hover:bg-muted-foreground/20 group-hover:opacity-100"
+                          onClick={(e) => { e.stopPropagation(); handleCloseTab(tab.key); }}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem onClick={() => handleCloseTab(tab.key)}>关闭当前标签页</ContextMenuItem>
+                      <ContextMenuItem onClick={() => handleCloseAllTabs()}>关闭所有标签页</ContextMenuItem>
+                      <ContextMenuItem onClick={() => handleCloseOtherTabs(tab.key)}>关闭其他标签页</ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onClick={() => handleCloseLeftTabs(tab.key)}>关闭左边的标签页</ContextMenuItem>
+                      <ContextMenuItem onClick={() => handleCloseRightTabs(tab.key)}>关闭右边的标签页</ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 ))}
               </div>
 

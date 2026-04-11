@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { QueryResult } from '@/types/database';
+import { QueryResult, ColumnInfo } from '@/types/database';
 import { CellChange, NewRow } from '@/types/editing';
 import {
   RefreshCw, Download, Loader2, ChevronLeft, ChevronRight,
@@ -12,6 +11,9 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTabStore } from '@/stores/tabStore';
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 
 function parseClipboardData(text: string): string[][] {
   // Handle both CSV (comma-separated) and TSV (tab-separated, from Excel)
@@ -83,9 +85,16 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [changeHistory, setChangeHistory] = useState<HistoryEntry[]>([]);
   const [lastSelectedRow, setLastSelectedRow] = useState<number | null>(null);
+  const [enumValues, setEnumValues] = useState<string[]>([]);
+  const [editColType, setEditColType] = useState<string>('text');
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
+  const editInputRef = useRef<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(null);
+
+  // Column resize state
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [resizingCol, setResizingCol] = useState<string | null>(null);
+  const colResizeRef = useRef({ startX: 0, startWidth: 0, colName: '' });
 
   // Primary key detection
   const primaryKeyColumn = useMemo(() => {
@@ -102,14 +111,23 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     try {
       const [data, columnMeta] = await Promise.all([
         invoke<QueryResult>('get_table_data', { connectionId, database, table, page, pageSize }),
-        invoke<import('@/types/database').ColumnInfo[]>('get_columns', { connectionId, database, table }),
+        invoke<ColumnInfo[]>('get_columns', { connectionId, database, table }),
       ]);
-      // Merge PK info from get_columns into result columns (get_table_data doesn't have PK metadata)
-      const pkColumns = new Set(columnMeta.filter(c => c.is_primary_key).map(c => c.name));
-      data.columns = data.columns.map(col => ({
-        ...col,
-        is_primary_key: pkColumns.has(col.name),
-      }));
+      // If get_table_data returned empty columns (no rows), use get_columns metadata
+      if (data.columns.length === 0 && columnMeta.length > 0) {
+        data.columns = columnMeta;
+      } else {
+        // Merge PK and data_type info from get_columns into result columns
+        const metaByName = new Map(columnMeta.map(c => [c.name, c]));
+        data.columns = data.columns.map(col => {
+          const meta = metaByName.get(col.name);
+          return {
+            ...col,
+            is_primary_key: meta?.is_primary_key ?? col.is_primary_key,
+            data_type: meta?.data_type ?? col.data_type,
+          };
+        });
+      }
       setResult(data);
     } catch (e: any) {
       console.error(e);
@@ -135,9 +153,11 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   useEffect(() => {
     if (editingCell && editInputRef.current) {
       editInputRef.current.focus();
-      editInputRef.current.select();
+      if ('select' in editInputRef.current && typeof editInputRef.current.select === 'function') {
+        editInputRef.current.select();
+      }
     }
-  }, [editingCell]);
+  }, [editingCell, editColType]);
 
   // Keyboard shortcuts handler (Ctrl+Z, Ctrl+V, Ctrl+C)
   useEffect(() => {
@@ -163,6 +183,34 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       return () => el.removeEventListener('keydown', handleKeyDown);
     }
   });
+
+  // Column resize handlers
+  const handleColumnResizeStart = (e: React.MouseEvent, colName: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setResizingCol(colName);
+    colResizeRef.current = { startX: e.clientX, startWidth: columnWidths[colName] || 160, colName };
+  };
+
+  useEffect(() => {
+    if (!resizingCol) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - colResizeRef.current.startX;
+      const newWidth = Math.max(80, colResizeRef.current.startWidth + delta);
+      setColumnWidths(prev => ({ ...prev, [colResizeRef.current.colName]: newWidth }));
+    };
+    const handleMouseUp = () => setResizingCol(null);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [resizingCol]);
 
   const handleUndo = () => {
     setChangeHistory((prev) => {
@@ -208,8 +256,133 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     URL.revokeObjectURL(url);
   };
 
+  // Determine editor type based on column data_type
+  const getEditorType = (dataType: string): 'boolean' | 'enum' | 'datetime' | 'date' | 'time' | 'json' | 'number' | 'text' => {
+    const dt = dataType.toLowerCase();
+    if (dt === 'boolean' || dt === 'bool' || dt === 'bit' || dt === 'tinyint(1)') return 'boolean';
+    if (dt === 'json' || dt === 'jsonb') return 'json';
+    if (dt.includes('timestamp') || dt.includes('datetime')) return 'datetime';
+    if (dt === 'date') return 'date';
+    if (dt === 'time') return 'time';
+    if (['int', 'integer', 'bigint', 'smallint', 'tinyint', 'mediumint', 'numeric', 'decimal', 'float', 'double', 'real', 'serial', 'bigserial'].some(t => dt.includes(t))) return 'number';
+    return 'text';
+  };
+
+  // Known standard SQL text types (used to skip enum lookup)
+  const knownTextTypes = ['character varying', 'varchar', 'text', 'char', 'character', 'nvarchar', 'nchar', 'ntext', 'longtext', 'mediumtext', 'tinytext', 'string', 'uuid', 'xml', 'cidr', 'inet', 'macaddr', 'money', 'bytea', 'array'];
+
+  // Render the appropriate cell editor based on column type
+  const renderCellEditor = () => {
+    const editorKeyDown = (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+      if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+      e.stopPropagation();
+    };
+
+    const editorInputClass = "h-full w-full rounded-sm border border-primary/50 bg-background px-2 text-xs select-text focus:outline-none focus:ring-1 focus:ring-primary text-foreground";
+    const editorSelectClass = "h-full w-full rounded-sm border border-primary/50 bg-background px-1.5 text-xs select-text focus:outline-none focus:ring-1 focus:ring-primary text-foreground appearance-none cursor-pointer";
+
+    if (editColType === 'boolean') {
+      return (
+        <select
+          ref={editInputRef as React.RefObject<HTMLSelectElement>}
+          className={editorSelectClass}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={editorKeyDown}
+        >
+          <option value="true">true</option>
+          <option value="false">false</option>
+          <option value="">NULL</option>
+        </select>
+      );
+    }
+
+    if (editColType === 'enum') {
+      return (
+        <select
+          ref={editInputRef as React.RefObject<HTMLSelectElement>}
+          className={editorSelectClass}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={editorKeyDown}
+        >
+          <option value="">NULL</option>
+          {enumValues.map((v) => (
+            <option key={v} value={v}>{v}</option>
+          ))}
+        </select>
+      );
+    }
+
+    if (editColType === 'json') {
+      return (
+        <textarea
+          ref={editInputRef as React.RefObject<HTMLTextAreaElement>}
+          className="h-20 w-full resize-y rounded-sm border border-primary/50 bg-background px-2 py-1 font-mono text-xs select-text focus:outline-none focus:ring-1 focus:ring-primary text-foreground"
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+            e.stopPropagation();
+          }}
+        />
+      );
+    }
+
+    if (editColType === 'datetime' || editColType === 'date' || editColType === 'time') {
+      const inputType = editColType === 'time' ? 'time' : editColType === 'date' ? 'date' : 'datetime-local';
+      return (
+        <input
+          ref={editInputRef as React.RefObject<HTMLInputElement>}
+          type={inputType}
+          className={editorInputClass}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={editorKeyDown}
+        />
+      );
+    }
+
+    if (editColType === 'number') {
+      return (
+        <input
+          ref={editInputRef as React.RefObject<HTMLInputElement>}
+          type="number"
+          step="any"
+          className={editorInputClass}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={editorKeyDown}
+        />
+      );
+    }
+
+    // Default: text editor
+    return (
+      <input
+        ref={editInputRef as React.RefObject<HTMLInputElement>}
+        type="text"
+        className={editorInputClass}
+        value={editValue}
+        onChange={(e) => setEditValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+          e.stopPropagation();
+        }}
+        onBlur={() => commitEdit()}
+      />
+    );
+  };
+
   // Cell double-click to start editing
-  const handleCellDoubleClick = (rowIndex: number, colIndex: number) => {
+  const handleCellDoubleClick = async (rowIndex: number, colIndex: number) => {
     if (!hasPrimaryKey) return;
     if (deletedRows.has(rowIndex)) return;
 
@@ -218,13 +391,49 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     const existing = pendingChanges.get(key);
     const currentValue = existing ? existing.newValue : result!.rows[rowIndex][colIndex];
 
+    const editorType = getEditorType(col.data_type);
+    setEditColType(editorType);
+    setEnumValues([]);
+
     setEditingCell({ row: rowIndex, col: colIndex });
-    setEditValue(currentValue === null ? '' : String(currentValue));
+
+    // Default value for datetime types when current value is null
+    if (currentValue === null || currentValue === undefined) {
+      if (editorType === 'datetime') {
+        setEditValue(new Date().toISOString().slice(0, 16));
+      } else if (editorType === 'date') {
+        setEditValue(new Date().toISOString().slice(0, 10));
+      } else if (editorType === 'time') {
+        setEditValue(new Date().toTimeString().slice(0, 8));
+      } else {
+        setEditValue('');
+      }
+    } else {
+      setEditValue(String(currentValue));
+    }
+
+    // If type is 'text' and not a known standard text type, try to fetch enum values
+    if (editorType === 'text' && !knownTextTypes.some(t => col.data_type.toLowerCase().includes(t))) {
+      try {
+        const values = await invoke<string[]>('get_enum_values', {
+          connectionId, database, enumType: col.data_type,
+        });
+        if (values.length > 0) {
+          setEditColType('enum');
+          setEnumValues(values);
+        }
+      } catch {
+        // Not an enum, keep text editor
+      }
+    }
   };
 
-  // Commit cell edit
+  // Commit cell edit — records the change into pendingChanges (saved via "保存更改" button)
   const commitEdit = () => {
-    if (!editingCell || !result) return;
+    if (!editingCell || !result) {
+      setEditingCell(null);
+      return;
+    }
 
     const { row, col } = editingCell;
     const column = result.columns[col];
@@ -244,9 +453,11 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     const baseValue = existingChange ? existingChange.oldValue : originalValue;
     const baseStr = baseValue === null ? '' : String(baseValue);
     const newStr = newValue === null ? '' : String(newValue);
+    const bothNull = baseValue === null && newValue === null;
+    const sameValue = baseStr === newStr && (bothNull || (baseValue !== null && newValue !== null));
 
-    if (baseStr === newStr && baseValue === null === (newValue === null)) {
-      // Reverted to original - remove the pending change
+    if (sameValue) {
+      // Reverted to original — remove the pending change
       if (existingChange) {
         setPendingChanges((map) => {
           const newMap = new Map(map);
@@ -274,6 +485,32 @@ export default function DataGrid({ connectionId, database, table }: Props) {
 
   const cancelEdit = () => {
     setEditingCell(null);
+  };
+
+  // Set a cell value to NULL via context menu — records into pendingChanges
+  const handleSetNull = (rowIndex: number, colIndex: number) => {
+    if (!result || !hasPrimaryKey) return;
+    const column = result.columns[colIndex];
+    if (!column.nullable) return;
+    const key = `${rowIndex}-${column.name}`;
+    const existingChange = pendingChanges.get(key);
+    const originalValue = result.rows[rowIndex]?.[colIndex];
+    const oldValue = existingChange ? existingChange.oldValue : originalValue;
+
+    if (oldValue === null && !existingChange) return; // Already null, no change
+
+    const change: CellChange = {
+      rowIndex,
+      columnName: column.name,
+      oldValue,
+      newValue: null,
+    };
+    setPendingChanges((map) => {
+      const newMap = new Map(map);
+      newMap.set(key, change);
+      return newMap;
+    });
+    setChangeHistory((prev) => [...prev, { type: 'edit', key, change }]);
   };
 
   // Row selection
@@ -505,7 +742,7 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   };
 
   return (
-    <div ref={containerRef} className="flex h-full flex-col" tabIndex={-1}>
+    <div ref={containerRef} className="flex h-full flex-col" tabIndex={-1} onContextMenu={(e) => e.preventDefault()}>
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b bg-muted/30 px-4 py-2">
         <Button variant="ghost" size="sm" onClick={loadData} disabled={loading || saving}>
@@ -606,101 +843,126 @@ export default function DataGrid({ connectionId, database, table }: Props) {
             <span>{t('common.loading')}</span>
           </div>
         ) : result && result.columns.length > 0 ? (
-          <ScrollArea className="h-full">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10">
+          <div className="flex-1 overflow-auto h-full">
+              <table className="text-sm" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
+                <thead className="sticky top-0 z-10 bg-muted/60">
                   <tr className="border-b bg-muted/60">
                     <th className="w-12 px-3 py-2 text-center text-xs font-medium text-muted-foreground">#</th>
                     {result.columns.map((col) => (
-                      <th key={col.name} className="whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium">
+                      <th
+                        key={col.name}
+                        style={{ width: columnWidths[col.name] || 160, minWidth: 80 }}
+                        className="relative whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium"
+                      >
                         <div className="flex items-center gap-1.5">
                           {col.is_primary_key && <Badge variant="warning" className="px-1 py-0 text-[9px]">PK</Badge>}
                           <span>{col.name}</span>
                         </div>
                         <span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">{col.data_type}</span>
+                        <div
+                          className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/30"
+                          onMouseDown={(e) => handleColumnResizeStart(e, col.name)}
+                        />
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {/* Existing rows */}
-                  {result.rows.map((row, ri) => {
-                    const isDeleted = deletedRows.has(ri);
-                    const isSelected = selectedRows.has(ri);
+                  {result.rows.length > 0 ? (
+                    result.rows.map((row, ri) => {
+                      const isDeleted = deletedRows.has(ri);
+                      const isSelected = selectedRows.has(ri);
 
-                    return (
-                      <tr
-                        key={ri}
-                        className={cn(
-                          "border-b transition-colors",
-                          isDeleted
-                            ? "bg-red-50 line-through dark:bg-red-950/20"
-                            : isSelected
-                              ? "bg-blue-50 dark:bg-blue-950/20"
-                              : "hover:bg-muted/30",
-                        )}
-                      >
-                        <td
+                      return (
+                        <tr
+                          key={ri}
                           className={cn(
-                            "px-3 py-1.5 text-center text-xs text-muted-foreground cursor-pointer select-none",
-                            isSelected && "font-bold text-blue-600 dark:text-blue-400",
+                            "border-b transition-colors",
+                            isDeleted
+                              ? "bg-red-50 line-through dark:bg-red-950/20"
+                              : isSelected
+                                ? "bg-blue-50 dark:bg-blue-950/20"
+                                : "hover:bg-muted/30",
                           )}
-                          onClick={(e) => handleRowSelect(ri, e.shiftKey)}
                         >
-                          {(page - 1) * pageSize + ri + 1}
-                        </td>
-                        {row.map((_, ci) => {
-                          const cellValue = getCellDisplayValue(ri, ci);
-                          const dirty = isCellDirty(ri, ci);
-                          const isEditing = editingCell?.row === ri && editingCell?.col === ci;
+                          <td
+                            className={cn(
+                              "px-3 py-1.5 text-center text-xs text-muted-foreground cursor-pointer select-none",
+                              isSelected && "font-bold text-blue-600 dark:text-blue-400",
+                            )}
+                            onClick={(e) => handleRowSelect(ri, e.shiftKey)}
+                          >
+                            {(page - 1) * pageSize + ri + 1}
+                          </td>
+                          {row.map((_, ci) => {
+                            const cellValue = getCellDisplayValue(ri, ci);
+                            const dirty = isCellDirty(ri, ci);
+                            const isEditing = editingCell?.row === ri && editingCell?.col === ci;
 
-                          return (
-                            <td
-                              key={ci}
-                              className={cn(
-                                "max-w-[300px] border-l px-4 py-1.5 font-mono text-xs",
-                                cellValue === null && !isEditing && "italic text-muted-foreground/50",
-                                typeof cellValue === 'object' && cellValue !== null && "text-blue-600",
-                                dirty && "bg-amber-50 dark:bg-amber-950/20 border-l-2 border-l-amber-400",
-                                isDeleted && "opacity-50",
-                              )}
-                              onDoubleClick={() => handleCellDoubleClick(ri, ci)}
-                            >
-                              {isEditing ? (
-                                <input
-                                  ref={editInputRef}
-                                  type="text"
-                                  className="w-full bg-white dark:bg-zinc-900 border border-blue-400 rounded px-1 py-0.5 text-xs font-mono outline-none select-text"
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      commitEdit();
-                                    } else if (e.key === 'Escape') {
-                                      e.preventDefault();
-                                      cancelEdit();
-                                    }
-                                    e.stopPropagation();
-                                  }}
-                                  onBlur={() => commitEdit()}
-                                />
-                              ) : (
-                                <span className="truncate block">
-                                  {cellValue === null
-                                    ? 'NULL'
-                                    : typeof cellValue === 'object'
-                                      ? JSON.stringify(cellValue)
-                                      : String(cellValue)}
-                                </span>
-                              )}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
+                            return (
+                              <ContextMenu key={ci}>
+                                <ContextMenuTrigger asChild>
+                                  <td
+                                    style={{ width: columnWidths[result.columns[ci].name] || 160, minWidth: 80 }}
+                                    className={cn(
+                                      "border-l px-4 py-1.5 font-mono text-xs overflow-hidden",
+                                      cellValue === null && !isEditing && "italic text-muted-foreground/50",
+                                      typeof cellValue === 'object' && cellValue !== null && "text-blue-600",
+                                      dirty && "bg-amber-50 dark:bg-amber-950/20 border-l-2 border-l-amber-400",
+                                      isDeleted && "opacity-50",
+                                    )}
+                                    onDoubleClick={() => handleCellDoubleClick(ri, ci)}
+                                  >
+                                    {isEditing ? (
+                                      renderCellEditor()
+                                    ) : (
+                                      <span className="truncate block">
+                                        {cellValue === null
+                                          ? 'NULL'
+                                          : typeof cellValue === 'object'
+                                            ? JSON.stringify(cellValue)
+                                            : String(cellValue)}
+                                      </span>
+                                    )}
+                                  </td>
+                                </ContextMenuTrigger>
+                                <ContextMenuContent>
+                                  <ContextMenuItem
+                                    disabled={!hasPrimaryKey || !result.columns[ci].nullable || isDeleted}
+                                    onClick={() => handleSetNull(ri, ci)}
+                                  >
+                                    设置为 NULL
+                                  </ContextMenuItem>
+                                  <ContextMenuSeparator />
+                                  <ContextMenuItem
+                                    disabled={!hasPrimaryKey || isDeleted}
+                                    onClick={() => handleCellDoubleClick(ri, ci)}
+                                  >
+                                    编辑
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    onClick={() => {
+                                      const v = cellValue === null ? '' : typeof cellValue === 'object' ? JSON.stringify(cellValue) : String(cellValue);
+                                      navigator.clipboard.writeText(v);
+                                    }}
+                                  >
+                                    复制值
+                                  </ContextMenuItem>
+                                </ContextMenuContent>
+                              </ContextMenu>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })
+                  ) : newRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={result.columns.length + 1} className="py-12 text-center text-sm text-muted-foreground">
+                        {t('common.noData')}
+                      </td>
+                    </tr>
+                  ) : null}
 
                   {/* New rows */}
                   {newRows.map((newRow, nri) => (
@@ -712,22 +974,56 @@ export default function DataGrid({ connectionId, database, table }: Props) {
                         +
                       </td>
                       {result.columns.map((col) => (
-                        <td key={col.name} className="border-l px-4 py-1.5 font-mono text-xs">
-                          <input
-                            type="text"
-                            className="w-full bg-transparent border-b border-dashed border-emerald-300 dark:border-emerald-700 px-0 py-0.5 text-xs font-mono outline-none select-text"
-                            placeholder={col.nullable ? 'NULL' : col.name}
-                            value={newRow.values[col.name] === null ? '' : String(newRow.values[col.name])}
-                            onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)}
-                          />
+                        <td
+                          key={col.name}
+                          style={{ width: columnWidths[col.name] || 160, minWidth: 80 }}
+                          className="border-l px-4 py-1.5 font-mono text-xs"
+                        >
+                          {(() => {
+                            const dt = col.data_type.toLowerCase();
+                            const baseClass = "w-full rounded-sm border border-dashed border-emerald-400/60 bg-background px-1.5 py-0.5 text-xs font-mono text-foreground outline-none select-text focus:border-solid focus:border-primary/50 focus:ring-1 focus:ring-primary";
+                            const val = newRow.values[col.name] === null ? '' : String(newRow.values[col.name]);
+
+                            if (dt === 'boolean' || dt === 'bool') {
+                              return (
+                                <select className={baseClass + " cursor-pointer"} value={val} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)}>
+                                  <option value="">NULL</option>
+                                  <option value="true">true</option>
+                                  <option value="false">false</option>
+                                </select>
+                              );
+                            }
+                            if (dt.includes('timestamp') || dt.includes('datetime')) {
+                              return <input type="datetime-local" className={baseClass} value={val || new Date().toISOString().slice(0, 16)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                            }
+                            if (dt === 'date') {
+                              return <input type="date" className={baseClass} value={val || new Date().toISOString().slice(0, 10)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                            }
+                            if (dt === 'time' || dt.includes('time without') || dt.includes('timetz')) {
+                              return <input type="time" className={baseClass} value={val || new Date().toTimeString().slice(0, 8)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                            }
+                            if (dt === 'json' || dt === 'jsonb') {
+                              return <textarea className={baseClass + " h-12 resize-y"} placeholder="{}" value={val} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                            }
+                            const isNum = ['int', 'integer', 'bigint', 'smallint', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'].some(t => dt.includes(t));
+                            return (
+                              <input
+                                type={isNum ? 'number' : 'text'}
+                                step={isNum ? (dt.includes('int') ? '1' : 'any') : undefined}
+                                className={baseClass}
+                                placeholder={col.nullable ? 'NULL' : col.name}
+                                value={val}
+                                onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)}
+                              />
+                            );
+                          })()}
                         </td>
                       ))}
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-          </ScrollArea>
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             {t('common.noData')}
