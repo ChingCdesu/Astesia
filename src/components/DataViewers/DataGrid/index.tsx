@@ -7,10 +7,11 @@ import { QueryResult, ColumnInfo } from '@/types/database';
 import { CellChange, NewRow } from '@/types/editing';
 import {
   RefreshCw, Download, Loader2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  Plus, Trash2, Save, Undo2, AlertTriangle, ClipboardPaste, BarChart3,
+  Plus, Trash2, Save, Undo2, AlertTriangle, Maximize2, BarChart3,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useTabStore } from '@/stores/tabStore';
+import ValueViewer from '@/components/DataViewers/DataGrid/ValueViewer';
 import { notify } from '@/stores/notificationStore';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
@@ -96,6 +97,21 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   const [selectionEnd, setSelectionEnd] = useState<{row: number, col: number} | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
+  // ValueViewer state
+  const [valueViewer, setValueViewer] = useState<{
+    value: any;
+    columnName: string;
+    columnType: string;
+    rowIndex: number;
+    colIndex: number;
+  } | null>(null);
+
+  // WHERE / ORDER BY filter state
+  const [whereClause, setWhereClause] = useState('');
+  const [orderByClause, setOrderByClause] = useState('');
+  const [appliedWhere, setAppliedWhere] = useState('');
+  const [appliedOrderBy, setAppliedOrderBy] = useState('');
+
   const containerRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(null);
 
@@ -119,11 +135,27 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [data, columnMeta] = await Promise.all([
-        invoke<QueryResult>('get_table_data', { connectionId, database, table, page, pageSize }),
-        invoke<ColumnInfo[]>('get_columns', { connectionId, database, table }),
-      ]);
-      // If get_table_data returned empty columns (no rows), use get_columns metadata
+      const columnMeta = await invoke<ColumnInfo[]>('get_columns', { connectionId, database, table });
+
+      const tableName = table.includes('.')
+        ? `"${table.split('.')[0]}"."${table.split('.')[1]}"`
+        : `"${table}"`;
+
+      let data: QueryResult;
+
+      if (appliedWhere || appliedOrderBy) {
+        // Use execute_query with custom SQL when filters are active
+        let sql = `SELECT * FROM ${tableName}`;
+        if (appliedWhere) sql += ` WHERE ${appliedWhere}`;
+        if (appliedOrderBy) sql += ` ORDER BY ${appliedOrderBy}`;
+        sql += ` LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`;
+        data = await invoke<QueryResult>('execute_query', { connectionId, database, sql });
+      } else {
+        // Use standard get_table_data (handles DB-specific pagination)
+        data = await invoke<QueryResult>('get_table_data', { connectionId, database, table, page, pageSize });
+      }
+
+      // If returned empty columns (no rows), use get_columns metadata
       if (data.columns.length === 0 && columnMeta.length > 0) {
         data.columns = columnMeta;
       } else {
@@ -140,11 +172,12 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       }
       setResult(data);
 
-      // Fetch total row count via COUNT query
+      // Fetch total row count via COUNT query (with WHERE if active)
       try {
+        let countSql = `SELECT COUNT(*) FROM ${tableName}`;
+        if (appliedWhere) countSql += ` WHERE ${appliedWhere}`;
         const countResult = await invoke<QueryResult>('execute_query', {
-          connectionId, database,
-          sql: `SELECT COUNT(*) FROM ${table.includes('.') ? `"${table.split('.')[0]}"."${table.split('.')[1]}"` : `"${table}"`}`,
+          connectionId, database, sql: countSql,
         });
         if (countResult.rows.length > 0 && countResult.rows[0].length > 0) {
           const count = Number(countResult.rows[0][0]);
@@ -158,7 +191,7 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [connectionId, database, table, page, pageSize]);
+  }, [connectionId, database, table, page, pageSize, appliedWhere, appliedOrderBy]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -174,7 +207,16 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     setSelectionStart(null);
     setSelectionEnd(null);
     setIsDragging(false);
+    setValueViewer(null);
   }, [connectionId, database, table, page]);
+
+  // Reset filters when table changes (but not on page change)
+  useEffect(() => {
+    setWhereClause('');
+    setOrderByClause('');
+    setAppliedWhere('');
+    setAppliedOrderBy('');
+  }, [connectionId, database, table]);
 
   // Focus edit input when editing cell changes
   useEffect(() => {
@@ -700,7 +742,33 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       const parsedRows = parseClipboardData(text);
       if (parsedRows.length === 0) return;
 
-      // Detect if first row is headers (match column names)
+      // If there's a cell selection start point, paste into existing cells starting from there
+      if (selectionStart) {
+        const startRow = selectionStart.row;
+        const startCol = selectionStart.col;
+
+        parsedRows.forEach((row, rowOffset) => {
+          const targetRow = startRow + rowOffset;
+          if (targetRow >= result.rows.length) return; // Don't paste beyond existing rows
+
+          row.forEach((cell, colOffset) => {
+            const targetCol = startCol + colOffset;
+            if (targetCol >= result.columns.length) return;
+
+            const column = result.columns[targetCol];
+            const key = `${targetRow}-${column.name}`;
+            const oldValue = result.rows[targetRow][targetCol];
+            const newValue = cell === '' || cell === 'NULL' ? null : cell;
+
+            const change: CellChange = { rowIndex: targetRow, columnName: column.name, oldValue, newValue };
+            setPendingChanges(prev => { const m = new Map(prev); m.set(key, change); return m; });
+            setChangeHistory(prev => [...prev, { type: 'edit', key, change }]);
+          });
+        });
+        return;
+      }
+
+      // No selection — add as new rows (existing behavior)
       const columns = result.columns;
       let dataRows = parsedRows;
       let colMapping: number[] = [];
@@ -747,8 +815,17 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     }
   };
 
+  // Get display value for a cell (considering pending changes)
+  const getCellDisplayValue = useCallback((rowIndex: number, colIndex: number): any => {
+    if (!result) return null;
+    const col = result.columns[colIndex];
+    const key = `${rowIndex}-${col.name}`;
+    const change = pendingChanges.get(key);
+    return change ? change.newValue : result.rows[rowIndex][colIndex];
+  }, [result, pendingChanges]);
+
   // Copy selected rows as TSV (for Excel compatibility)
-  const handleCopyRows = () => {
+  const handleCopyRows = useCallback(() => {
     if (!result || selectedRows.size === 0) return;
     const headers = result.columns.map(c => c.name).join('\t');
     const rows = Array.from(selectedRows)
@@ -756,15 +833,17 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       .map(rowIdx =>
         result.columns.map((_, colIdx) => {
           const val = getCellDisplayValue(rowIdx, colIdx);
-          return val === null ? '' : String(val);
+          if (val === null) return '';
+          if (typeof val === 'object') return JSON.stringify(val);
+          return String(val);
         }).join('\t')
       )
       .join('\n');
     navigator.clipboard.writeText(headers + '\n' + rows);
-  };
+  }, [result, selectedRows, getCellDisplayValue]);
 
   // Copy selected cell range as TSV
-  const handleCopyCells = () => {
+  const handleCopyCells = useCallback(() => {
     if (!result || !selectionStart || !selectionEnd) return;
     const minRow = Math.min(selectionStart.row, selectionEnd.row);
     const maxRow = Math.max(selectionStart.row, selectionEnd.row);
@@ -776,21 +855,14 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       const cells: string[] = [];
       for (let c = minCol; c <= maxCol; c++) {
         const val = getCellDisplayValue(r, c);
-        cells.push(val === null ? '' : String(val));
+        if (val === null) cells.push('');
+        else if (typeof val === 'object') cells.push(JSON.stringify(val));
+        else cells.push(String(val));
       }
       rows.push(cells.join('\t'));
     }
     navigator.clipboard.writeText(headers + '\n' + rows.join('\n'));
-  };
-
-  // Get display value for a cell (considering pending changes)
-  const getCellDisplayValue = (rowIndex: number, colIndex: number): any => {
-    if (!result) return null;
-    const col = result.columns[colIndex];
-    const key = `${rowIndex}-${col.name}`;
-    const change = pendingChanges.get(key);
-    return change ? change.newValue : result.rows[rowIndex][colIndex];
-  };
+  }, [result, selectionStart, selectionEnd, getCellDisplayValue]);
 
   // Check if a cell is dirty
   const isCellDirty = (rowIndex: number, colIndex: number): boolean => {
@@ -822,20 +894,6 @@ export default function DataGrid({ connectionId, database, table }: Props) {
           <Download className="mr-1.5 h-3.5 w-3.5" />
           {t('query.export')}
         </Button>
-        <Button variant="ghost" size="sm" onClick={() => {
-          const displayName = table.includes('.') ? table.split('.').pop()! : table;
-          useTabStore.getState().addTab({
-            key: `chart-${connectionId}-${database}-${table}`,
-            label: `${displayName} [图表]`,
-            type: 'data-chart',
-            connectionId,
-            database,
-            table,
-          });
-        }}>
-          <BarChart3 className="mr-1.5 h-3.5 w-3.5" />
-          图表
-        </Button>
 
         <div className="mx-1 h-4 w-px bg-border" />
 
@@ -856,15 +914,6 @@ export default function DataGrid({ connectionId, database, table }: Props) {
         >
           <Trash2 className="mr-1.5 h-3.5 w-3.5" />
           删除行
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handlePaste}
-          disabled={!hasPrimaryKey || saving}
-        >
-          <ClipboardPaste className="mr-1.5 h-3.5 w-3.5" />
-          粘贴
         </Button>
 
         <div className="mx-1 h-4 w-px bg-border" />
@@ -898,6 +947,21 @@ export default function DataGrid({ connectionId, database, table }: Props) {
           </>
         )}
 
+        <div className="mx-1 h-4 w-px bg-border" />
+        <Button variant="ghost" size="sm" onClick={() => {
+          useTabStore.getState().addTab({
+            key: `chart-${connectionId}-${database}-${table}`,
+            label: `${table.split('.').pop()} [图表] [${database}]`,
+            type: 'data-chart' as any,
+            connectionId,
+            database,
+            table,
+          });
+        }}>
+          <BarChart3 className="mr-1.5 h-3.5 w-3.5" />
+          图表
+        </Button>
+
         <div className="ml-auto flex items-center gap-1.5">
           {(() => {
             const tableParts = table.includes('.') ? table.split('.') : [table];
@@ -916,6 +980,44 @@ export default function DataGrid({ connectionId, database, table }: Props) {
             );
           })()}
         </div>
+      </div>
+
+      {/* WHERE / ORDER BY filter bar */}
+      <div className="flex shrink-0 items-center gap-2 border-b bg-muted/20 px-4 py-1">
+        <span className="text-[10px] font-medium text-muted-foreground w-14 shrink-0">WHERE</span>
+        <input
+          className="flex-1 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
+          placeholder="e.g. age > 18 AND name LIKE '%John%'"
+          value={whereClause}
+          onChange={(e) => setWhereClause(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { setAppliedWhere(whereClause); setPage(1); } }}
+        />
+        <span className="text-[10px] font-medium text-muted-foreground w-20 shrink-0">ORDER BY</span>
+        <input
+          className="w-48 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
+          placeholder="e.g. name ASC"
+          value={orderByClause}
+          onChange={(e) => setOrderByClause(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { setAppliedOrderBy(orderByClause); setPage(1); } }}
+        />
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
+          setAppliedWhere(whereClause);
+          setAppliedOrderBy(orderByClause);
+          setPage(1);
+        }}>
+          应用
+        </Button>
+        {(appliedWhere || appliedOrderBy) && (
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
+            setWhereClause('');
+            setOrderByClause('');
+            setAppliedWhere('');
+            setAppliedOrderBy('');
+            setPage(1);
+          }}>
+            清除
+          </Button>
+        )}
       </div>
 
       {/* Table */}
@@ -1084,14 +1186,32 @@ export default function DataGrid({ connectionId, database, table }: Props) {
                                   >
                                     {isEditing ? (
                                       renderCellEditor()
-                                    ) : (
-                                      <span className="truncate block">
-                                        {cellValue === null
-                                          ? 'NULL'
-                                          : typeof cellValue === 'object'
-                                            ? JSON.stringify(cellValue)
-                                            : String(cellValue)}
+                                    ) : cellValue === null ? (
+                                      <span className="truncate block">NULL</span>
+                                    ) : typeof cellValue === 'object' && cellValue !== null ? (
+                                      <span className="flex items-center gap-1">
+                                        <span className="truncate text-blue-600 dark:text-blue-400">
+                                          {JSON.stringify(cellValue).slice(0, 50)}{JSON.stringify(cellValue).length > 50 ? '...' : ''}
+                                        </span>
+                                        <button className="shrink-0 rounded p-0.5 hover:bg-muted" onClick={(e) => {
+                                          e.stopPropagation();
+                                          setValueViewer({ value: cellValue, columnName: result.columns[ci].name, columnType: result.columns[ci].data_type, rowIndex: ri, colIndex: ci });
+                                        }}>
+                                          <Maximize2 className="h-3 w-3 text-muted-foreground" />
+                                        </button>
                                       </span>
+                                    ) : typeof cellValue === 'string' && cellValue.length > 100 ? (
+                                      <span className="flex items-center gap-1">
+                                        <span className="truncate">{cellValue.slice(0, 100)}...</span>
+                                        <button className="shrink-0 rounded p-0.5 hover:bg-muted" onClick={(e) => {
+                                          e.stopPropagation();
+                                          setValueViewer({ value: cellValue, columnName: result.columns[ci].name, columnType: result.columns[ci].data_type, rowIndex: ri, colIndex: ci });
+                                        }}>
+                                          <Maximize2 className="h-3 w-3 text-muted-foreground" />
+                                        </button>
+                                      </span>
+                                    ) : (
+                                      <span className="truncate block">{String(cellValue)}</span>
                                     )}
                                   </td>
                                 </ContextMenuTrigger>
@@ -1213,6 +1333,30 @@ export default function DataGrid({ connectionId, database, table }: Props) {
           <span className="ml-2 text-xs text-muted-foreground">{pageSize} 行/页</span>
         </div>
       </div>
+
+      {/* ValueViewer dialog for JSON/large text */}
+      {valueViewer && (
+        <ValueViewer
+          open={!!valueViewer}
+          onClose={() => setValueViewer(null)}
+          value={valueViewer.value}
+          columnName={valueViewer.columnName}
+          columnType={valueViewer.columnType}
+          readOnly={!hasPrimaryKey}
+          onSave={(newValue) => {
+            const key = `${valueViewer.rowIndex}-${valueViewer.columnName}`;
+            const change: CellChange = {
+              rowIndex: valueViewer.rowIndex,
+              columnName: valueViewer.columnName,
+              oldValue: result!.rows[valueViewer.rowIndex][valueViewer.colIndex],
+              newValue,
+            };
+            setPendingChanges(prev => { const m = new Map(prev); m.set(key, change); return m; });
+            setChangeHistory(prev => [...prev, { type: 'edit', key, change }]);
+            setValueViewer(null);
+          }}
+        />
+      )}
     </div>
   );
 }

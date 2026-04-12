@@ -7,6 +7,7 @@ import { ToastContainer } from './components/ui/toast';
 import CreateResourceDialog from './components/CreateResourceDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import i18n from './i18n';
+import '@/lib/plugins'; // Initialize plugin registry
 import './styles/global.css';
 
 function App() {

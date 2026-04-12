@@ -48,33 +48,48 @@ export default function DataChartView({ connectionId, database, table }: Props) 
   const [xAxis, setXAxis] = useState<string>('');
   const [yAxes, setYAxes] = useState<string[]>([]);
   const [configCollapsed, setConfigCollapsed] = useState(false);
+  const [filterWhere, setFilterWhere] = useState('');
+  const [appliedFilter, setAppliedFilter] = useState('');
 
   // Load ALL data (fetch pages until exhausted)
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const batchSize = 1000;
-      let page = 1;
-      let allRows: any[][] = [];
-      let columns: QueryResult['columns'] = [];
-
-      while (true) {
-        const data = await invoke<QueryResult>('get_table_data', {
-          connectionId, database, table, page, pageSize: batchSize,
+      if (appliedFilter) {
+        // Use custom query with WHERE clause
+        const tableName = table.includes('.')
+          ? `"${table.split('.')[0]}"."${table.split('.')[1]}"`
+          : `"${table}"`;
+        const sql = `SELECT * FROM ${tableName} WHERE ${appliedFilter}`;
+        const data = await invoke<QueryResult>('execute_query', {
+          connectionId, database, sql,
         });
-        if (page === 1) columns = data.columns;
-        allRows = allRows.concat(data.rows);
-        if (data.rows.length < batchSize) break;
-        page++;
-      }
+        setResult(data);
+      } else {
+        // Batch loading without filter
+        const batchSize = 1000;
+        let page = 1;
+        let allRows: any[][] = [];
+        let columns: QueryResult['columns'] = [];
 
-      setResult({ columns, rows: allRows, affected_rows: 0, execution_time_ms: 0 });
+        while (true) {
+          const data = await invoke<QueryResult>('get_table_data', {
+            connectionId, database, table, page, pageSize: batchSize,
+          });
+          if (page === 1) columns = data.columns;
+          allRows = allRows.concat(data.rows);
+          if (data.rows.length < batchSize) break;
+          page++;
+        }
+
+        setResult({ columns, rows: allRows, affected_rows: 0, execution_time_ms: 0 });
+      }
     } catch (e: any) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [connectionId, database, table]);
+  }, [connectionId, database, table, appliedFilter]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -335,6 +350,14 @@ export default function DataChartView({ connectionId, database, table }: Props) 
             ))}
           </SelectContent>
         </Select>
+
+        <input
+          className="flex-1 h-7 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
+          placeholder="WHERE ..."
+          value={filterWhere}
+          onChange={(e) => setFilterWhere(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { setAppliedFilter(filterWhere); } }}
+        />
 
         <Button variant="ghost" size="sm" onClick={loadData} disabled={loading}>
           <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", loading && "animate-spin")} />
