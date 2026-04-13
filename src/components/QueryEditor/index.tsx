@@ -335,13 +335,12 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
               <QueryChartView result={result} />
             ) : (
             <ScrollArea className="h-full">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="text-sm" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
                   <thead className="sticky top-0 z-10">
                     <tr className="border-b bg-muted/60">
                       <th className="w-12 px-3 py-2 text-center text-xs font-medium text-muted-foreground">#</th>
                       {result.columns.map((col) => (
-                        <th key={col.name} className="whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium">
+                        <th key={col.name} style={{ width: 160, minWidth: 80 }} className="whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium">
                           {col.name}
                           <span className="ml-2 font-normal text-muted-foreground">{col.data_type}</span>
                         </th>
@@ -356,18 +355,20 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
                           <td
                             key={ci}
                             className={cn(
-                              "max-w-[300px] truncate border-l px-4 py-1.5 font-mono text-xs",
+                              "border-l px-4 py-1.5 font-mono text-xs overflow-hidden",
                               cell === null && "italic text-muted-foreground/50"
                             )}
+                            style={{ maxWidth: 300 }}
                           >
-                            {cell === null ? 'NULL' : typeof cell === 'object' ? JSON.stringify(cell) : String(cell)}
+                            <span className="truncate block">
+                              {cell === null ? 'NULL' : typeof cell === 'object' ? JSON.stringify(cell) : String(cell)}
+                            </span>
                           </td>
                         ))}
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
             </ScrollArea>
             )
           ) : (
