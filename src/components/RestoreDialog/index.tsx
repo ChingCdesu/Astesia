@@ -19,8 +19,6 @@ interface RestoreDialogProps {
 export default function RestoreDialog({ open: isOpen, onClose, connectionId, database }: RestoreDialogProps) {
   const { t } = useTranslation();
   const [filePath, setFilePath] = useState('');
-  const [loading, setLoading] = useState(false);
-
   const handleBrowse = async () => {
     const selected = await open({
       filters: [{ name: 'SQL Files', extensions: ['sql'] }],
@@ -33,7 +31,6 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
 
   const handleStartRestore = async () => {
     if (!filePath) return;
-    setLoading(true);
     try {
       await invoke('start_restore', {
         connectionId,
@@ -45,8 +42,6 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
     } catch (e) {
       console.error('Restore failed:', e);
       notify.error(t('backup.restore'), String(e));
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -82,7 +77,7 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
           </Button>
           <Button
             onClick={handleStartRestore}
-            disabled={loading || !filePath}
+            disabled={!filePath}
           >
             {t('backup.startRestore')}
           </Button>

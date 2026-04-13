@@ -22,8 +22,13 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     // Cleanup any existing listeners first
     get().cleanupListeners();
 
-    const unlistenProgress = await listen<TaskProgressEvent>('task-progress', (event) => {
+    const unlistenProgress = await listen<TaskProgressEvent>('task-progress', async (event) => {
       const { id, progress, message } = event.payload;
+      const exists = get().tasks.some((task) => task.id === id);
+      if (!exists) {
+        // Task not yet in frontend store — load from backend
+        await get().loadTasks();
+      }
       set((state) => ({
         tasks: state.tasks.map((task) =>
           task.id === id ? { ...task, progress, message } : task

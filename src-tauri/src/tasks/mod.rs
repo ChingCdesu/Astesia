@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use chrono::{DateTime, Utc};
-use tauri::Emitter;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundTask {
@@ -28,7 +28,7 @@ pub enum TaskStatus {
 
 pub struct TaskManager {
     pub tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
-    cancellation_tokens: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    pub cancellation_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl TaskManager {
@@ -39,95 +39,10 @@ impl TaskManager {
         }
     }
 
-    pub async fn submit_task<F>(
-        &self,
-        name: String,
-        app_handle: tauri::AppHandle,
-        task_fn: F,
-    ) -> String
-    where
-        F: FnOnce(String, tauri::AppHandle, tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<Result<(), String>>
-            + Send
-            + 'static,
-    {
-        let id = uuid::Uuid::new_v4().to_string();
-        let token = tokio_util::sync::CancellationToken::new();
-
-        let task = BackgroundTask {
-            id: id.clone(),
-            name: name.clone(),
-            status: TaskStatus::Running,
-            progress: 0.0,
-            message: "开始执行...".to_string(),
-            created_at: Utc::now(),
-            completed_at: None,
-        };
-
-        {
-            let mut tasks = self.tasks.lock().await;
-            tasks.insert(id.clone(), task);
-        }
-        {
-            let mut tokens = self.cancellation_tokens.lock().await;
-            tokens.insert(id.clone(), token.clone());
-        }
-
-        let tasks_ref = self.tasks.clone();
-        let tokens_ref = self.cancellation_tokens.clone();
-        let task_id = id.clone();
-        let app = app_handle.clone();
-
-        let handle = task_fn(task_id.clone(), app_handle, token);
-
-        tokio::spawn(async move {
-            let result = handle.await;
-            let mut tasks = tasks_ref.lock().await;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                match result {
-                    Ok(Ok(())) => {
-                        task.status = TaskStatus::Completed;
-                        task.progress = 1.0;
-                        task.message = "完成".to_string();
-                    }
-                    Ok(Err(e)) => {
-                        task.status = TaskStatus::Failed;
-                        task.message = e;
-                    }
-                    Err(e) => {
-                        task.status = TaskStatus::Failed;
-                        task.message = format!("任务异常: {}", e);
-                    }
-                }
-                task.completed_at = Some(Utc::now());
-            }
-            let _ = app.emit("task-complete", serde_json::json!({
-                "id": task_id,
-            }));
-            // Cleanup token
-            let mut tokens = tokens_ref.lock().await;
-            tokens.remove(&task_id);
-        });
-
-        id
-    }
-
-    pub async fn update_progress(
-        &self,
-        task_id: &str,
-        progress: f32,
-        message: String,
-        app_handle: &tauri::AppHandle,
-    ) {
-        let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.progress = progress;
-            task.message = message.clone();
-        }
-        let _ = app_handle.emit("task-progress", serde_json::json!({
-            "id": task_id,
-            "progress": progress,
-            "message": message,
-        }));
+    /// Register a cancellation token for a task so it can be cancelled via cancel_task.
+    pub async fn register_token(&self, task_id: &str, token: CancellationToken) {
+        let mut tokens = self.cancellation_tokens.lock().await;
+        tokens.insert(task_id.to_string(), token);
     }
 
     pub async fn list_tasks(&self) -> Vec<BackgroundTask> {

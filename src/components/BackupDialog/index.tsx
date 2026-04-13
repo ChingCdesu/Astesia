@@ -26,7 +26,6 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
   const [addDropTable, setAddDropTable] = useState(false);
   const [addDropIfExists, setAddDropIfExists] = useState(false);
   const [outputPath, setOutputPath] = useState('');
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (open && connectionId && database) {
@@ -66,7 +65,6 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
 
   const handleStartBackup = async () => {
     if (!outputPath) return;
-    setLoading(true);
     try {
       await invoke('start_backup', {
         connectionId,
@@ -85,8 +83,6 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
     } catch (e) {
       console.error('Backup failed:', e);
       notify.error(t('backup.title'), String(e));
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -194,7 +190,7 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
           </Button>
           <Button
             onClick={handleStartBackup}
-            disabled={loading || !outputPath || selectedTables.size === 0}
+            disabled={!outputPath || selectedTables.size === 0}
           >
             {t('backup.start')}
           </Button>
