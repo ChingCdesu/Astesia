@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { invoke } from '@tauri-apps/api/core';
@@ -61,7 +61,93 @@ interface Props {
   connectionId: string;
   database: string;
   table: string;
+  dbType?: string;
 }
+
+/** Quote a SQL identifier based on database type */
+function quoteIdent(name: string, dbType?: string): string {
+  switch (dbType) {
+    case 'mysql':
+    case 'sqlite':
+      return `\`${name}\``;
+    case 'sqlserver':
+      return `[${name}]`;
+    case 'postgresql':
+    default:
+      return `"${name}"`;
+  }
+}
+
+/** Extracted filter bar component — isolated state prevents re-rendering the entire DataGrid */
+const FilterBar = memo(function FilterBar({
+  onApply,
+  onClear,
+  hasApplied,
+  table,
+}: {
+  onApply: (where: string, orderBy: string) => void;
+  onClear: () => void;
+  hasApplied: boolean;
+  table: string;
+}) {
+  const whereRef = useRef<HTMLInputElement>(null);
+  const orderByRef = useRef<HTMLInputElement>(null);
+
+  // Reset inputs when table changes
+  useEffect(() => {
+    if (whereRef.current) whereRef.current.value = '';
+    if (orderByRef.current) orderByRef.current.value = '';
+  }, [table]);
+
+  const handleApply = useCallback(() => {
+    onApply(whereRef.current?.value || '', orderByRef.current?.value || '');
+  }, [onApply]);
+
+  const handleClear = useCallback(() => {
+    if (whereRef.current) whereRef.current.value = '';
+    if (orderByRef.current) orderByRef.current.value = '';
+    onClear();
+  }, [onClear]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleApply();
+  }, [handleApply]);
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b bg-muted/20 px-4 py-1">
+      <span className="text-[10px] font-medium text-muted-foreground w-14 shrink-0">WHERE</span>
+      <input
+        ref={whereRef}
+        className="flex-1 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
+        placeholder="e.g. age > 18 AND name LIKE '%John%'"
+        spellCheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        onKeyDown={handleKeyDown}
+      />
+      <span className="text-[10px] font-medium text-muted-foreground w-20 shrink-0">ORDER BY</span>
+      <input
+        ref={orderByRef}
+        className="w-48 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
+        placeholder="e.g. name ASC"
+        spellCheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        onKeyDown={handleKeyDown}
+      />
+      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={handleApply}>
+        应用
+      </Button>
+      {hasApplied && (
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={handleClear}>
+          清除
+        </Button>
+      )}
+    </div>
+  );
+});
 
 interface HistoryEntry {
   type: 'edit' | 'delete' | 'insert';
@@ -71,7 +157,7 @@ interface HistoryEntry {
   newRowIndex?: number;
 }
 
-export default function DataGrid({ connectionId, database, table }: Props) {
+export default function DataGrid({ connectionId, database, table, dbType }: Props) {
   const { t } = useTranslation();
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -106,11 +192,21 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     colIndex: number;
   } | null>(null);
 
-  // WHERE / ORDER BY filter state
-  const [whereClause, setWhereClause] = useState('');
-  const [orderByClause, setOrderByClause] = useState('');
+  // WHERE / ORDER BY filter state (only "applied" values, input is uncontrolled in FilterBar)
   const [appliedWhere, setAppliedWhere] = useState('');
   const [appliedOrderBy, setAppliedOrderBy] = useState('');
+
+  const handleFilterApply = useCallback((where: string, orderBy: string) => {
+    setAppliedWhere(where);
+    setAppliedOrderBy(orderBy);
+    setPage(1);
+  }, []);
+
+  const handleFilterClear = useCallback(() => {
+    setAppliedWhere('');
+    setAppliedOrderBy('');
+    setPage(1);
+  }, []);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(null);
@@ -138,8 +234,8 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       const columnMeta = await invoke<ColumnInfo[]>('get_columns', { connectionId, database, table });
 
       const tableName = table.includes('.')
-        ? `"${table.split('.')[0]}"."${table.split('.')[1]}"`
-        : `"${table}"`;
+        ? `${quoteIdent(table.split('.')[0], dbType)}.${quoteIdent(table.split('.')[1], dbType)}`
+        : quoteIdent(table, dbType);
 
       let data: QueryResult;
 
@@ -148,7 +244,14 @@ export default function DataGrid({ connectionId, database, table }: Props) {
         let sql = `SELECT * FROM ${tableName}`;
         if (appliedWhere) sql += ` WHERE ${appliedWhere}`;
         if (appliedOrderBy) sql += ` ORDER BY ${appliedOrderBy}`;
-        sql += ` LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`;
+        // DB-specific pagination
+        if (dbType === 'sqlserver') {
+          // SQL Server requires ORDER BY for OFFSET/FETCH
+          if (!appliedOrderBy) sql += ' ORDER BY (SELECT NULL)';
+          sql += ` OFFSET ${(page - 1) * pageSize} ROWS FETCH NEXT ${pageSize} ROWS ONLY`;
+        } else {
+          sql += ` LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`;
+        }
         data = await invoke<QueryResult>('execute_query', { connectionId, database, sql });
       } else {
         // Use standard get_table_data (handles DB-specific pagination)
@@ -191,7 +294,7 @@ export default function DataGrid({ connectionId, database, table }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [connectionId, database, table, page, pageSize, appliedWhere, appliedOrderBy]);
+  }, [connectionId, database, table, page, pageSize, appliedWhere, appliedOrderBy, dbType]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -212,8 +315,6 @@ export default function DataGrid({ connectionId, database, table }: Props) {
 
   // Reset filters when table changes (but not on page change)
   useEffect(() => {
-    setWhereClause('');
-    setOrderByClause('');
     setAppliedWhere('');
     setAppliedOrderBy('');
   }, [connectionId, database, table]);
@@ -248,6 +349,10 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   // Keyboard shortcuts handler (Ctrl+Z, Ctrl+V, Ctrl+C)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip custom shortcuts when focus is inside an input/textarea (e.g. filter bar, cell editor)
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         handleUndo();
@@ -361,11 +466,27 @@ export default function DataGrid({ connectionId, database, table }: Props) {
   // Known standard SQL text types (used to skip enum lookup)
   const knownTextTypes = ['character varying', 'varchar', 'text', 'char', 'character', 'nvarchar', 'nchar', 'ntext', 'longtext', 'mediumtext', 'tinytext', 'string', 'uuid', 'xml', 'cidr', 'inet', 'macaddr', 'money', 'bytea', 'array'];
 
+  // Move edit focus to an adjacent cell (commits current edit first).
+  // Skips deleted rows and stays within existing (non-new) row range.
+  const moveEditingCell = (rowDelta: number) => {
+    if (!editingCell || !result) return;
+    let newRow = editingCell.row + rowDelta;
+    while (newRow >= 0 && newRow < result.rows.length && deletedRows.has(newRow)) {
+      newRow += rowDelta;
+    }
+    if (newRow < 0 || newRow >= result.rows.length) return;
+    const newCol = editingCell.col;
+    commitEdit();
+    setTimeout(() => handleCellDoubleClick(newRow, newCol), 0);
+  };
+
   // Render the appropriate cell editor based on column type
   const renderCellEditor = () => {
     const editorKeyDown = (e: React.KeyboardEvent) => {
       if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-      if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); moveEditingCell(-1); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); moveEditingCell(1); }
       e.stopPropagation();
     };
 
@@ -419,6 +540,10 @@ export default function DataGrid({ connectionId, database, table }: Props) {
             if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
             e.stopPropagation();
           }}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
         />
       );
     }
@@ -434,6 +559,10 @@ export default function DataGrid({ connectionId, database, table }: Props) {
           onChange={(e) => setEditValue(e.target.value)}
           onBlur={commitEdit}
           onKeyDown={editorKeyDown}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
         />
       );
     }
@@ -449,6 +578,10 @@ export default function DataGrid({ connectionId, database, table }: Props) {
           onChange={(e) => setEditValue(e.target.value)}
           onBlur={commitEdit}
           onKeyDown={editorKeyDown}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
         />
       );
     }
@@ -461,12 +594,12 @@ export default function DataGrid({ connectionId, database, table }: Props) {
         className={editorInputClass}
         value={editValue}
         onChange={(e) => setEditValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-          else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
-          e.stopPropagation();
-        }}
+        onKeyDown={editorKeyDown}
         onBlur={() => commitEdit()}
+        spellCheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
       />
     );
   };
@@ -983,42 +1116,12 @@ export default function DataGrid({ connectionId, database, table }: Props) {
       </div>
 
       {/* WHERE / ORDER BY filter bar */}
-      <div className="flex shrink-0 items-center gap-2 border-b bg-muted/20 px-4 py-1">
-        <span className="text-[10px] font-medium text-muted-foreground w-14 shrink-0">WHERE</span>
-        <input
-          className="flex-1 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
-          placeholder="e.g. age > 18 AND name LIKE '%John%'"
-          value={whereClause}
-          onChange={(e) => setWhereClause(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { setAppliedWhere(whereClause); setPage(1); } }}
-        />
-        <span className="text-[10px] font-medium text-muted-foreground w-20 shrink-0">ORDER BY</span>
-        <input
-          className="w-48 h-6 rounded border border-input bg-transparent px-2 text-xs font-mono select-text focus:outline-none focus:ring-1 focus:ring-primary"
-          placeholder="e.g. name ASC"
-          value={orderByClause}
-          onChange={(e) => setOrderByClause(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { setAppliedOrderBy(orderByClause); setPage(1); } }}
-        />
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
-          setAppliedWhere(whereClause);
-          setAppliedOrderBy(orderByClause);
-          setPage(1);
-        }}>
-          应用
-        </Button>
-        {(appliedWhere || appliedOrderBy) && (
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => {
-            setWhereClause('');
-            setOrderByClause('');
-            setAppliedWhere('');
-            setAppliedOrderBy('');
-            setPage(1);
-          }}>
-            清除
-          </Button>
-        )}
-      </div>
+      <FilterBar
+        table={table}
+        hasApplied={!!(appliedWhere || appliedOrderBy)}
+        onApply={handleFilterApply}
+        onClear={handleFilterClear}
+      />
 
       {/* Table */}
       <div className="flex-1 overflow-hidden">
@@ -1095,16 +1198,16 @@ export default function DataGrid({ connectionId, database, table }: Props) {
                                     );
                                   }
                                   if (dt.includes('timestamp') || dt.includes('datetime')) {
-                                    return <input type="datetime-local" className={baseClass} value={val || new Date().toISOString().slice(0, 16)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                                    return <input type="datetime-local" className={baseClass} value={val || new Date().toISOString().slice(0, 16)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} spellCheck={false} autoComplete="off" autoCorrect="off" autoCapitalize="off" />;
                                   }
                                   if (dt === 'date') {
-                                    return <input type="date" className={baseClass} value={val || new Date().toISOString().slice(0, 10)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                                    return <input type="date" className={baseClass} value={val || new Date().toISOString().slice(0, 10)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} spellCheck={false} autoComplete="off" autoCorrect="off" autoCapitalize="off" />;
                                   }
                                   if (dt === 'time' || dt.includes('time without') || dt.includes('timetz')) {
-                                    return <input type="time" className={baseClass} value={val || new Date().toTimeString().slice(0, 8)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                                    return <input type="time" className={baseClass} value={val || new Date().toTimeString().slice(0, 8)} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} spellCheck={false} autoComplete="off" autoCorrect="off" autoCapitalize="off" />;
                                   }
                                   if (dt === 'json' || dt === 'jsonb') {
-                                    return <textarea className={baseClass + " h-12 resize-y"} placeholder="{}" value={val} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} />;
+                                    return <textarea className={baseClass + " h-12 resize-y"} placeholder="{}" value={val} onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)} spellCheck={false} autoComplete="off" autoCorrect="off" autoCapitalize="off" />;
                                   }
                                   const isNum = ['int', 'integer', 'bigint', 'smallint', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'].some(t => dt.includes(t));
                                   return (
@@ -1115,6 +1218,10 @@ export default function DataGrid({ connectionId, database, table }: Props) {
                                       placeholder={col.nullable ? 'NULL' : col.name}
                                       value={val}
                                       onChange={(e) => handleNewRowCellChange(nri, col.name, e.target.value)}
+                                      spellCheck={false}
+                                      autoComplete="off"
+                                      autoCorrect="off"
+                                      autoCapitalize="off"
                                     />
                                   );
                                 })()}
@@ -1173,6 +1280,7 @@ export default function DataGrid({ connectionId, database, table }: Props) {
                                     onDoubleClick={() => handleCellDoubleClick(ri, ci)}
                                     onMouseDown={(e) => {
                                       if (e.detail === 2) return; // double-click handled separately
+                                      if (isEditing) return; // allow caret positioning inside active editor
                                       setSelectionStart({ row: ri, col: ci });
                                       setSelectionEnd({ row: ri, col: ci });
                                       setIsDragging(true);

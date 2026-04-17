@@ -137,7 +137,7 @@ export default function AppLayout() {
           />
         );
       case 'table-data':
-        return <DataGrid connectionId={tab.connectionId} database={tab.database} table={tab.table!} />;
+        return <DataGrid connectionId={tab.connectionId} database={tab.database} table={tab.table!} dbType={connDbType} />;
       case 'table-structure':
         return <TableStructure connectionId={tab.connectionId} database={tab.database} table={tab.table!} />;
       case 'view-definition':
