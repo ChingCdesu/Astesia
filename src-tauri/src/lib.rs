@@ -38,6 +38,7 @@ pub fn run() {
             commands::connection::disconnect_database,
             commands::connection::get_default_port,
             commands::query::execute_query,
+            commands::query::execute_statements,
             commands::query::get_table_data,
             commands::schema::get_databases,
             commands::schema::get_tables,

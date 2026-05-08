@@ -7,13 +7,14 @@ import {
 } from '@/components/ui/context-menu';
 import {
   Table2, ChevronRight, ChevronDown, Eye, Columns, Code,
-  FunctionSquare, Workflow, Zap, Copy, BarChart3, Pencil, Trash2, RefreshCw,
+  FunctionSquare, Workflow, Zap, Copy, BarChart3, Pencil, Trash2, RefreshCw, Loader2,
 } from 'lucide-react';
 import type { SqlDatabaseTreeProps } from './types';
 import { VirtualList } from './VirtualList';
 import { useCreateResourceStore } from '@/stores/createResourceStore';
 import { notify } from '@/stores/notificationStore';
 import { confirm } from '@/stores/confirmStore';
+import { useConnectionStore, loadingKey } from '@/stores/connectionStore';
 import { getDropTableSQL, getRenameTableSQL, getDropViewSQL, getDropFunctionSQL, getDropProcedureSQL, getDropTriggerSQL } from './sqlHelpers';
 
 export default function SqlDatabaseTree({
@@ -25,6 +26,12 @@ export default function SqlDatabaseTree({
 }: SqlDatabaseTreeProps) {
   const { t } = useTranslation();
   const { openDialog } = useCreateResourceStore();
+  const loadingKeys = useConnectionStore((s) => s.loadingKeys);
+  const tablesLoading = loadingKeys.has(loadingKey.tables(conn.id, db));
+  const viewsLoading = loadingKeys.has(loadingKey.views(conn.id, db));
+  const functionsLoading = loadingKeys.has(loadingKey.functions(conn.id, db));
+  const proceduresLoading = loadingKeys.has(loadingKey.procedures(conn.id, db));
+  const triggersLoading = loadingKeys.has(loadingKey.triggers(conn.id, db));
 
   const handleRenameTable = async (tableName: string) => {
     const newName = window.prompt(t('sidebar.renameTable'), tableName);
@@ -137,9 +144,11 @@ export default function SqlDatabaseTree({
           if (!tablesExpanded) loadTables(conn.id, db);
         }}
       >
-        {tablesExpanded
-          ? <ChevronDown className="h-2.5 w-2.5 shrink-0" />
-          : <ChevronRight className="h-2.5 w-2.5 shrink-0" />
+        {tablesLoading
+          ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" />
+          : tablesExpanded
+            ? <ChevronDown className="h-2.5 w-2.5 shrink-0" />
+            : <ChevronRight className="h-2.5 w-2.5 shrink-0" />
         }
         <Table2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
         <span>{t('sidebar.tables')} ({tables.length})</span>
@@ -210,7 +219,7 @@ export default function SqlDatabaseTree({
         className="flex w-full items-center gap-2 rounded-md py-1 pl-14 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
         onClick={() => { toggleExpand(viewsKey); if (!viewsExpanded) loadViews(conn.id, db); }}
       >
-        {viewsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+        {viewsLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : viewsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
         <Eye className="h-3.5 w-3.5 shrink-0 text-blue-500" />
         <span>{t('sidebar.views')} ({views.length})</span>
       </button>
@@ -247,7 +256,7 @@ export default function SqlDatabaseTree({
         className="flex w-full items-center gap-2 rounded-md py-1 pl-14 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
         onClick={() => { toggleExpand(functionsKey); if (!functionsExpanded) loadFunctions(conn.id, db); }}
       >
-        {functionsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+        {functionsLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : functionsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
         <FunctionSquare className="h-3.5 w-3.5 shrink-0 text-purple-500" />
         <span>{t('sidebar.functions')} ({functions.length})</span>
       </button>
@@ -284,7 +293,7 @@ export default function SqlDatabaseTree({
         className="flex w-full items-center gap-2 rounded-md py-1 pl-14 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
         onClick={() => { toggleExpand(proceduresKey); if (!proceduresExpanded) loadProcedures(conn.id, db); }}
       >
-        {proceduresExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+        {proceduresLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : proceduresExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
         <Workflow className="h-3.5 w-3.5 shrink-0 text-orange-500" />
         <span>{t('sidebar.procedures')} ({procedures.length})</span>
       </button>
@@ -321,7 +330,7 @@ export default function SqlDatabaseTree({
         className="flex w-full items-center gap-2 rounded-md py-1 pl-14 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
         onClick={() => { toggleExpand(triggersKey); if (!triggersExpanded) loadTriggers(conn.id, db); }}
       >
-        {triggersExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+        {triggersLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : triggersExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
         <Zap className="h-3.5 w-3.5 shrink-0 text-yellow-500" />
         <span>{t('sidebar.triggers')} ({triggers.length})</span>
       </button>

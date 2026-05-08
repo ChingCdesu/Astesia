@@ -43,6 +43,10 @@ export default function DataChartView({ connectionId, database, table }: Props) 
 
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
+  /// Number of rows fetched so far during batch loading. Surfaced as
+  /// "loaded N rows" so the user can see the table-scan making progress
+  /// instead of staring at a static spinner.
+  const [loadedRows, setLoadedRows] = useState(0);
 
   const [chartType, setChartType] = useState<ChartType>('bar');
   const [xAxis, setXAxis] = useState<string>('');
@@ -54,6 +58,7 @@ export default function DataChartView({ connectionId, database, table }: Props) 
   // Load ALL data (fetch pages until exhausted)
   const loadData = useCallback(async () => {
     setLoading(true);
+    setLoadedRows(0);
     try {
       if (appliedFilter) {
         // Use custom query with WHERE clause
@@ -65,10 +70,12 @@ export default function DataChartView({ connectionId, database, table }: Props) 
           connectionId, database, sql,
         });
         setResult(data);
+        setLoadedRows(data.rows.length);
       } else {
         // Batch loading without filter
         const batchSize = 1000;
         let page = 1;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let allRows: any[][] = [];
         let columns: QueryResult['columns'] = [];
 
@@ -78,13 +85,14 @@ export default function DataChartView({ connectionId, database, table }: Props) 
           });
           if (page === 1) columns = data.columns;
           allRows = allRows.concat(data.rows);
+          setLoadedRows(allRows.length);
           if (data.rows.length < batchSize) break;
           page++;
         }
 
         setResult({ columns, rows: allRows, affected_rows: 0, execution_time_ms: 0 });
       }
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
@@ -487,9 +495,12 @@ export default function DataChartView({ connectionId, database, table }: Props) 
         {/* Chart area */}
         <div className="flex-1 overflow-hidden p-4">
           {loading && !result ? (
-            <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
-              <span>{t('common.loading')}</span>
+              <span className="text-sm">{t('common.loading')}</span>
+              {loadedRows > 0 && (
+                <span className="font-mono text-xs">{loadedRows.toLocaleString()} {t('query.rows')}</span>
+              )}
             </div>
           ) : (
             <div className="h-full w-full">
@@ -502,7 +513,9 @@ export default function DataChartView({ connectionId, database, table }: Props) 
       {/* Status bar */}
       <div className="flex shrink-0 items-center border-t bg-muted/30 px-4 py-1.5">
         <span className="text-xs text-muted-foreground">
-          {result ? `${result.rows.length} ${t('query.rows')}` : ''}
+          {loading && result
+            ? `${loadedRows.toLocaleString()} ${t('query.rows')} (${t('common.loading')})`
+            : result ? `${result.rows.length.toLocaleString()} ${t('query.rows')}` : ''}
         </span>
       </div>
     </div>

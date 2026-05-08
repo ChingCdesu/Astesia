@@ -20,6 +20,14 @@ interface TreeNode {
 interface ConnectionStore {
   connections: ConnectionConfig[];
   treeData: Record<string, TreeNode>;
+  /// Connection IDs currently mid-connect. Sidebar reads this to render a
+  /// spinner on the connection node while the user waits for the network
+  /// handshake to finish.
+  connectingIds: Set<string>;
+  /// Granular loading keys for sub-resources, e.g. `tables:${connId}:${db}`.
+  /// Components key off this set to render per-node spinners during expand /
+  /// refresh operations.
+  loadingKeys: Set<string>;
   activeConnectionId: string | null;
   activeDatabase: string | null;
 
@@ -46,9 +54,37 @@ interface ConnectionStore {
   toggleExpand: (connectionId: string, key: string) => void;
 }
 
+const addToSet = <T>(set: Set<T>, value: T): Set<T> => {
+  const next = new Set(set);
+  next.add(value);
+  return next;
+};
+
+const removeFromSet = <T>(set: Set<T>, value: T): Set<T> => {
+  if (!set.has(value)) return set;
+  const next = new Set(set);
+  next.delete(value);
+  return next;
+};
+
+/// Canonical loading-key builders, kept here so producers and consumers
+/// (Sidebar, tree components) agree on the exact string shape.
+export const loadingKey = {
+  databases: (connId: string) => `databases:${connId}`,
+  schemas: (connId: string, db: string) => `schemas:${connId}:${db}`,
+  tables: (connId: string, db: string) => `tables:${connId}:${db}`,
+  views: (connId: string, db: string) => `views:${connId}:${db}`,
+  functions: (connId: string, db: string) => `functions:${connId}:${db}`,
+  procedures: (connId: string, db: string) => `procedures:${connId}:${db}`,
+  triggers: (connId: string, db: string) => `triggers:${connId}:${db}`,
+  users: (connId: string) => `users:${connId}`,
+};
+
 export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   connections: [],
   treeData: {},
+  connectingIds: new Set<string>(),
+  loadingKeys: new Set<string>(),
   activeConnectionId: null,
   activeDatabase: null,
 
@@ -77,33 +113,41 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   connectDatabase: async (id) => {
     const config = get().connections.find((c) => c.id === id);
     if (!config) return { success: false, message: '连接配置不存在' };
-
-    const result = await invoke<ConnectionResult>('connect_database', { config });
-    if (result.success) {
-      set((state) => ({
-        treeData: {
-          ...state.treeData,
-          [id]: {
-            connectionId: id,
-            databases: [],
-            schemas: {},
-            tables: {},
-            views: {},
-            functions: {},
-            procedures: {},
-            triggers: {},
-            users: [],
-            expanded: new Set(),
-            connected: true,
-          },
-        },
-        activeConnectionId: id,
-      }));
-      await get().loadDatabases(id);
-    } else {
-      notify.error('连接失败', result.message);
+    if (get().connectingIds.has(id)) {
+      return { success: false, message: '正在连接中' };
     }
-    return result;
+
+    set((state) => ({ connectingIds: addToSet(state.connectingIds, id) }));
+    try {
+      const result = await invoke<ConnectionResult>('connect_database', { config });
+      if (result.success) {
+        set((state) => ({
+          treeData: {
+            ...state.treeData,
+            [id]: {
+              connectionId: id,
+              databases: [],
+              schemas: {},
+              tables: {},
+              views: {},
+              functions: {},
+              procedures: {},
+              triggers: {},
+              users: [],
+              expanded: new Set(),
+              connected: true,
+            },
+          },
+          activeConnectionId: id,
+        }));
+        await get().loadDatabases(id);
+      } else {
+        notify.error('连接失败', result.message);
+      }
+      return result;
+    } finally {
+      set((state) => ({ connectingIds: removeFromSet(state.connectingIds, id) }));
+    }
   },
 
   disconnectDatabase: async (id) => {
@@ -124,10 +168,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   },
 
   loadDatabases: async (connectionId) => {
+    const key = loadingKey.databases(connectionId);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
-      const databases = await invoke<string[]>('get_databases', {
-        connectionId,
-      });
+      const databases = await invoke<string[]>('get_databases', { connectionId });
       set((state) => ({
         treeData: {
           ...state.treeData,
@@ -137,18 +181,19 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load databases:', e);
       notify.error('加载数据库失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadSchemas: async (connectionId, database) => {
+    const key = loadingKey.schemas(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
-      const schemas = await invoke<string[]>('get_schemas', {
-        connectionId,
-        database,
-      });
+      const schemas = await invoke<string[]>('get_schemas', { connectionId, database });
       set((state) => ({
         treeData: {
           ...state.treeData,
@@ -161,18 +206,19 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load schemas:', e);
       notify.error('加载Schema失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadTables: async (connectionId, database) => {
+    const key = loadingKey.tables(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
-      const tables = await invoke<TableInfo[]>('get_tables', {
-        connectionId,
-        database,
-      });
+      const tables = await invoke<TableInfo[]>('get_tables', { connectionId, database });
       set((state) => ({
         treeData: {
           ...state.treeData,
@@ -185,13 +231,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load tables:', e);
       notify.error('加载表失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadViews: async (connectionId, database) => {
+    const key = loadingKey.views(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
       const views = await invoke<ViewInfo[]>('get_views', { connectionId, database });
       set((state) => ({
@@ -206,13 +256,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load views:', e);
       notify.error('加载视图失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadFunctions: async (connectionId, database) => {
+    const key = loadingKey.functions(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
       const functions = await invoke<FunctionInfo[]>('get_functions', { connectionId, database });
       set((state) => ({
@@ -227,13 +281,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load functions:', e);
       notify.error('加载函数失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadProcedures: async (connectionId, database) => {
+    const key = loadingKey.procedures(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
       const procedures = await invoke<ProcedureInfo[]>('get_procedures', { connectionId, database });
       set((state) => ({
@@ -248,13 +306,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load procedures:', e);
       notify.error('加载存储过程失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadTriggers: async (connectionId, database) => {
+    const key = loadingKey.triggers(connectionId, database);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
       const triggers = await invoke<TriggerInfo[]>('get_triggers', { connectionId, database });
       set((state) => ({
@@ -269,13 +331,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load triggers:', e);
       notify.error('加载触发器失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 
   loadUsers: async (connectionId) => {
+    const key = loadingKey.users(connectionId);
+    set((state) => ({ loadingKeys: addToSet(state.loadingKeys, key) }));
     try {
       const users = await invoke<UserInfo[]>('get_users', { connectionId });
       set((state) => ({
@@ -287,9 +353,11 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           },
         },
       }));
-    } catch (e: any) {
+    } catch (e) {
       console.error('Failed to load users:', e);
       notify.error('加载用户失败', typeof e === 'string' ? e : String(e));
+    } finally {
+      set((state) => ({ loadingKeys: removeFromSet(state.loadingKeys, key) }));
     }
   },
 

@@ -8,13 +8,14 @@ import {
 import {
   Table2, ChevronRight, ChevronDown, Eye, Columns, Code,
   FunctionSquare, Workflow, Zap, Copy, Layers, BarChart3,
-  Pencil, Trash2, GitBranch, RefreshCw,
+  Pencil, Trash2, GitBranch, RefreshCw, Loader2,
 } from 'lucide-react';
 import type { PostgresTreeProps } from './types';
 import { VirtualList } from './VirtualList';
 import { useCreateResourceStore } from '@/stores/createResourceStore';
 import { notify } from '@/stores/notificationStore';
 import { confirm } from '@/stores/confirmStore';
+import { useConnectionStore, loadingKey } from '@/stores/connectionStore';
 import {
   getDropTableSQL, getRenameTableSQL, getDropViewSQL,
   getDropFunctionSQL, getDropProcedureSQL, getDropTriggerSQL,
@@ -32,6 +33,12 @@ export default function PostgresTree({
 }: PostgresTreeProps) {
   const { t } = useTranslation();
   const { openDialog } = useCreateResourceStore();
+  const loadingKeys = useConnectionStore((s) => s.loadingKeys);
+  const tablesLoading = loadingKeys.has(loadingKey.tables(conn.id, db));
+  const viewsLoading = loadingKeys.has(loadingKey.views(conn.id, db));
+  const functionsLoading = loadingKeys.has(loadingKey.functions(conn.id, db));
+  const proceduresLoading = loadingKeys.has(loadingKey.procedures(conn.id, db));
+  const triggersLoading = loadingKeys.has(loadingKey.triggers(conn.id, db));
 
   const handleRenameTable = async (qualifiedName: string) => {
     const parts = qualifiedName.split('.');
@@ -246,9 +253,11 @@ export default function PostgresTree({
                     if (!schemaTablesExpanded) loadTables(conn.id, db);
                   }}
                 >
-                  {schemaTablesExpanded
-                    ? <ChevronDown className="h-2.5 w-2.5 shrink-0" />
-                    : <ChevronRight className="h-2.5 w-2.5 shrink-0" />
+                  {tablesLoading
+                    ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" />
+                    : schemaTablesExpanded
+                      ? <ChevronDown className="h-2.5 w-2.5 shrink-0" />
+                      : <ChevronRight className="h-2.5 w-2.5 shrink-0" />
                   }
                   <Table2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                   <span>{t('sidebar.tables')} ({schemaTables.length})</span>
@@ -322,7 +331,7 @@ export default function PostgresTree({
                   className="flex w-full items-center gap-2 rounded-md py-1 pl-20 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
                   onClick={() => { toggleExpand(schemaViewsKey); if (!schemaViewsExpanded) loadViews(conn.id, db); }}
                 >
-                  {schemaViewsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+                  {viewsLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : schemaViewsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
                   <Eye className="h-3.5 w-3.5 shrink-0 text-blue-500" />
                   <span>{t('sidebar.views')} ({schemaViews.length})</span>
                 </button>
@@ -362,7 +371,7 @@ export default function PostgresTree({
                   className="flex w-full items-center gap-2 rounded-md py-1 pl-20 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
                   onClick={() => { toggleExpand(schemaFunctionsKey); if (!schemaFunctionsExpanded) loadFunctions(conn.id, db); }}
                 >
-                  {schemaFunctionsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+                  {functionsLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : schemaFunctionsExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
                   <FunctionSquare className="h-3.5 w-3.5 shrink-0 text-purple-500" />
                   <span>{t('sidebar.functions')} ({schemaFunctions.length})</span>
                 </button>
@@ -402,7 +411,7 @@ export default function PostgresTree({
                   className="flex w-full items-center gap-2 rounded-md py-1 pl-20 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
                   onClick={() => { toggleExpand(schemaProceduresKey); if (!schemaProceduresExpanded) loadProcedures(conn.id, db); }}
                 >
-                  {schemaProceduresExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+                  {proceduresLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : schemaProceduresExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
                   <Workflow className="h-3.5 w-3.5 shrink-0 text-orange-500" />
                   <span>{t('sidebar.procedures')} ({schemaProcedures.length})</span>
                 </button>
@@ -442,7 +451,7 @@ export default function PostgresTree({
                   className="flex w-full items-center gap-2 rounded-md py-1 pl-20 pr-2.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent"
                   onClick={() => { toggleExpand(schemaTriggersKey); if (!schemaTriggersExpanded) loadTriggers(conn.id, db); }}
                 >
-                  {schemaTriggersExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
+                  {triggersLoading ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" /> : schemaTriggersExpanded ? <ChevronDown className="h-2.5 w-2.5 shrink-0" /> : <ChevronRight className="h-2.5 w-2.5 shrink-0" />}
                   <Zap className="h-3.5 w-3.5 shrink-0 text-yellow-500" />
                   <span>{t('sidebar.triggers')} ({schemaTriggers.length})</span>
                 </button>

@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { TableInfo } from '@/types/database';
 import { notify } from '@/stores/notificationStore';
+import { Loader2 } from 'lucide-react';
 
 interface BackupDialogProps {
   open: boolean;
@@ -20,6 +21,8 @@ interface BackupDialogProps {
 export default function BackupDialog({ open, onClose, connectionId, database }: BackupDialogProps) {
   const { t } = useTranslation();
   const [tables, setTables] = useState<TableInfo[]>([]);
+  const [tablesLoading, setTablesLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
   const [includeStructure, setIncludeStructure] = useState(true);
   const [includeData, setIncludeData] = useState(true);
@@ -29,10 +32,13 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
 
   useEffect(() => {
     if (open && connectionId && database) {
-      invoke<TableInfo[]>('get_tables', { connectionId, database }).then((result) => {
-        setTables(result);
-        setSelectedTables(new Set(result.map((t) => t.name)));
-      });
+      setTablesLoading(true);
+      invoke<TableInfo[]>('get_tables', { connectionId, database })
+        .then((result) => {
+          setTables(result);
+          setSelectedTables(new Set(result.map((t) => t.name)));
+        })
+        .finally(() => setTablesLoading(false));
     }
   }, [open, connectionId, database]);
 
@@ -64,7 +70,8 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
   };
 
   const handleStartBackup = async () => {
-    if (!outputPath) return;
+    if (!outputPath || submitting) return;
+    setSubmitting(true);
     try {
       await invoke('start_backup', {
         connectionId,
@@ -83,6 +90,8 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
     } catch (e) {
       console.error('Backup failed:', e);
       notify.error(t('backup.title'), String(e));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -109,20 +118,29 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
               </div>
             </div>
             <div className="max-h-40 overflow-y-auto rounded-md border p-2 space-y-1">
-              {tables.map((table) => (
-                <label
-                  key={table.name}
-                  className="flex items-center gap-2 cursor-pointer rounded px-1.5 py-1 text-sm hover:bg-accent"
-                >
-                  <input
-                    type="checkbox"
-                    className="h-3.5 w-3.5 rounded border-gray-300"
-                    checked={selectedTables.has(table.name)}
-                    onChange={() => toggleTable(table.name)}
-                  />
-                  {table.name}
-                </label>
-              ))}
+              {tablesLoading ? (
+                <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>{t('common.loading')}</span>
+                </div>
+              ) : tables.length === 0 ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">{t('common.noData')}</p>
+              ) : (
+                tables.map((table) => (
+                  <label
+                    key={table.name}
+                    className="flex items-center gap-2 cursor-pointer rounded px-1.5 py-1 text-sm hover:bg-accent"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded border-gray-300"
+                      checked={selectedTables.has(table.name)}
+                      onChange={() => toggleTable(table.name)}
+                    />
+                    {table.name}
+                  </label>
+                ))
+              )}
             </div>
           </div>
 
@@ -185,13 +203,14 @@ export default function BackupDialog({ open, onClose, connectionId, database }: 
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={submitting}>
             {t('common.cancel')}
           </Button>
           <Button
             onClick={handleStartBackup}
-            disabled={!outputPath || selectedTables.size === 0}
+            disabled={!outputPath || selectedTables.size === 0 || submitting}
           >
+            {submitting && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
             {t('backup.start')}
           </Button>
         </DialogFooter>

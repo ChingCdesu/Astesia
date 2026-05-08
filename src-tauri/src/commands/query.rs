@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::db::QueryResult;
+use crate::db::{QueryResult, StatementResult};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -16,6 +16,27 @@ pub async fn execute_query(
         .ok_or_else(|| "连接不存在".to_string())?;
     driver
         .execute_query(&database, &sql)
+        .await
+        .map_err(|e| format!("查询失败: {}", e))
+}
+
+/// Execute multiple SQL statements sequentially on a single connection so
+/// transactions (BEGIN/COMMIT/ROLLBACK) and per-statement timing work as
+/// expected. Returns one [`StatementResult`] per statement; if a statement
+/// fails the loop stops and the failing entry contains the error message.
+#[tauri::command]
+pub async fn execute_statements(
+    state: State<'_, AppState>,
+    connection_id: String,
+    database: String,
+    statements: Vec<String>,
+) -> Result<Vec<StatementResult>, String> {
+    let connections = state.connections.lock().await;
+    let driver = connections
+        .get(&connection_id)
+        .ok_or_else(|| "连接不存在".to_string())?;
+    driver
+        .execute_statements(&database, statements)
         .await
         .map_err(|e| format!("查询失败: {}", e))
 }

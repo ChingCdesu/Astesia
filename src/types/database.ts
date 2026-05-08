@@ -24,6 +24,16 @@ export interface QueryResult {
   execution_time_ms: number;
 }
 
+export interface StatementResult {
+  sql: string;
+  success: boolean;
+  error?: string | null;
+  columns: ColumnInfo[];
+  rows: any[][];
+  affected_rows: number;
+  execution_time_ms: number;
+}
+
 export interface ColumnInfo {
   name: string;
   data_type: string;
