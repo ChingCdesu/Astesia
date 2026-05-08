@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { notify } from '@/stores/notificationStore';
+import { Loader2 } from 'lucide-react';
 
 interface RestoreDialogProps {
   open: boolean;
@@ -19,6 +20,7 @@ interface RestoreDialogProps {
 export default function RestoreDialog({ open: isOpen, onClose, connectionId, database }: RestoreDialogProps) {
   const { t } = useTranslation();
   const [filePath, setFilePath] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const handleBrowse = async () => {
     const selected = await open({
       filters: [{ name: 'SQL Files', extensions: ['sql'] }],
@@ -30,7 +32,8 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
   };
 
   const handleStartRestore = async () => {
-    if (!filePath) return;
+    if (!filePath || submitting) return;
+    setSubmitting(true);
     try {
       await invoke('start_restore', {
         connectionId,
@@ -42,6 +45,8 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
     } catch (e) {
       console.error('Restore failed:', e);
       notify.error(t('backup.restore'), String(e));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -72,13 +77,14 @@ export default function RestoreDialog({ open: isOpen, onClose, connectionId, dat
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={submitting}>
             {t('common.cancel')}
           </Button>
           <Button
             onClick={handleStartRestore}
-            disabled={!filePath}
+            disabled={!filePath || submitting}
           >
+            {submitting && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
             {t('backup.startRestore')}
           </Button>
         </DialogFooter>

@@ -5,7 +5,69 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+
+async fn run_mssql_query(
+    client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
+    sql: &str,
+) -> anyhow::Result<QueryResult> {
+    let start = Instant::now();
+    let stream = client.query(sql, &[]).await?;
+    let rows = stream.into_first_result().await?;
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    if rows.is_empty() {
+        return Ok(QueryResult {
+            execution_time_ms: elapsed,
+            ..Default::default()
+        });
+    }
+
+    let columns: Vec<ColumnInfo> = rows[0]
+        .columns()
+        .iter()
+        .map(|c| ColumnInfo {
+            name: c.name().to_string(),
+            data_type: format!("{:?}", c.column_type()),
+            nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            comment: None,
+        })
+        .collect();
+
+    let data_rows: Vec<Vec<serde_json::Value>> = rows
+        .iter()
+        .map(|row| {
+            (0..columns.len())
+                .map(|i| {
+                    if let Some(val) = row.try_get::<&str, _>(i).ok().flatten() {
+                        serde_json::Value::String(val.to_string())
+                    } else if let Some(val) = row.try_get::<i32, _>(i).ok().flatten() {
+                        serde_json::Value::Number(val.into())
+                    } else if let Some(val) = row.try_get::<i64, _>(i).ok().flatten() {
+                        serde_json::Value::Number(val.into())
+                    } else if let Some(val) = row.try_get::<f64, _>(i).ok().flatten() {
+                        serde_json::Number::from_f64(val)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null)
+                    } else if let Some(val) = row.try_get::<bool, _>(i).ok().flatten() {
+                        serde_json::Value::Bool(val)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    Ok(QueryResult {
+        columns,
+        rows: data_rows,
+        affected_rows: 0,
+        execution_time_ms: elapsed,
+    })
+}
 
 pub struct SqlServerDriver {
     config: ConnectionConfig,
@@ -149,64 +211,32 @@ impl DatabaseDriver for SqlServerDriver {
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-
         let full_sql = format!("USE [{}]; {}", database, sql);
-        let start = Instant::now();
-        let stream = client.query(full_sql.as_str(), &[]).await?;
-        let rows = stream.into_first_result().await?;
-        let elapsed = start.elapsed().as_millis() as u64;
+        run_mssql_query(&mut client, &full_sql).await
+    }
 
-        if rows.is_empty() {
-            return Ok(QueryResult {
-                execution_time_ms: elapsed,
-                ..Default::default()
-            });
+    async fn execute_statements(
+        &self,
+        database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        // Switch database once on the locked client
+        let _ = client.query(format!("USE [{}]", database).as_str(), &[]).await;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_mssql_query(&mut client, &sql).await {
+                Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    results.push(StatementResult::from_error(sql, e, elapsed));
+                    break;
+                }
+            }
         }
-
-        let columns: Vec<ColumnInfo> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| ColumnInfo {
-                name: c.name().to_string(),
-                data_type: format!("{:?}", c.column_type()),
-                nullable: true,
-                is_primary_key: false,
-                default_value: None,
-                comment: None,
-            })
-            .collect();
-
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|row| {
-                (0..columns.len())
-                    .map(|i| {
-                        if let Some(val) = row.try_get::<&str, _>(i).ok().flatten() {
-                            serde_json::Value::String(val.to_string())
-                        } else if let Some(val) = row.try_get::<i32, _>(i).ok().flatten() {
-                            serde_json::Value::Number(val.into())
-                        } else if let Some(val) = row.try_get::<i64, _>(i).ok().flatten() {
-                            serde_json::Value::Number(val.into())
-                        } else if let Some(val) = row.try_get::<f64, _>(i).ok().flatten() {
-                            serde_json::Number::from_f64(val)
-                                .map(serde_json::Value::Number)
-                                .unwrap_or(serde_json::Value::Null)
-                        } else if let Some(val) = row.try_get::<bool, _>(i).ok().flatten() {
-                            serde_json::Value::Bool(val)
-                        } else {
-                            serde_json::Value::Null
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
-        Ok(QueryResult {
-            columns,
-            rows: data_rows,
-            affected_rows: 0,
-            execution_time_ms: elapsed,
-        })
+        Ok(results)
     }
 
     async fn get_table_data(

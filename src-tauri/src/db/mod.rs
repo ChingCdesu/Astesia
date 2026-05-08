@@ -41,6 +41,43 @@ pub struct QueryResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatementResult {
+    pub sql: String,
+    pub success: bool,
+    pub error: Option<String>,
+    pub columns: Vec<ColumnInfo>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub affected_rows: u64,
+    pub execution_time_ms: u64,
+}
+
+impl StatementResult {
+    pub fn from_query_result(sql: String, qr: QueryResult) -> Self {
+        Self {
+            sql,
+            success: true,
+            error: None,
+            columns: qr.columns,
+            rows: qr.rows,
+            affected_rows: qr.affected_rows,
+            execution_time_ms: qr.execution_time_ms,
+        }
+    }
+
+    pub fn from_error(sql: String, err: impl ToString, elapsed_ms: u64) -> Self {
+        Self {
+            sql,
+            success: false,
+            error: Some(err.to_string()),
+            columns: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: elapsed_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -120,6 +157,31 @@ pub trait DatabaseDriver: Send + Sync {
     async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>>;
     async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>>;
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult>;
+    /// Execute multiple SQL statements sequentially, returning per-statement
+    /// results. Drivers that support transactions (e.g. MySQL, PostgreSQL,
+    /// SQLite, SQL Server) override this to run all statements on a single
+    /// connection so BEGIN/COMMIT/ROLLBACK work as expected. Stops at the first
+    /// statement that errors and returns the results collected so far plus the
+    /// failing statement.
+    async fn execute_statements(
+        &self,
+        database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = std::time::Instant::now();
+            match self.execute_query(database, &sql).await {
+                Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    results.push(StatementResult::from_error(sql, e, elapsed));
+                    break;
+                }
+            }
+        }
+        Ok(results)
+    }
     async fn get_table_data(
         &self,
         database: &str,

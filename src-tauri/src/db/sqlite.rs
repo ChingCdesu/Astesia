@@ -1,10 +1,89 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, SqliteConnection};
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo, ViewInfo};
+use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, ViewInfo};
+
+async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Result<QueryResult> {
+    let start = Instant::now();
+    let trimmed = sql.trim().to_uppercase();
+
+    if trimmed.starts_with("SELECT")
+        || trimmed.starts_with("PRAGMA")
+        || trimmed.starts_with("EXPLAIN")
+        || trimmed.starts_with("WITH ")
+        || trimmed.starts_with("VALUES")
+    {
+        let rows: Vec<SqliteRow> = sqlx::query(sql).fetch_all(&mut *conn).await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        if rows.is_empty() {
+            return Ok(QueryResult {
+                execution_time_ms: elapsed,
+                ..Default::default()
+            });
+        }
+
+        let columns: Vec<ColumnInfo> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| ColumnInfo {
+                name: c.name().to_string(),
+                data_type: format!("{:?}", c.type_info()),
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            })
+            .collect();
+
+        let data_rows: Vec<Vec<serde_json::Value>> = rows
+            .iter()
+            .map(|row| {
+                row.columns()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        row.try_get::<NaiveDateTime, _>(i)
+                            .map(|v| serde_json::Value::String(v.to_string()))
+                            .or_else(|_| row.try_get::<NaiveDate, _>(i)
+                                .map(|v| serde_json::Value::String(v.to_string())))
+                            .or_else(|_| row.try_get::<NaiveTime, _>(i)
+                                .map(|v| serde_json::Value::String(v.to_string())))
+                            .or_else(|_| row.try_get::<String, _>(i)
+                                .map(serde_json::Value::String))
+                            .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
+                            .or_else(|_| row.try_get::<i32, _>(i).map(|v| serde_json::Value::Number(v.into())))
+                            .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
+                                serde_json::Number::from_f64(v)
+                                    .map(serde_json::Value::Number)
+                                    .unwrap_or(serde_json::Value::Null)
+                            }))
+                            .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Ok(QueryResult {
+            columns,
+            rows: data_rows,
+            affected_rows: 0,
+            execution_time_ms: elapsed,
+        })
+    } else {
+        let result = sqlx::query(sql).execute(&mut *conn).await?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        Ok(QueryResult {
+            affected_rows: result.rows_affected(),
+            execution_time_ms: elapsed,
+            ..Default::default()
+        })
+    }
+}
 
 pub struct SqliteDriver {
     config: ConnectionConfig,
@@ -117,77 +196,30 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn execute_query(&self, _database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
-        let start = Instant::now();
-        let trimmed = sql.trim().to_uppercase();
+        let mut conn = pool.acquire().await?;
+        run_sqlite_query(&mut *conn, sql).await
+    }
 
-        if trimmed.starts_with("SELECT") || trimmed.starts_with("PRAGMA") || trimmed.starts_with("EXPLAIN") {
-            let rows: Vec<SqliteRow> = sqlx::query(sql).fetch_all(pool).await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-
-            if rows.is_empty() {
-                return Ok(QueryResult {
-                    execution_time_ms: elapsed,
-                    ..Default::default()
-                });
+    async fn execute_statements(
+        &self,
+        _database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let pool = self.pool()?;
+        let mut conn = pool.acquire().await?;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_sqlite_query(&mut *conn, &sql).await {
+                Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    results.push(StatementResult::from_error(sql, e, elapsed));
+                    break;
+                }
             }
-
-            let columns: Vec<ColumnInfo> = rows[0]
-                .columns()
-                .iter()
-                .map(|c| ColumnInfo {
-                    name: c.name().to_string(),
-                    data_type: format!("{:?}", c.type_info()),
-                    nullable: true,
-                    is_primary_key: false,
-                    default_value: None,
-                    comment: None,
-                })
-                .collect();
-
-            let data_rows: Vec<Vec<serde_json::Value>> = rows
-                .iter()
-                .map(|row| {
-                    row.columns()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| {
-                            row.try_get::<NaiveDateTime, _>(i)
-                                .map(|v| serde_json::Value::String(v.to_string()))
-                                .or_else(|_| row.try_get::<NaiveDate, _>(i)
-                                    .map(|v| serde_json::Value::String(v.to_string())))
-                                .or_else(|_| row.try_get::<NaiveTime, _>(i)
-                                    .map(|v| serde_json::Value::String(v.to_string())))
-                                .or_else(|_| row.try_get::<String, _>(i)
-                                    .map(serde_json::Value::String))
-                                .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                .or_else(|_| row.try_get::<i32, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
-                                    serde_json::Number::from_f64(v)
-                                        .map(serde_json::Value::Number)
-                                        .unwrap_or(serde_json::Value::Null)
-                                }))
-                                .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                                .unwrap_or(serde_json::Value::Null)
-                        })
-                        .collect()
-                })
-                .collect();
-
-            Ok(QueryResult {
-                columns,
-                rows: data_rows,
-                affected_rows: 0,
-                execution_time_ms: elapsed,
-            })
-        } else {
-            let result = sqlx::query(sql).execute(pool).await?;
-            let elapsed = start.elapsed().as_millis() as u64;
-            Ok(QueryResult {
-                affected_rows: result.rows_affected(),
-                execution_time_ms: elapsed,
-                ..Default::default()
-            })
         }
+        Ok(results)
     }
 
     async fn get_table_data(

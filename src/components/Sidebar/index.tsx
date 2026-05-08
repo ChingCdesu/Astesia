@@ -13,7 +13,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import { useConnectionStore } from '@/stores/connectionStore';
+import { useConnectionStore, loadingKey } from '@/stores/connectionStore';
 import { notify } from '@/stores/notificationStore';
 import { confirm } from '@/stores/confirmStore';
 import { useClipboardStore } from '@/stores/clipboardStore';
@@ -25,7 +25,7 @@ import {
   Plus, Database, ChevronRight, ChevronDown,
   Code, Eye, Users, Download, Upload,
   ClipboardPaste, RefreshCw, Zap, Trash2,
-  Table2, FunctionSquare, Workflow, Layers,
+  Table2, FunctionSquare, Workflow, Layers, Loader2,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -62,6 +62,7 @@ export default function Sidebar() {
     connections, treeData, connectDatabase, disconnectDatabase,
     removeConnection, loadTables, loadDatabases, loadSchemas,
     loadViews, loadFunctions, loadProcedures, loadTriggers, loadUsers,
+    connectingIds, loadingKeys,
   } = useConnectionStore();
   const { addTab } = useTabStore();
 
@@ -262,6 +263,8 @@ export default function Sidebar() {
                       <ConnectionNode
                         conn={conn}
                         isConnected={!!isConnected}
+                        isConnecting={connectingIds.has(conn.id)}
+                        isLoading={loadingKeys.has(loadingKey.databases(conn.id))}
                         isExpanded={isExpanded}
                         node={node}
                         onConnect={handleConnect}
@@ -285,6 +288,11 @@ export default function Sidebar() {
                         const isRedis = conn.db_type === 'redis';
                         const isMongo = conn.db_type === 'mongodb';
                         const isSQL = !isRedis && !isMongo;
+
+                        const dbLoadingKey = isPG
+                          ? loadingKey.schemas(conn.id, db)
+                          : loadingKey.tables(conn.id, db);
+                        const dbLoading = loadingKeys.has(dbLoadingKey);
 
                         return (
                           <div key={dbKey}>
@@ -327,10 +335,13 @@ export default function Sidebar() {
                                     } catch { /* ignore */ }
                                   }}
                                 >
-                                  {dbExpanded
-                                    ? <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-                                    : <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
-                                  }
+                                  {dbLoading ? (
+                                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+                                  ) : dbExpanded ? (
+                                    <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                  ) : (
+                                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                  )}
                                   <Database className="h-3.5 w-3.5 shrink-0 text-blue-500" />
                                   <span className="truncate">{db}</span>
                                 </button>

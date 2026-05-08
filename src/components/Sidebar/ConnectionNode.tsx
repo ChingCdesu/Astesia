@@ -6,7 +6,7 @@ import {
 import { ConnectionConfig, DB_TYPE_LABELS, DB_TYPE_COLORS } from '@/types/database';
 import {
   ChevronRight, ChevronDown, Unplug, RefreshCw,
-  Trash2, Pencil, Code, UserPlus, Database,
+  Trash2, Pencil, Code, UserPlus, Database, Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useCreateResourceStore } from '@/stores/createResourceStore';
@@ -15,7 +15,10 @@ import { DbIcon } from '@/components/ui/db-icon';
 interface ConnectionNodeProps {
   conn: ConnectionConfig;
   isConnected: boolean;
+  isConnecting?: boolean;
+  isLoading?: boolean;
   isExpanded: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   node: any;
   onConnect: (config: ConnectionConfig) => Promise<void>;
   onToggleExpand: (key: string) => void;
@@ -27,13 +30,14 @@ interface ConnectionNodeProps {
 }
 
 export default function ConnectionNode({
-  conn, isConnected, isExpanded, node,
+  conn, isConnected, isConnecting, isLoading, isExpanded, node,
   onConnect, onToggleExpand, onOpenQuery,
   onRefresh, onDisconnect, onEdit, onDelete,
 }: ConnectionNodeProps) {
   const { t } = useTranslation();
   const { openDialog } = useCreateResourceStore();
   const color = conn.color || DB_TYPE_COLORS[conn.db_type];
+  const showSpinner = isConnecting || isLoading;
 
   return (
     <ContextMenu>
@@ -41,9 +45,12 @@ export default function ConnectionNode({
         <button
           className={cn(
             "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-sidebar-accent",
-            isConnected && "font-medium"
+            isConnected && "font-medium",
+            isConnecting && "cursor-wait opacity-70"
           )}
+          disabled={isConnecting}
           onClick={async () => {
+            if (isConnecting) return;
             if (!isConnected) {
               await onConnect(conn);
             } else {
@@ -51,7 +58,9 @@ export default function ConnectionNode({
             }
           }}
         >
-          {isConnected ? (
+          {showSpinner ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+          ) : isConnected ? (
             isExpanded
               ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
