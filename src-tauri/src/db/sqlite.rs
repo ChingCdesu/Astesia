@@ -1,10 +1,38 @@
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
-use sqlx::{Column, Row, SqliteConnection};
+use sqlx::{Column, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, ViewInfo};
+use super::{bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, ViewInfo};
+
+/// Decode the `i`-th column of a SQLite row into a JSON value, dispatching on the
+/// value's actual storage class. SQLite is dynamically typed — a column's declared
+/// type is only an affinity hint and each value may be any class — so we read the
+/// real per-value type (INTEGER / REAL / TEXT / BLOB) rather than coercing (e.g.
+/// `try_get::<i64>` on a TEXT value would silently coerce to 0).
+fn sqlite_value_to_json(row: &SqliteRow, i: usize) -> serde_json::Value {
+    use serde_json::Value as J;
+
+    let storage = match row.try_get_raw(i) {
+        Ok(raw) if !raw.is_null() => raw.type_info().name().to_string(),
+        _ => return J::Null,
+    };
+
+    match storage.as_str() {
+        "INTEGER" => row
+            .try_get::<i64, _>(i)
+            .map(|v| J::Number(v.into()))
+            .unwrap_or(J::Null),
+        "REAL" => row.try_get::<f64, _>(i).map(f64_to_json).unwrap_or(J::Null),
+        "BLOB" => row
+            .try_get::<Vec<u8>, _>(i)
+            .map(|b| J::String(bytes_to_hex(&b, "0x")))
+            .unwrap_or(J::Null),
+        // TEXT and any fallback: decode as text — dates, decimals, JSON, etc. are
+        // all stored as TEXT in SQLite and should display verbatim.
+        _ => row.try_get::<String, _>(i).map(J::String).unwrap_or(J::Null),
+    }
+}
 
 async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
@@ -31,7 +59,7 @@ async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Res
             .iter()
             .map(|c| ColumnInfo {
                 name: c.name().to_string(),
-                data_type: format!("{:?}", c.type_info()),
+                data_type: c.type_info().name().to_string(),
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
@@ -42,28 +70,8 @@ async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Res
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
             .map(|row| {
-                row.columns()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        row.try_get::<NaiveDateTime, _>(i)
-                            .map(|v| serde_json::Value::String(v.to_string()))
-                            .or_else(|_| row.try_get::<NaiveDate, _>(i)
-                                .map(|v| serde_json::Value::String(v.to_string())))
-                            .or_else(|_| row.try_get::<NaiveTime, _>(i)
-                                .map(|v| serde_json::Value::String(v.to_string())))
-                            .or_else(|_| row.try_get::<String, _>(i)
-                                .map(serde_json::Value::String))
-                            .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                            .or_else(|_| row.try_get::<i32, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                            .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
-                                serde_json::Number::from_f64(v)
-                                    .map(serde_json::Value::Number)
-                                    .unwrap_or(serde_json::Value::Null)
-                            }))
-                            .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                            .unwrap_or(serde_json::Value::Null)
-                    })
+                (0..row.columns().len())
+                    .map(|i| sqlite_value_to_json(row, i))
                     .collect()
             })
             .collect();

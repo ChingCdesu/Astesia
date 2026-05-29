@@ -1,11 +1,54 @@
 use async_trait::async_trait;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use std::time::Instant;
-use tiberius::{AuthMethod, Client, Config};
+use tiberius::{AuthMethod, Client, ColumnData, Config};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+
+/// Decode a SQL Server cell into a JSON value by matching on the tiberius
+/// `ColumnData` variant — covering every TDS type. Date/time variants are
+/// converted through tiberius' chrono `FromSql` impls (by column index).
+fn mssql_cell_to_json(
+    row: &tiberius::Row,
+    i: usize,
+    cell: &ColumnData<'static>,
+) -> serde_json::Value {
+    use serde_json::Value as J;
+
+    macro_rules! via {
+        ($ty:ty, $f:expr) => {
+            row.try_get::<$ty, _>(i).ok().flatten().map_or(J::Null, $f)
+        };
+    }
+
+    match cell {
+        ColumnData::U8(o) => (*o).map_or(J::Null, |v| J::Number(v.into())),
+        ColumnData::I16(o) => (*o).map_or(J::Null, |v| J::Number(v.into())),
+        ColumnData::I32(o) => (*o).map_or(J::Null, |v| J::Number(v.into())),
+        ColumnData::I64(o) => (*o).map_or(J::Null, |v| J::Number(v.into())),
+        ColumnData::F32(o) => (*o).map_or(J::Null, f32_to_json),
+        ColumnData::F64(o) => (*o).map_or(J::Null, f64_to_json),
+        ColumnData::Bit(o) => (*o).map_or(J::Null, J::Bool),
+        ColumnData::String(o) => o.as_ref().map_or(J::Null, |s| J::String(s.to_string())),
+        ColumnData::Guid(o) => (*o).map_or(J::Null, |g| J::String(g.to_string())),
+        ColumnData::Numeric(o) => (*o).map_or(J::Null, |n| J::String(n.to_string())),
+        ColumnData::Xml(o) => o.as_ref().map_or(J::Null, |x| J::String(x.to_string())),
+        ColumnData::Binary(o) => {
+            o.as_ref().map_or(J::Null, |b| J::String(bytes_to_hex(&b[..], "0x")))
+        }
+        ColumnData::Date(_) => via!(NaiveDate, |v: NaiveDate| J::String(v.to_string())),
+        ColumnData::Time(_) => via!(NaiveTime, |v: NaiveTime| J::String(v.to_string())),
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            via!(NaiveDateTime, |v: NaiveDateTime| J::String(v.to_string()))
+        }
+        ColumnData::DateTimeOffset(_) => {
+            via!(DateTime<Utc>, |v: DateTime<Utc>| J::String(v.to_rfc3339()))
+        }
+    }
+}
 
 async fn run_mssql_query(
     client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
@@ -39,24 +82,9 @@ async fn run_mssql_query(
     let data_rows: Vec<Vec<serde_json::Value>> = rows
         .iter()
         .map(|row| {
-            (0..columns.len())
-                .map(|i| {
-                    if let Some(val) = row.try_get::<&str, _>(i).ok().flatten() {
-                        serde_json::Value::String(val.to_string())
-                    } else if let Some(val) = row.try_get::<i32, _>(i).ok().flatten() {
-                        serde_json::Value::Number(val.into())
-                    } else if let Some(val) = row.try_get::<i64, _>(i).ok().flatten() {
-                        serde_json::Value::Number(val.into())
-                    } else if let Some(val) = row.try_get::<f64, _>(i).ok().flatten() {
-                        serde_json::Number::from_f64(val)
-                            .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::Null)
-                    } else if let Some(val) = row.try_get::<bool, _>(i).ok().flatten() {
-                        serde_json::Value::Bool(val)
-                    } else {
-                        serde_json::Value::Null
-                    }
-                })
+            row.cells()
+                .enumerate()
+                .map(|(i, (_, cell))| mssql_cell_to_json(row, i, cell))
                 .collect()
         })
         .collect();

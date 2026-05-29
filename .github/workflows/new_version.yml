@@ -1,0 +1,81 @@
+name: New Version
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bump:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          node -e "
+            const fs = require('fs');
+            const paths = ['package.json', 'src-tauri/tauri.conf.json'];
+            const pkg = JSON.parse(fs.readFileSync(paths[0], 'utf8'));
+            const base = String(pkg.version).split('-')[0];
+            const parts = base.split('.').map(Number);
+            if (parts.length !== 3 || parts.some(Number.isNaN)) {
+              throw new Error('Unexpected version format: ' + pkg.version);
+            }
+            const newVersion = parts[0] + '.' + parts[1] + '.' + (parts[2] + 1);
+            for (const p of paths) {
+              const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+              c.version = newVersion;
+              fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + newVersion + '\n');
+          "
+
+      - name: Update CHANGELOG
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | head -n 1)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE=""
+          fi
+          DATE=$(date -u +%Y-%m-%d)
+          {
+            echo "## v${VERSION} - ${DATE}"
+            echo ""
+            if [ -n "$RANGE" ]; then
+              git log "$RANGE" --pretty=format:'- %s (%h)' --no-merges
+            else
+              git log --pretty=format:'- %s (%h)' --no-merges
+            fi
+            echo ""
+            echo ""
+          } > /tmp/new_entry.md
+
+          if [ -f CHANGELOG.md ]; then
+            { cat /tmp/new_entry.md; echo ""; cat CHANGELOG.md; } > /tmp/changelog.md
+          else
+            { echo "# Changelog"; echo ""; cat /tmp/new_entry.md; } > /tmp/changelog.md
+          fi
+          mv /tmp/changelog.md CHANGELOG.md
+
+      - name: Commit and tag
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/tauri.conf.json CHANGELOG.md
+          git commit -m "release: ${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main
+          git push origin "v${VERSION}"

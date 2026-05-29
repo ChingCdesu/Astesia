@@ -3,7 +3,7 @@ use mongodb::{Client as MongoClient, options::ClientOptions};
 use futures::TryStreamExt;
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult, TableInfo};
+use super::{bytes_to_hex, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult, TableInfo};
 
 pub struct MongoDriver {
     config: ConnectionConfig,
@@ -31,28 +31,38 @@ impl MongoDriver {
     }
 
     fn bson_to_json(val: &mongodb::bson::Bson) -> serde_json::Value {
+        use mongodb::bson::Bson;
+        use serde_json::Value as J;
         match val {
-            mongodb::bson::Bson::Double(v) => serde_json::Number::from_f64(*v)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            mongodb::bson::Bson::String(v) => serde_json::Value::String(v.clone()),
-            mongodb::bson::Bson::Boolean(v) => serde_json::Value::Bool(*v),
-            mongodb::bson::Bson::Null => serde_json::Value::Null,
-            mongodb::bson::Bson::Int32(v) => serde_json::Value::Number((*v).into()),
-            mongodb::bson::Bson::Int64(v) => serde_json::Value::Number((*v).into()),
-            mongodb::bson::Bson::ObjectId(v) => serde_json::Value::String(v.to_hex()),
-            mongodb::bson::Bson::DateTime(v) => serde_json::Value::String(v.to_string()),
-            mongodb::bson::Bson::Array(arr) => {
-                serde_json::Value::Array(arr.iter().map(Self::bson_to_json).collect())
-            }
-            mongodb::bson::Bson::Document(doc) => {
-                let map: serde_json::Map<String, serde_json::Value> = doc
+            Bson::Double(v) => serde_json::Number::from_f64(*v)
+                .map(J::Number)
+                .unwrap_or(J::Null),
+            Bson::String(v) => J::String(v.clone()),
+            Bson::Boolean(v) => J::Bool(*v),
+            Bson::Null | Bson::Undefined => J::Null,
+            Bson::Int32(v) => J::Number((*v).into()),
+            Bson::Int64(v) => J::Number((*v).into()),
+            Bson::Decimal128(v) => J::String(v.to_string()),
+            Bson::ObjectId(v) => J::String(v.to_hex()),
+            // ISO 8601 (e.g. 2024-01-02T03:04:05.678Z); fall back to Debug-ish on overflow.
+            Bson::DateTime(v) => J::String(v.try_to_rfc3339_string().unwrap_or_else(|_| v.to_string())),
+            Bson::Timestamp(t) => J::String(format!("Timestamp({}, {})", t.time, t.increment)),
+            Bson::Binary(b) => J::String(bytes_to_hex(&b.bytes, "0x")),
+            Bson::RegularExpression(r) => J::String(format!("/{}/{}", r.pattern, r.options)),
+            Bson::Symbol(s) => J::String(s.clone()),
+            Bson::JavaScriptCode(c) => J::String(c.clone()),
+            Bson::JavaScriptCodeWithScope(c) => J::String(c.code.clone()),
+            Bson::MinKey => J::String("MinKey".to_string()),
+            Bson::MaxKey => J::String("MaxKey".to_string()),
+            Bson::Array(arr) => J::Array(arr.iter().map(Self::bson_to_json).collect()),
+            Bson::Document(doc) => {
+                let map: serde_json::Map<String, J> = doc
                     .iter()
                     .map(|(k, v)| (k.clone(), Self::bson_to_json(v)))
                     .collect();
-                serde_json::Value::Object(map)
+                J::Object(map)
             }
-            other => serde_json::Value::String(format!("{:?}", other)),
+            other => J::String(format!("{:?}", other)),
         }
     }
 }

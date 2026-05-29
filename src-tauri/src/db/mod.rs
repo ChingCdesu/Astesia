@@ -8,6 +8,37 @@ pub mod redis_db;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Format raw bytes as a hex string with the given prefix — `\x` for
+/// PostgreSQL `bytea` (matching psql/pgAdmin), `0x` for MySQL / SQL Server binary.
+pub(crate) fn bytes_to_hex(bytes: &[u8], prefix: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(prefix.len() + bytes.len() * 2);
+    s.push_str(prefix);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+/// Convert an `f64` to a JSON number, mapping non-finite values (NaN / ±Inf) to null.
+pub(crate) fn f64_to_json(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Convert an `f32` to a JSON number, round-tripping through its shortest decimal
+/// representation to avoid f32→f64 noise (e.g. 1.1_f32 → 1.1, not 1.100000023841858).
+pub(crate) fn f32_to_json(v: f32) -> serde_json::Value {
+    v.to_string()
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub id: String,

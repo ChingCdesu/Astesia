@@ -24,6 +24,11 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { splitSqlStatements, isTransactionControl } from '@/lib/sqlSplit';
+import ExportDialog from '@/components/ExportDialog';
+import { notify } from '@/stores/notificationStore';
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 
 interface Props {
   connectionId: string;
@@ -58,6 +63,7 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
   const [results, setResults] = useState<StatementResult[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [showChart, setShowChart] = useState(false);
   const [editorHeight, setEditorHeight] = useState(250);
   const [isResizingEditor, setIsResizingEditor] = useState(false);
@@ -277,20 +283,7 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
 
   const handleExport = () => {
     if (!activeResult || activeResult.rows.length === 0) return;
-    const headers = activeResult.columns.map((c) => c.name).join(',');
-    const rows = activeResult.rows.map((row) =>
-      row.map((cell) => {
-        const str = cell === null ? '' : String(cell);
-        return str.includes(',') || str.includes('"') ? `"${str.replace(/"/g, '""')}"` : str;
-      }).join(',')
-    ).join('\n');
-    const blob = new Blob(['﻿' + headers + '\n' + rows], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `query_result_${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    setExportOpen(true);
   };
 
   const handleOpenFile = useCallback(async () => {
@@ -490,49 +483,283 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
           <ResultTable result={activeResult} />
         )}
       </div>
+
+      {activeResult && activeResult.columns.length > 0 && (
+        <ExportDialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          source={{
+            kind: 'static',
+            columns: activeResult.columns,
+            rows: activeResult.rows,
+            dbType,
+            defaultName: 'query_result',
+          }}
+        />
+      )}
     </div>
   );
 }
 
-/* Result table */
+/* Result table — supports cell-range drag-selection, row selection via the #
+ * column, Ctrl/Cmd+C copy (TSV), Ctrl/Cmd+A select-all, and a context menu
+ * with "Copy with headers". */
 function ResultTable({ result }: { result: StatementResult }) {
+  const { t } = useTranslation();
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const [selectionStart, setSelectionStart] = useState<{ row: number; col: number } | null>(null);
+  const [selectionEnd, setSelectionEnd] = useState<{ row: number; col: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [lastSelectedRow, setLastSelectedRow] = useState<number | null>(null);
+
+  // Reset selection when the underlying result changes
+  useEffect(() => {
+    setSelectionStart(null);
+    setSelectionEnd(null);
+    setSelectedRows(new Set());
+    setLastSelectedRow(null);
+  }, [result]);
+
+  useEffect(() => {
+    const onUp = () => setIsDragging(false);
+    document.addEventListener('mouseup', onUp);
+    return () => document.removeEventListener('mouseup', onUp);
+  }, []);
+
+  const isCellInSelection = useCallback((r: number, c: number) => {
+    if (!selectionStart || !selectionEnd) return false;
+    const minR = Math.min(selectionStart.row, selectionEnd.row);
+    const maxR = Math.max(selectionStart.row, selectionEnd.row);
+    const minC = Math.min(selectionStart.col, selectionEnd.col);
+    const maxC = Math.max(selectionStart.col, selectionEnd.col);
+    return r >= minR && r <= maxR && c >= minC && c <= maxC;
+  }, [selectionStart, selectionEnd]);
+
+  const formatCell = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+
+  const toTsv = (rows: unknown[][]): string =>
+    rows
+      .map((row) =>
+        row
+          .map((v) => {
+            const s = formatCell(v);
+            // TSV-quote when a value contains a delimiter, newline, or quote
+            return s.includes('\t') || s.includes('\n') || s.includes('\r') || s.includes('"')
+              ? `"${s.replace(/"/g, '""')}"`
+              : s;
+          })
+          .join('\t')
+      )
+      .join('\n');
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify.success(t('query.copied'));
+    } catch {
+      /* clipboard write may fail in some environments — ignore */
+    }
+  };
+
+  const copyCellRange = useCallback(async (withHeaders: boolean) => {
+    if (!selectionStart || !selectionEnd) return;
+    const minR = Math.min(selectionStart.row, selectionEnd.row);
+    const maxR = Math.max(selectionStart.row, selectionEnd.row);
+    const minC = Math.min(selectionStart.col, selectionEnd.col);
+    const maxC = Math.max(selectionStart.col, selectionEnd.col);
+    const out: unknown[][] = [];
+    if (withHeaders) out.push(result.columns.slice(minC, maxC + 1).map((c) => c.name));
+    for (let r = minR; r <= maxR; r++) {
+      const row = result.rows[r];
+      if (row) out.push(row.slice(minC, maxC + 1));
+    }
+    await copyToClipboard(toTsv(out));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionStart, selectionEnd, result]);
+
+  const copySelectedRows = useCallback(async (withHeaders: boolean) => {
+    if (selectedRows.size === 0) return;
+    const sorted = Array.from(selectedRows).sort((a, b) => a - b);
+    const out: unknown[][] = [];
+    if (withHeaders) out.push(result.columns.map((c) => c.name));
+    for (const r of sorted) {
+      const row = result.rows[r];
+      if (row) out.push(row);
+    }
+    await copyToClipboard(toTsv(out));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRows, result]);
+
+  const handleCopy = useCallback(
+    async (withHeaders: boolean) => {
+      if (selectionStart && selectionEnd) await copyCellRange(withHeaders);
+      else if (selectedRows.size > 0) await copySelectedRows(withHeaders);
+    },
+    [selectionStart, selectionEnd, selectedRows, copyCellRange, copySelectedRows]
+  );
+
+  const selectAll = useCallback(() => {
+    setSelectedRows(new Set(result.rows.map((_, i) => i)));
+    setSelectionStart(null);
+    setSelectionEnd(null);
+  }, [result.rows]);
+
+  const clearSelection = () => {
+    setSelectedRows(new Set());
+    setSelectionStart(null);
+    setSelectionEnd(null);
+  };
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if ((selectionStart && selectionEnd) || selectedRows.size > 0) {
+          e.preventDefault();
+          void handleCopy(false);
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        selectAll();
+      } else if (e.key === 'Escape') {
+        clearSelection();
+      }
+    };
+    el.addEventListener('keydown', onKey);
+    return () => el.removeEventListener('keydown', onKey);
+  }, [handleCopy, selectAll, selectionStart, selectionEnd, selectedRows]);
+
+  const handleCellMouseDown = (r: number, c: number, e: React.MouseEvent) => {
+    if (e.button !== 0) return; // let right-click open the context menu without resetting
+    setSelectedRows(new Set());
+    if (e.shiftKey && selectionStart) {
+      setSelectionEnd({ row: r, col: c });
+    } else {
+      setSelectionStart({ row: r, col: c });
+      setSelectionEnd({ row: r, col: c });
+    }
+    setIsDragging(true);
+    containerRef.current?.focus();
+  };
+
+  const handleCellMouseEnter = (r: number, c: number) => {
+    if (isDragging) setSelectionEnd({ row: r, col: c });
+  };
+
+  const handleRowNumMouseDown = (ri: number, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    setSelectionStart(null);
+    setSelectionEnd(null);
+    if (e.shiftKey && lastSelectedRow !== null) {
+      const lo = Math.min(lastSelectedRow, ri);
+      const hi = Math.max(lastSelectedRow, ri);
+      const next = new Set(selectedRows);
+      for (let i = lo; i <= hi; i++) next.add(i);
+      setSelectedRows(next);
+    } else if (e.ctrlKey || e.metaKey) {
+      const next = new Set(selectedRows);
+      if (next.has(ri)) next.delete(ri);
+      else next.add(ri);
+      setSelectedRows(next);
+      setLastSelectedRow(ri);
+    } else {
+      setSelectedRows(new Set([ri]));
+      setLastSelectedRow(ri);
+    }
+    containerRef.current?.focus();
+  };
+
+  const hasSelection = (selectionStart !== null && selectionEnd !== null) || selectedRows.size > 0;
+
   return (
-    <ScrollArea className="h-full">
-      <table className="text-sm" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
-        <thead className="sticky top-0 z-10">
-          <tr className="border-b bg-muted/60">
-            <th className="w-12 px-3 py-2 text-center text-xs font-medium text-muted-foreground">#</th>
-            {result.columns.map((col) => (
-              <th key={col.name} style={{ width: 160, minWidth: 80 }} className="whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium">
-                {col.name}
-                <span className="ml-2 font-normal text-muted-foreground">{col.data_type}</span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {result.rows.map((row, ri) => (
-            <tr key={ri} className="border-b transition-colors hover:bg-muted/30">
-              <td className="px-3 py-1.5 text-center text-xs text-muted-foreground">{ri + 1}</td>
-              {row.map((cell, ci) => (
-                <td
-                  key={ci}
-                  className={cn(
-                    "border-l px-4 py-1.5 font-mono text-xs overflow-hidden",
-                    cell === null && "italic text-muted-foreground/50"
-                  )}
-                  style={{ maxWidth: 300 }}
-                >
-                  <span className="truncate block">
-                    {cell === null ? 'NULL' : typeof cell === 'object' ? JSON.stringify(cell) : String(cell)}
-                  </span>
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </ScrollArea>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div ref={containerRef} tabIndex={-1} className="h-full outline-none">
+          <ScrollArea className="h-full">
+            <table
+              className="text-sm select-none"
+              style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}
+            >
+              <thead className="sticky top-0 z-10">
+                <tr className="border-b bg-muted/60">
+                  <th className="w-12 px-3 py-2 text-center text-xs font-medium text-muted-foreground">#</th>
+                  {result.columns.map((col) => (
+                    <th
+                      key={col.name}
+                      style={{ width: 160, minWidth: 80 }}
+                      className="whitespace-nowrap border-l px-4 py-2 text-left text-xs font-medium"
+                    >
+                      {col.name}
+                      <span className="ml-2 font-normal text-muted-foreground">{col.data_type}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {result.rows.map((row, ri) => {
+                  const rowSelected = selectedRows.has(ri);
+                  return (
+                    <tr key={ri} className={cn('border-b transition-colors', rowSelected ? 'bg-primary/10' : 'hover:bg-muted/30')}>
+                      <td
+                        className={cn(
+                          'px-3 py-1.5 text-center text-xs cursor-pointer',
+                          rowSelected ? 'bg-primary/20 text-primary font-medium' : 'text-muted-foreground'
+                        )}
+                        onMouseDown={(e) => handleRowNumMouseDown(ri, e)}
+                      >
+                        {ri + 1}
+                      </td>
+                      {row.map((cell, ci) => {
+                        const inRange = isCellInSelection(ri, ci);
+                        return (
+                          <td
+                            key={ci}
+                            className={cn(
+                              'border-l px-4 py-1.5 font-mono text-xs overflow-hidden cursor-cell',
+                              cell === null && 'italic text-muted-foreground/50',
+                              inRange && 'bg-primary/20'
+                            )}
+                            style={{ maxWidth: 300 }}
+                            onMouseDown={(e) => handleCellMouseDown(ri, ci, e)}
+                            onMouseEnter={() => handleCellMouseEnter(ri, ci)}
+                          >
+                            <span className="truncate block">
+                              {cell === null ? 'NULL' : typeof cell === 'object' ? JSON.stringify(cell) : String(cell)}
+                            </span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </ScrollArea>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem disabled={!hasSelection} onClick={() => void handleCopy(false)}>
+          {t('query.copy')}
+        </ContextMenuItem>
+        <ContextMenuItem disabled={!hasSelection} onClick={() => void handleCopy(true)}>
+          {t('query.copyWithHeaders')}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={selectAll}>{t('query.selectAllRows')}</ContextMenuItem>
+        <ContextMenuItem disabled={!hasSelection} onClick={clearSelection}>
+          {t('query.clearSelection')}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

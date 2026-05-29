@@ -1,10 +1,58 @@
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, MySqlConnection, Row};
+use sqlx::types::BigDecimal;
+use sqlx::{Column, MySqlConnection, Row, TypeInfo};
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+
+/// Decode the `i`-th column of a MySQL row into a JSON value, dispatching on the
+/// (upper-cased) MySQL type name. Covers all built-in scalar types; unknown types
+/// (e.g. GEOMETRY) fall back to text, then raw bytes as hex, else NULL.
+fn mysql_value_to_json(row: &MySqlRow, i: usize, type_name: &str) -> serde_json::Value {
+    use serde_json::Value as J;
+
+    macro_rules! get {
+        ($ty:ty, $f:expr) => {
+            row.try_get::<$ty, _>(i).map($f).unwrap_or(J::Null)
+        };
+    }
+
+    match type_name {
+        // tinyint(1) reports as BOOLEAN; keep it numeric (MySQL stores 0/1) like the CLI.
+        "BOOLEAN" | "TINYINT" => get!(i8, |v| J::Number(v.into())),
+        "TINYINT UNSIGNED" => get!(u8, |v| J::Number(v.into())),
+        "SMALLINT" => get!(i16, |v| J::Number(v.into())),
+        "SMALLINT UNSIGNED" | "YEAR" => get!(u16, |v| J::Number(v.into())),
+        "INT" | "MEDIUMINT" => get!(i32, |v| J::Number(v.into())),
+        "INT UNSIGNED" | "MEDIUMINT UNSIGNED" => get!(u32, |v| J::Number(v.into())),
+        "BIGINT" => get!(i64, |v| J::Number(v.into())),
+        "BIGINT UNSIGNED" | "BIT" => get!(u64, |v| J::Number(v.into())),
+        "FLOAT" => get!(f32, f32_to_json),
+        "DOUBLE" => get!(f64, f64_to_json),
+        "DECIMAL" => get!(BigDecimal, |v: BigDecimal| J::String(v.to_string())),
+        "DATE" => get!(NaiveDate, |v: NaiveDate| J::String(v.to_string())),
+        "TIME" => get!(NaiveTime, |v: NaiveTime| J::String(v.to_string())),
+        "DATETIME" => get!(NaiveDateTime, |v: NaiveDateTime| J::String(v.to_string())),
+        "TIMESTAMP" => get!(DateTime<Utc>, |v| J::String(v.to_rfc3339())),
+        "JSON" => row.try_get::<J, _>(i).unwrap_or(J::Null),
+        "CHAR" | "VARCHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET" => {
+            get!(String, J::String)
+        }
+        "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => {
+            get!(Vec<u8>, |b: Vec<u8>| J::String(bytes_to_hex(&b, "0x")))
+        }
+        _ => row
+            .try_get::<String, _>(i)
+            .map(J::String)
+            .or_else(|_| {
+                row.try_get::<Vec<u8>, _>(i)
+                    .map(|b| J::String(bytes_to_hex(&b, "0x")))
+            })
+            .unwrap_or(J::Null),
+    }
+}
 
 async fn run_mysql_query(
     conn: &mut MySqlConnection,
@@ -34,7 +82,7 @@ async fn run_mysql_query(
             .iter()
             .map(|c| ColumnInfo {
                 name: c.name().to_string(),
-                data_type: format!("{:?}", c.type_info()),
+                data_type: c.type_info().name().to_string(),
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
@@ -42,38 +90,19 @@ async fn run_mysql_query(
             })
             .collect();
 
+        // Pre-compute each column's (upper-cased) MySQL type name once;
+        // value decoding then dispatches on it for every row.
+        let type_names: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.type_info().name().to_ascii_uppercase())
+            .collect();
+
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
             .map(|row| {
-                row.columns()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        // Try JSON first (MySQL JSON columns)
-                        row.try_get::<serde_json::Value, _>(i)
-                            .ok()
-                            .filter(|v| !v.is_string())
-                            .map(Ok)
-                            .unwrap_or_else(|| {
-                                row.try_get::<NaiveDateTime, _>(i)
-                                    .map(|v| serde_json::Value::String(v.to_string()))
-                                    .or_else(|_| row.try_get::<NaiveDate, _>(i)
-                                        .map(|v| serde_json::Value::String(v.to_string())))
-                                    .or_else(|_| row.try_get::<NaiveTime, _>(i)
-                                        .map(|v| serde_json::Value::String(v.to_string())))
-                                    .or_else(|_| row.try_get::<String, _>(i)
-                                        .map(serde_json::Value::String))
-                                    .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                    .or_else(|_| row.try_get::<i32, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                    .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
-                                        serde_json::Number::from_f64(v)
-                                            .map(serde_json::Value::Number)
-                                            .unwrap_or(serde_json::Value::Null)
-                                    }))
-                                    .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                            })
-                            .unwrap_or(serde_json::Value::Null)
-                    })
+                (0..type_names.len())
+                    .map(|i| mysql_value_to_json(row, i, &type_names[i]))
                     .collect()
             })
             .collect();
