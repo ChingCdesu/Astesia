@@ -12,6 +12,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useTabStore } from '@/stores/tabStore';
 import ValueViewer from '@/components/DataViewers/DataGrid/ValueViewer';
+import ExportDialog from '@/components/ExportDialog';
 import { notify } from '@/stores/notificationStore';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
@@ -165,6 +166,7 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
   const [page, setPage] = useState(1);
   const [pageSize] = useState(100);
   const [totalRows, setTotalRows] = useState<number | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
 
   // Editing state
   const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
@@ -434,21 +436,8 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
   };
 
   const handleExport = () => {
-    if (!result || result.rows.length === 0) return;
-    const headers = result.columns.map((c) => c.name).join(',');
-    const rows = result.rows.map((row) =>
-      row.map((cell) => {
-        const str = cell === null ? '' : String(cell);
-        return str.includes(',') || str.includes('"') ? `"${str.replace(/"/g, '""')}"` : str;
-      }).join(',')
-    ).join('\n');
-    const blob = new Blob(['\uFEFF' + headers + '\n' + rows], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${table}_${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    if (!result || result.columns.length === 0) return;
+    setExportOpen(true);
   };
 
   // Determine editor type based on column data_type
@@ -1023,7 +1012,7 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
           <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", loading && "animate-spin")} />
           {t('table.refresh')}
         </Button>
-        <Button variant="ghost" size="sm" onClick={handleExport} disabled={!result || result.rows.length === 0}>
+        <Button variant="ghost" size="sm" onClick={handleExport} disabled={!result || result.columns.length === 0}>
           <Download className="mr-1.5 h-3.5 w-3.5" />
           {t('query.export')}
         </Button>
@@ -1462,6 +1451,25 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
             setPendingChanges(prev => { const m = new Map(prev); m.set(key, change); return m; });
             setChangeHistory(prev => [...prev, { type: 'edit', key, change }]);
             setValueViewer(null);
+          }}
+        />
+      )}
+
+      {result && (
+        <ExportDialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          source={{
+            kind: 'table',
+            connectionId,
+            database,
+            table,
+            dbType,
+            columns: result.columns,
+            appliedWhere,
+            appliedOrderBy,
+            totalRows,
+            currentRows: result.rows,
           }}
         />
       )}

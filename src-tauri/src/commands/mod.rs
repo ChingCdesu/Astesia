@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod connection;
+pub mod export;
 pub mod mutation;
 pub mod objects;
 pub mod performance;

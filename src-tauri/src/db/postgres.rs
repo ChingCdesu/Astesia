@@ -1,10 +1,208 @@
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use sqlx::postgres::types::{
+    Oid, PgBox, PgCircle, PgInterval, PgLSeg, PgLine, PgMoney, PgPath, PgPoint, PgPolygon, PgRange,
+    PgTimeTz,
+};
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
-use sqlx::{Column, PgConnection, Row};
+use sqlx::types::ipnetwork::IpNetwork;
+use sqlx::types::mac_address::MacAddress;
+use sqlx::types::{BigDecimal, BitVec, Uuid};
+use sqlx::{Column, PgConnection, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+
+/// Render a `BitVec` (BIT / VARBIT) as a string of '0'/'1' characters.
+fn bitvec_to_string(bits: &BitVec) -> String {
+    bits.iter().map(|b| if b { '1' } else { '0' }).collect()
+}
+
+fn pg_point_to_string(p: &PgPoint) -> String {
+    format!("({},{})", p.x, p.y)
+}
+
+/// Format a PostgreSQL INTERVAL roughly like psql does
+/// (e.g. "1 year 2 mons 3 days 04:05:06").
+fn interval_to_string(iv: &PgInterval) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let years = iv.months / 12;
+    let mons = iv.months % 12;
+    if years != 0 {
+        parts.push(format!("{} year{}", years, if years.abs() == 1 { "" } else { "s" }));
+    }
+    if mons != 0 {
+        parts.push(format!("{} mon{}", mons, if mons.abs() == 1 { "" } else { "s" }));
+    }
+    if iv.days != 0 {
+        parts.push(format!("{} day{}", iv.days, if iv.days.abs() == 1 { "" } else { "s" }));
+    }
+    if iv.microseconds != 0 || parts.is_empty() {
+        let neg = iv.microseconds < 0;
+        let abs = iv.microseconds.unsigned_abs();
+        let secs = abs / 1_000_000;
+        let micros = abs % 1_000_000;
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        let sign = if neg { "-" } else { "" };
+        if micros != 0 {
+            parts.push(format!("{sign}{h:02}:{m:02}:{s:02}.{micros:06}"));
+        } else {
+            parts.push(format!("{sign}{h:02}:{m:02}:{s:02}"));
+        }
+    }
+    parts.join(" ")
+}
+
+/// Decode the `i`-th column of `row` into a JSON value, dispatching on the
+/// (upper-cased) PostgreSQL type name. Covers every built-in scalar type plus
+/// arrays of the common element types; unknown / user-defined types (enums,
+/// domains, …) fall back to their raw text representation so they still display.
+fn pg_value_to_json(row: &PgRow, i: usize, type_name: &str) -> serde_json::Value {
+    use serde_json::Value as J;
+
+    // Decode column `i` as `$ty`, mapping the value with `$f`; any decode error → NULL.
+    macro_rules! get {
+        ($ty:ty, $f:expr) => {
+            row.try_get::<$ty, _>(i).map($f).unwrap_or(J::Null)
+        };
+    }
+    // Decode column `i` as `$ty` and render it via `Display`.
+    macro_rules! get_str {
+        ($ty:ty) => {
+            row.try_get::<$ty, _>(i)
+                .map(|v| J::String(v.to_string()))
+                .unwrap_or(J::Null)
+        };
+    }
+
+    match type_name {
+        "BOOL" => get!(bool, J::Bool),
+
+        "INT2" => get!(i16, |v| J::Number(v.into())),
+        "INT4" => get!(i32, |v| J::Number(v.into())),
+        "INT8" => get!(i64, |v| J::Number(v.into())),
+        "OID" => get!(Oid, |v| J::Number(v.0.into())),
+
+        "FLOAT4" => get!(f32, f32_to_json),
+        "FLOAT8" => get!(f64, f64_to_json),
+        "NUMERIC" => get_str!(BigDecimal),
+        "MONEY" => get!(PgMoney, |v| J::String(v.to_bigdecimal(2).to_string())),
+
+        "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "UNKNOWN" => get!(String, J::String),
+
+        "UUID" => get_str!(Uuid),
+        "JSON" | "JSONB" => row.try_get::<J, _>(i).unwrap_or(J::Null),
+        "BYTEA" => get!(Vec<u8>, |b: Vec<u8>| J::String(bytes_to_hex(&b, "\\x"))),
+
+        "DATE" => get_str!(NaiveDate),
+        "TIME" => get_str!(NaiveTime),
+        "TIMESTAMP" => get_str!(NaiveDateTime),
+        "TIMESTAMPTZ" => get!(DateTime<Utc>, |v| J::String(v.to_rfc3339())),
+        "TIMETZ" => get!(PgTimeTz, |v| J::String(format!("{}{}", v.time, v.offset))),
+        "INTERVAL" => get!(PgInterval, |v| J::String(interval_to_string(&v))),
+
+        "INET" | "CIDR" => get_str!(IpNetwork),
+        "MACADDR" => get_str!(MacAddress),
+        "BIT" | "VARBIT" => get!(BitVec, |v: BitVec| J::String(bitvec_to_string(&v))),
+
+        "POINT" => get!(PgPoint, |p| J::String(pg_point_to_string(&p))),
+        "LINE" => get!(PgLine, |l| J::String(format!("{{{},{},{}}}", l.a, l.b, l.c))),
+        "LSEG" => get!(PgLSeg, |s| J::String(format!(
+            "[({},{}),({},{})]",
+            s.start_x, s.start_y, s.end_x, s.end_y
+        ))),
+        "BOX" => get!(PgBox, |b| J::String(format!(
+            "({},{}),({},{})",
+            b.upper_right_x, b.upper_right_y, b.lower_left_x, b.lower_left_y
+        ))),
+        "PATH" => get!(PgPath, |p| {
+            let pts: Vec<String> = p.points.iter().map(pg_point_to_string).collect();
+            J::String(if p.closed {
+                format!("({})", pts.join(","))
+            } else {
+                format!("[{}]", pts.join(","))
+            })
+        }),
+        "POLYGON" => get!(PgPolygon, |p| {
+            let pts: Vec<String> = p.points.iter().map(pg_point_to_string).collect();
+            J::String(format!("({})", pts.join(",")))
+        }),
+        "CIRCLE" => get!(PgCircle, |c| J::String(format!("<({},{}),{}>", c.x, c.y, c.radius))),
+
+        "INT4RANGE" => get_str!(PgRange<i32>),
+        "INT8RANGE" => get_str!(PgRange<i64>),
+        "NUMRANGE" => get_str!(PgRange<BigDecimal>),
+        "DATERANGE" => get_str!(PgRange<NaiveDate>),
+        "TSRANGE" => get_str!(PgRange<NaiveDateTime>),
+        "TSTZRANGE" => get_str!(PgRange<DateTime<Utc>>),
+
+        name if name.ends_with("[]") => pg_array_to_json(row, i, &name[..name.len() - 2]),
+
+        // Unknown / user-defined (enum, domain, …): recover the raw text value
+        // (Postgres transmits enum labels as text), else hex bytes, else NULL.
+        _ => match row.try_get_raw(i) {
+            Ok(raw) if !raw.is_null() => match raw.as_str() {
+                Ok(s) => J::String(s.to_string()),
+                Err(_) => raw
+                    .as_bytes()
+                    .map(|b| J::String(bytes_to_hex(b, "\\x")))
+                    .unwrap_or(J::Null),
+            },
+            _ => J::Null,
+        },
+    }
+}
+
+/// Decode a PostgreSQL array column into a JSON array, dispatching on the
+/// element type name. Element NULLs are preserved as JSON `null`.
+fn pg_array_to_json(row: &PgRow, i: usize, elem: &str) -> serde_json::Value {
+    use serde_json::Value as J;
+
+    macro_rules! arr {
+        ($ty:ty, $f:expr) => {
+            row.try_get::<Vec<Option<$ty>>, _>(i)
+                .map(|items| J::Array(items.into_iter().map(|o| o.map_or(J::Null, $f)).collect()))
+                .unwrap_or(J::Null)
+        };
+    }
+    macro_rules! arr_str {
+        ($ty:ty) => {
+            arr!($ty, |v: $ty| J::String(v.to_string()))
+        };
+    }
+
+    match elem {
+        "BOOL" => arr!(bool, J::Bool),
+        "INT2" => arr!(i16, |v| J::Number(v.into())),
+        "INT4" => arr!(i32, |v| J::Number(v.into())),
+        "INT8" => arr!(i64, |v| J::Number(v.into())),
+        "OID" => arr!(Oid, |v: Oid| J::Number(v.0.into())),
+        "FLOAT4" => arr!(f32, f32_to_json),
+        "FLOAT8" => arr!(f64, f64_to_json),
+        "NUMERIC" => arr_str!(BigDecimal),
+        "TEXT" | "VARCHAR" | "CHAR" | "NAME" => arr!(String, J::String),
+        "UUID" => arr_str!(Uuid),
+        "JSON" | "JSONB" => row
+            .try_get::<Vec<Option<J>>, _>(i)
+            .map(|items| J::Array(items.into_iter().map(|o| o.unwrap_or(J::Null)).collect()))
+            .unwrap_or(J::Null),
+        "BYTEA" => arr!(Vec<u8>, |b: Vec<u8>| J::String(bytes_to_hex(&b, "\\x"))),
+        "DATE" => arr_str!(NaiveDate),
+        "TIME" => arr_str!(NaiveTime),
+        "TIMESTAMP" => arr_str!(NaiveDateTime),
+        "TIMESTAMPTZ" => arr!(DateTime<Utc>, |v: DateTime<Utc>| J::String(v.to_rfc3339())),
+        "INET" | "CIDR" => arr_str!(IpNetwork),
+        "MACADDR" => arr_str!(MacAddress),
+        // Less common element types: render the array as its text form if the
+        // elements decode as text, else NULL.
+        _ => row
+            .try_get::<Vec<Option<String>>, _>(i)
+            .map(|items| {
+                J::Array(items.into_iter().map(|o| o.map_or(J::Null, J::String)).collect())
+            })
+            .unwrap_or(J::Null),
+    }
+}
 
 async fn run_pg_query(conn: &mut PgConnection, sql: &str) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
@@ -31,7 +229,7 @@ async fn run_pg_query(conn: &mut PgConnection, sql: &str) -> anyhow::Result<Quer
             .iter()
             .map(|c| ColumnInfo {
                 name: c.name().to_string(),
-                data_type: format!("{:?}", c.type_info()),
+                data_type: c.type_info().name().to_string(),
                 nullable: true,
                 is_primary_key: false,
                 default_value: None,
@@ -39,37 +237,19 @@ async fn run_pg_query(conn: &mut PgConnection, sql: &str) -> anyhow::Result<Quer
             })
             .collect();
 
+        // Pre-compute each column's (upper-cased) PostgreSQL type name once;
+        // value decoding then dispatches on it for every row.
+        let type_names: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.type_info().name().to_ascii_uppercase())
+            .collect();
+
         let data_rows: Vec<Vec<serde_json::Value>> = rows
             .iter()
             .map(|row| {
-                row.columns()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        row.try_get::<serde_json::Value, _>(i)
-                            .ok()
-                            .filter(|v| !v.is_string())
-                            .map(Ok)
-                            .unwrap_or_else(|| {
-                                row.try_get::<NaiveDateTime, _>(i)
-                                    .map(|v| serde_json::Value::String(v.to_string()))
-                                    .or_else(|_| row.try_get::<NaiveDate, _>(i)
-                                        .map(|v| serde_json::Value::String(v.to_string())))
-                                    .or_else(|_| row.try_get::<NaiveTime, _>(i)
-                                        .map(|v| serde_json::Value::String(v.to_string())))
-                                    .or_else(|_| row.try_get::<String, _>(i)
-                                        .map(serde_json::Value::String))
-                                    .or_else(|_| row.try_get::<i64, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                    .or_else(|_| row.try_get::<i32, _>(i).map(|v| serde_json::Value::Number(v.into())))
-                                    .or_else(|_| row.try_get::<f64, _>(i).map(|v| {
-                                        serde_json::Number::from_f64(v)
-                                            .map(serde_json::Value::Number)
-                                            .unwrap_or(serde_json::Value::Null)
-                                    }))
-                                    .or_else(|_| row.try_get::<bool, _>(i).map(serde_json::Value::Bool))
-                            })
-                            .unwrap_or(serde_json::Value::Null)
-                    })
+                (0..type_names.len())
+                    .map(|i| pg_value_to_json(row, i, &type_names[i]))
                     .collect()
             })
             .collect();
