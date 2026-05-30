@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use redis::AsyncCommands;
+use redis::{AsyncCommands, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
 use std::time::Instant;
 
 use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult, TableInfo};
@@ -19,14 +19,21 @@ impl RedisDriver {
         }
     }
 
-    fn connection_string(&self) -> String {
-        if self.config.password.is_empty() {
-            format!("redis://{}:{}", self.config.host, self.config.port)
-        } else {
-            format!(
-                "redis://:{}@{}:{}",
-                self.config.password, self.config.host, self.config.port
-            )
+    /// Build typed connection info so a password with special characters
+    /// (`/ # ? @ :`, spaces, …) is handled by the driver instead of being
+    /// string-interpolated into a URL, which previously mis-parsed and produced
+    /// errors like "invalid port number".
+    fn connection_info(&self) -> ConnectionInfo {
+        ConnectionInfo {
+            addr: ConnectionAddr::Tcp(self.config.host.clone(), self.config.port),
+            redis: RedisConnectionInfo {
+                password: if self.config.password.is_empty() {
+                    None
+                } else {
+                    Some(self.config.password.clone())
+                },
+                ..Default::default()
+            },
         }
     }
 
@@ -40,7 +47,7 @@ impl RedisDriver {
 #[async_trait]
 impl DatabaseDriver for RedisDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
-        let client = redis::Client::open(self.connection_string())?;
+        let client = redis::Client::open(self.connection_info())?;
         let connection = client.get_multiplexed_async_connection().await?;
         self.client = Some(client);
         self.connection = Some(connection);
@@ -54,7 +61,7 @@ impl DatabaseDriver for RedisDriver {
     }
 
     async fn test_connection(&self) -> anyhow::Result<bool> {
-        let client = redis::Client::open(self.connection_string())?;
+        let client = redis::Client::open(self.connection_info())?;
         let mut conn = client.get_multiplexed_async_connection().await?;
         let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
         Ok(pong == "PONG")

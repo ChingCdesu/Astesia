@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mongodb::{Client as MongoClient, options::ClientOptions};
+use mongodb::{Client as MongoClient, options::{ClientOptions, Credential, ServerAddress}};
 use futures::TryStreamExt;
 use std::time::Instant;
 
@@ -15,15 +15,28 @@ impl MongoDriver {
         Self { config, client: None }
     }
 
-    fn connection_string(&self) -> String {
-        if self.config.username.is_empty() {
-            format!("mongodb://{}:{}", self.config.host, self.config.port)
+    /// Build typed client options so credentials with special characters
+    /// (`/ # ? @ :`, spaces, …) are handled by the driver instead of being
+    /// string-interpolated into a URI, which previously mis-parsed and produced
+    /// errors like "invalid port number".
+    fn client_options(&self) -> ClientOptions {
+        let credential = if self.config.username.is_empty() {
+            None
         } else {
-            format!(
-                "mongodb://{}:{}@{}:{}",
-                self.config.username, self.config.password, self.config.host, self.config.port
+            Some(
+                Credential::builder()
+                    .username(self.config.username.clone())
+                    .password(self.config.password.clone())
+                    .build(),
             )
-        }
+        };
+        ClientOptions::builder()
+            .hosts(vec![ServerAddress::Tcp {
+                host: self.config.host.clone(),
+                port: Some(self.config.port),
+            }])
+            .credential(credential)
+            .build()
     }
 
     fn client(&self) -> anyhow::Result<&MongoClient> {
@@ -70,8 +83,7 @@ impl MongoDriver {
 #[async_trait]
 impl DatabaseDriver for MongoDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
-        let client_options = ClientOptions::parse(&self.connection_string()).await?;
-        let client = MongoClient::with_options(client_options)?;
+        let client = MongoClient::with_options(self.client_options())?;
         self.client = Some(client);
         Ok(())
     }
@@ -82,8 +94,7 @@ impl DatabaseDriver for MongoDriver {
     }
 
     async fn test_connection(&self) -> anyhow::Result<bool> {
-        let client_options = ClientOptions::parse(&self.connection_string()).await?;
-        let client = MongoClient::with_options(client_options)?;
+        let client = MongoClient::with_options(self.client_options())?;
         client.list_database_names().await?;
         Ok(true)
     }

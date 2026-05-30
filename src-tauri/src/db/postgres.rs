@@ -4,7 +4,7 @@ use sqlx::postgres::types::{
     Oid, PgBox, PgCircle, PgInterval, PgLSeg, PgLine, PgMoney, PgPath, PgPoint, PgPolygon, PgRange,
     PgTimeTz,
 };
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow};
 use sqlx::types::ipnetwork::IpNetwork;
 use sqlx::types::mac_address::MacAddress;
 use sqlx::types::{BigDecimal, BitVec, Uuid};
@@ -287,14 +287,20 @@ impl PostgresDriver {
         }
     }
 
-    fn connection_string(&self, database: Option<&str>) -> String {
+    /// Build typed connect options so credentials/host with special characters
+    /// (`/ # ? @ :`, spaces, …) are handled by the driver instead of being
+    /// string-interpolated into a URL, which previously mis-parsed and produced
+    /// errors like "invalid port number".
+    fn connect_options(&self, database: Option<&str>) -> PgConnectOptions {
         let db = database
             .or(self.config.database.as_deref())
             .unwrap_or("postgres");
-        format!(
-            "postgres://{}:{}@{}:{}/{}",
-            self.config.username, self.config.password, self.config.host, self.config.port, db
-        )
+        PgConnectOptions::new()
+            .host(&self.config.host)
+            .port(self.config.port)
+            .username(&self.config.username)
+            .password(&self.config.password)
+            .database(db)
     }
 
     fn pool(&self) -> anyhow::Result<&PgPool> {
@@ -327,7 +333,7 @@ impl PostgresDriver {
         // Create new pool for this database
         let pool = PgPoolOptions::new()
             .max_connections(2)
-            .connect(&self.connection_string(Some(database)))
+            .connect_with(self.connect_options(Some(database)))
             .await?;
         cache.insert(database.to_string(), pool.clone());
         Ok(pool)
@@ -339,7 +345,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect(&self.connection_string(None))
+            .connect_with(self.connect_options(None))
             .await?;
         self.pool = Some(pool);
         Ok(())
@@ -355,7 +361,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn test_connection(&self) -> anyhow::Result<bool> {
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&self.connection_string(None))
+            .connect_with(self.connect_options(None))
             .await?;
         let _: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
         pool.close().await;

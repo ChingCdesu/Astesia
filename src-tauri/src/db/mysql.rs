@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
+use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::types::BigDecimal;
 use sqlx::{Column, MySqlConnection, Row, TypeInfo};
 use std::time::Instant;
@@ -134,12 +134,20 @@ impl MySqlDriver {
         Self { config, pool: None }
     }
 
-    fn connection_string(&self) -> String {
-        let db = self.config.database.as_deref().unwrap_or("");
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            self.config.username, self.config.password, self.config.host, self.config.port, db
-        )
+    /// Build typed connect options so credentials/host with special characters
+    /// (`/ # ? @ :`, spaces, …) are handled by the driver instead of being
+    /// string-interpolated into a URL, which previously mis-parsed and produced
+    /// errors like "invalid port number".
+    fn connect_options(&self) -> MySqlConnectOptions {
+        let mut opts = MySqlConnectOptions::new()
+            .host(&self.config.host)
+            .port(self.config.port)
+            .username(&self.config.username)
+            .password(&self.config.password);
+        if let Some(db) = self.config.database.as_deref().filter(|d| !d.is_empty()) {
+            opts = opts.database(db);
+        }
+        opts
     }
 
     fn pool(&self) -> anyhow::Result<&MySqlPool> {
@@ -152,7 +160,7 @@ impl DatabaseDriver for MySqlDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let pool = MySqlPoolOptions::new()
             .max_connections(5)
-            .connect(&self.connection_string())
+            .connect_with(self.connect_options())
             .await?;
         self.pool = Some(pool);
         Ok(())
@@ -166,10 +174,9 @@ impl DatabaseDriver for MySqlDriver {
     }
 
     async fn test_connection(&self) -> anyhow::Result<bool> {
-        let url = self.connection_string();
         let pool = MySqlPoolOptions::new()
             .max_connections(1)
-            .connect(&url)
+            .connect_with(self.connect_options())
             .await?;
         let _: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
         pool.close().await;
