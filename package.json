@@ -10,7 +10,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "mcp:dev": "pnpm mcp:prepare:debug && cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin astesia-mcp",
+    "mcp:prepare": "node scripts/prepare-mcp-sidecar.mjs",
+    "mcp:prepare:debug": "node scripts/prepare-mcp-sidecar.mjs --debug",
+    "mcp:build": "node scripts/prepare-mcp-sidecar.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",

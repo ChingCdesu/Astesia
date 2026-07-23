@@ -14,6 +14,7 @@ import {
 import ThemeToggle from '@/components/ThemeToggle';
 import TaskPanel from '@/components/TaskPanel';
 import NotificationPanel from '@/components/NotificationPanel';
+import McpHelper from '@/components/McpHelper';
 
 export default function StatusBar() {
   const { t, i18n } = useTranslation();
@@ -33,6 +34,7 @@ export default function StatusBar() {
         </span>
       </div>
       <div className="ml-auto flex items-center gap-2">
+        <McpHelper />
         <TaskPanel />
         <NotificationPanel />
         <DropdownMenu>

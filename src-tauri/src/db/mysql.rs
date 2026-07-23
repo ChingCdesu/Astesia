@@ -278,9 +278,9 @@ impl DatabaseDriver for MySqlDriver {
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        let _ = sqlx::query(&format!("USE `{}`", database))
+        sqlx::query(&format!("USE `{}`", database.replace('`', "``")))
             .execute(&mut *conn)
-            .await;
+            .await?;
         run_mysql_query(&mut *conn, sql).await
     }
 
@@ -291,9 +291,9 @@ impl DatabaseDriver for MySqlDriver {
     ) -> anyhow::Result<Vec<StatementResult>> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        let _ = sqlx::query(&format!("USE `{}`", database))
+        sqlx::query(&format!("USE `{}`", database.replace('`', "``")))
             .execute(&mut *conn)
-            .await;
+            .await?;
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();

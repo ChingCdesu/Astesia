@@ -8,6 +8,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Checkout main
@@ -22,19 +23,35 @@ jobs:
         run: |
           node -e "
             const fs = require('fs');
-            const paths = ['package.json', 'src-tauri/tauri.conf.json'];
-            const pkg = JSON.parse(fs.readFileSync(paths[0], 'utf8'));
+            const jsonPaths = ['package.json', 'src-tauri/tauri.conf.json'];
+            const pkg = JSON.parse(fs.readFileSync(jsonPaths[0], 'utf8'));
             const base = String(pkg.version).split('-')[0];
             const parts = base.split('.').map(Number);
             if (parts.length !== 3 || parts.some(Number.isNaN)) {
               throw new Error('Unexpected version format: ' + pkg.version);
             }
             const newVersion = parts[0] + '.' + parts[1] + '.' + (parts[2] + 1);
-            for (const p of paths) {
+            for (const p of jsonPaths) {
               const c = JSON.parse(fs.readFileSync(p, 'utf8'));
               c.version = newVersion;
               fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
             }
+            const cargoPath = 'src-tauri/Cargo.toml';
+            const cargo = fs.readFileSync(cargoPath, 'utf8');
+            const nextCargo = cargo.replace(
+              /(^\\[package\\][\\s\\S]*?^version = \")[^\"]+(\")/m,
+              (_, prefix, suffix) => prefix + newVersion + suffix
+            );
+            if (nextCargo === cargo) throw new Error('Could not update Cargo.toml version');
+            fs.writeFileSync(cargoPath, nextCargo);
+            const lockPath = 'src-tauri/Cargo.lock';
+            const lock = fs.readFileSync(lockPath, 'utf8');
+            const nextLock = lock.replace(
+              /(\\[\\[package\\]\\]\\nname = \"astesia\"\\nversion = \")[^\"]+(\")/,
+              (_, prefix, suffix) => prefix + newVersion + suffix
+            );
+            if (nextLock === lock) throw new Error('Could not update Cargo.lock version');
+            fs.writeFileSync(lockPath, nextLock);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + newVersion + '\n');
           "
 
@@ -74,8 +91,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json src-tauri/tauri.conf.json CHANGELOG.md
+          git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md
           git commit -m "release: ${VERSION}"
           git tag "v${VERSION}"
           git push origin main
           git push origin "v${VERSION}"
+
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: gh workflow run release.yml --ref "v${VERSION}"

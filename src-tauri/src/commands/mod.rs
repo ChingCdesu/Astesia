@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod connection;
 pub mod export;
+pub mod mcp_helper;
 pub mod mutation;
 pub mod objects;
 pub mod performance;

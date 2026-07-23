@@ -6,7 +6,8 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85"
+default-run = "astesia"
 
 [lib]
 name = "app_lib"
@@ -24,7 +25,7 @@ tauri-plugin-log = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-store = "2"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "postgres", "sqlite", "any", "chrono", "json", "uuid", "bigdecimal", "ipnetwork", "mac_address", "bit-vec"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "mysql", "postgres", "sqlite", "any", "chrono", "json", "uuid", "bigdecimal", "ipnetwork", "mac_address", "bit-vec"] }
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
 mongodb = "3"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
@@ -39,3 +40,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 rust_xlsxwriter = "0.95"
+rmcp = { version = "=2.2.0", features = ["elicitation", "schemars", "transport-io", "transport-streamable-http-server"] }
+schemars = "=1.2.1"
+sqlparser = "=0.62.0"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tauri-plugin-shell = "2"

@@ -17,6 +17,7 @@ A cross-platform desktop database management tool built with **Tauri 2 + React 1
 - **Cross-connection table copy** — Copy tables between different connections
 - **Redis key browser** — Dedicated key-value viewer
 - **MongoDB document viewer** — Collection-based document browsing
+- **MCP helper** — Run the bundled, authenticated local MCP server for AI tools
 - **i18n** — Simplified Chinese (default) and English
 - **Theming** — Light / Dark / System
 
@@ -58,12 +59,30 @@ pnpm tauri:dev        # Start development (Vite HMR + Tauri window)
 pnpm tauri:build      # Production build (creates platform installer)
 ```
 
+### MCP Server
+
+Astesia includes an MCP server for database access from compatible AI tools. In
+the desktop app, open **MCP** from the status bar to start or stop the bundled
+loopback-only Streamable HTTP service and copy its client configuration.
+
+To build and stage the standalone sidecar for the current platform:
+
+```bash
+pnpm mcp:build
+```
+
+`pnpm tauri:dev` prepares a debug sidecar automatically, while
+`pnpm tauri:build` builds and packages the release sidecar with the app. See the
+[MCP server guide](docs/mcp.md) for stdio configuration, credential handling,
+available tools, and destructive-operation safeguards.
+
 ### Other Commands
 
 ```bash
 pnpm dev              # Frontend only (no Tauri window)
 pnpm build            # TypeScript check + Vite build (frontend only)
 pnpm lint             # ESLint
+pnpm mcp:prepare:debug # Build and stage the debug MCP sidecar
 cd src-tauri && cargo build   # Rust backend only
 ```
 
@@ -93,4 +112,3 @@ src-tauri/                  # Rust backend
     state.rs                # AppState (connections, task manager)
     lib.rs                  # Plugin & command registration
 ```
-

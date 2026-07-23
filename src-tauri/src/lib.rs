@@ -1,22 +1,27 @@
 mod commands;
 mod db;
+pub mod mcp;
+mod mcp_helper;
 mod state;
 mod tasks;
 
+use mcp_helper::McpHelperState;
 use state::AppState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let handle = app.handle().clone();
+            app.manage(McpHelperState::new(handle.clone()));
             let state = handle.state::<AppState>();
             let handle_for_state = handle.clone();
             tauri::async_runtime::block_on(async {
@@ -65,7 +70,18 @@ pub fn run() {
             commands::backup::start_restore,
             commands::table_copy::copy_table,
             commands::export::export_data,
+            commands::mcp_helper::mcp_service_status,
+            commands::mcp_helper::start_mcp_service,
+            commands::mcp_helper::stop_mcp_service,
+            commands::mcp_helper::restart_mcp_service,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            let helper = app_handle.state::<McpHelperState>();
+            tauri::async_runtime::block_on(helper.shutdown());
+        }
+    });
 }
