@@ -1,3 +1,8 @@
+## v1.0.6 - 2026-07-24
+
+- Improve database query workflows and desktop UI (ee011a3)
+
+
 # Changelog
 
 ## v1.0.5 - 2026-07-23
