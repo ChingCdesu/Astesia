@@ -29,7 +29,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
 mongodb = "3"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
@@ -44,4 +44,15 @@ rmcp = { version = "=2.2.0", features = ["elicitation", "schemars", "transport-i
 schemars = "=1.2.1"
 sqlparser = "=0.62.0"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tauri-plugin-shell = "2"
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+ring = "=0.17.14"
+zeroize = "=1.8.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
+
+[dev-dependencies]
+tempfile = "3"

@@ -18,7 +18,7 @@ import { notify } from '@/stores/notificationStore';
 import { confirm } from '@/stores/confirmStore';
 import { useClipboardStore } from '@/stores/clipboardStore';
 import { useTabStore } from '@/stores/tabStore';
-import { ConnectionConfig, DB_TYPE_LABELS, DB_TYPE_COLORS, DbType } from '@/types/database';
+import { ConnectionConfig, DbType } from '@/types/database';
 import ConnectionDialog from '../ConnectionDialog';
 import CopyTableDialog from '../CopyTableDialog';
 import {
@@ -76,6 +76,7 @@ export default function Sidebar() {
   }, []);
 
   const handleConnect = async (config: ConnectionConfig) => {
+    if (config.source === 'mcp_http') return;
     const result = await connectDatabase(config.id);
     if (result.success) {
       setExpandedKeys((prev) => new Set(prev).add(config.id));
@@ -184,7 +185,7 @@ export default function Sidebar() {
     try {
       await invoke('redis_delete_key', { connectionId, database, key: keyName });
       await loadTables(connectionId, database);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to delete Redis key:', err);
     }
   };
@@ -206,7 +207,7 @@ export default function Sidebar() {
       setRedisNewKey('');
       setRedisNewValue('');
       setRedisNewTTL('');
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to add Redis key:', err);
     }
   };
@@ -254,7 +255,9 @@ export default function Sidebar() {
               <div className="flex flex-col gap-0.5">
                 {connections.map((conn) => {
                   const node = treeData[conn.id];
-                  const isConnected = node?.connected;
+                  const isConnected = conn.source === 'mcp_http'
+                    ? conn.app_connected === true
+                    : node?.connected;
                   const isExpanded = expandedKeys.has(conn.id);
 
                   return (
@@ -274,8 +277,28 @@ export default function Sidebar() {
                         onDisconnect={disconnectDatabase}
                         onEdit={(c) => { setEditConfig(c); setDialogOpen(true); }}
                         onDelete={(c) => {
-                          if (treeData[c.id]?.connected) disconnectDatabase(c.id);
-                          removeConnection(c.id);
+                          void (async () => {
+                            try {
+                              const approved = await confirm(
+                                t('sidebar.deleteConnection'),
+                                t('sidebar.confirmDeleteConnection', { name: c.name })
+                              );
+                              if (!approved) return;
+                              await removeConnection(c.id);
+                            } catch (error) {
+                              const repositoryError = error as {
+                                message?: string;
+                                remediation?: string;
+                              };
+                              notify.error(
+                                '删除连接失败',
+                                [
+                                  repositoryError?.message || String(error),
+                                  repositoryError?.remediation,
+                                ].filter(Boolean).join(' ')
+                              );
+                            }
+                          })();
                         }}
                       />
 
@@ -460,7 +483,7 @@ export default function Sidebar() {
                                           }
                                           notify.success('数据库已删除', db);
                                           loadDatabases(conn.id);
-                                        } catch (e: any) {
+                                        } catch (e: unknown) {
                                           notify.error('删除数据库失败', String(e));
                                         }
                                       }}

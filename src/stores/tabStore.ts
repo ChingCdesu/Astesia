@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { TabItem } from '@/types/database';
 
+const pendingTabContent = new Map<string, string>();
+
 interface TabStore {
   tabs: TabItem[];
   activeTabKey: string | null;
@@ -79,3 +81,26 @@ export const useTabStore = create<TabStore>((set, get) => ({
       ),
     })),
 }));
+
+export const stageTabContent = (key: string, content: string): void => {
+  pendingTabContent.set(key, content);
+};
+
+export const flushTabContent = (key: string): void => {
+  const content = pendingTabContent.get(key);
+  if (content === undefined) return;
+  pendingTabContent.delete(key);
+  useTabStore.getState().updateTabContent(key, content);
+};
+
+export const flushAllTabContent = (): void => {
+  if (pendingTabContent.size === 0) return;
+  const contentByKey = new Map(pendingTabContent);
+  pendingTabContent.clear();
+  useTabStore.setState((state) => ({
+    tabs: state.tabs.map((tab) => {
+      const content = contentByKey.get(tab.key);
+      return content === undefined ? tab : { ...tab, sqlContent: content };
+    }),
+  }));
+};

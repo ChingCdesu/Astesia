@@ -1,5 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useTabStore } from '@/stores/tabStore';
+import { useTranslation } from 'react-i18next';
+import {
+  flushAllTabContent,
+  flushTabContent,
+  useTabStore,
+} from '@/stores/tabStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { confirm } from '@/stores/confirmStore';
 import QueryEditor from '../QueryEditor';
@@ -28,6 +33,7 @@ const MAX_SIDEBAR_WIDTH = 600;
 const DEFAULT_SIDEBAR_WIDTH = 272;
 
 export default function AppLayout() {
+  const { t } = useTranslation();
   const { tabs, activeTabKey, setActiveTab, removeTab, removeAllTabs, removeOtherTabs, removeLeftTabs, removeRightTabs } = useTabStore();
   const connections = useConnectionStore((s) => s.connections);
 
@@ -77,54 +83,82 @@ export default function AppLayout() {
   }, []);
 
   const handleCloseTab = useCallback(async (key: string) => {
-    const tab = tabs.find(t => t.key === key);
+    flushTabContent(key);
+    const tab = useTabStore.getState().tabs.find(t => t.key === key);
     if (tab && hasUnsavedContent(tab)) {
       const ok = await confirm('关闭标签页', '当前查询内容未保存，是否继续关闭？', 'default');
       if (!ok) return;
     }
     removeTab(key);
-  }, [tabs, hasUnsavedContent, removeTab]);
+  }, [hasUnsavedContent, removeTab]);
 
   const handleCloseAllTabs = useCallback(async () => {
-    const unsavedTabs = tabs.filter(t => hasUnsavedContent(t));
+    flushAllTabContent();
+    const unsavedTabs = useTabStore.getState().tabs.filter(t => hasUnsavedContent(t));
     if (unsavedTabs.length > 0) {
       const ok = await confirm('关闭标签页', '存在未保存的查询内容，是否继续关闭所有标签页？', 'default');
       if (!ok) return;
     }
     removeAllTabs();
-  }, [tabs, hasUnsavedContent, removeAllTabs]);
+  }, [hasUnsavedContent, removeAllTabs]);
 
   const handleCloseOtherTabs = useCallback(async (key: string) => {
-    const otherUnsaved = tabs.filter(t => t.key !== key && hasUnsavedContent(t));
+    flushAllTabContent();
+    const otherUnsaved = useTabStore
+      .getState()
+      .tabs.filter(t => t.key !== key && hasUnsavedContent(t));
     if (otherUnsaved.length > 0) {
       const ok = await confirm('关闭标签页', '存在未保存的查询内容，是否继续关闭其他标签页？', 'default');
       if (!ok) return;
     }
     removeOtherTabs(key);
-  }, [tabs, hasUnsavedContent, removeOtherTabs]);
+  }, [hasUnsavedContent, removeOtherTabs]);
 
   const handleCloseLeftTabs = useCallback(async (key: string) => {
-    const idx = tabs.findIndex(t => t.key === key);
-    const leftUnsaved = tabs.slice(0, idx).filter(t => hasUnsavedContent(t));
+    flushAllTabContent();
+    const currentTabs = useTabStore.getState().tabs;
+    const idx = currentTabs.findIndex(t => t.key === key);
+    const leftUnsaved = currentTabs.slice(0, idx).filter(t => hasUnsavedContent(t));
     if (leftUnsaved.length > 0) {
       const ok = await confirm('关闭标签页', '存在未保存的查询内容，是否继续关闭左边的标签页？', 'default');
       if (!ok) return;
     }
     removeLeftTabs(key);
-  }, [tabs, hasUnsavedContent, removeLeftTabs]);
+  }, [hasUnsavedContent, removeLeftTabs]);
 
   const handleCloseRightTabs = useCallback(async (key: string) => {
-    const idx = tabs.findIndex(t => t.key === key);
-    const rightUnsaved = tabs.slice(idx + 1).filter(t => hasUnsavedContent(t));
+    flushAllTabContent();
+    const currentTabs = useTabStore.getState().tabs;
+    const idx = currentTabs.findIndex(t => t.key === key);
+    const rightUnsaved = currentTabs.slice(idx + 1).filter(t => hasUnsavedContent(t));
     if (rightUnsaved.length > 0) {
       const ok = await confirm('关闭标签页', '存在未保存的查询内容，是否继续关闭右边的标签页？', 'default');
       if (!ok) return;
     }
     removeRightTabs(key);
-  }, [tabs, hasUnsavedContent, removeRightTabs]);
+  }, [hasUnsavedContent, removeRightTabs]);
 
   const renderTabContent = (tab: (typeof tabs)[0]) => {
-    const connDbType = connections.find((c) => c.id === tab.connectionId)?.db_type;
+    const connection = connections.find((c) => c.id === tab.connectionId);
+    if (!connection) {
+      return (
+        <div className="flex h-full items-center justify-center p-8">
+          <div className="max-w-xl rounded-lg border bg-muted/20 p-6 text-center">
+            <Database className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+            <h2 className="font-medium">{t('tabs.connectionUnavailable')}</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {t('tabs.connectionUnavailableDescription')}
+            </p>
+            {tab.type === 'query' && tab.sqlContent?.trim() && (
+              <pre className="mt-4 max-h-64 overflow-auto rounded-md bg-muted p-3 text-left text-xs">
+                {tab.sqlContent}
+              </pre>
+            )}
+          </div>
+        </div>
+      );
+    }
+    const connDbType = connection.db_type;
     switch (tab.type) {
       case 'query':
         return (

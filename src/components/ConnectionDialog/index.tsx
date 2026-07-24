@@ -20,6 +20,13 @@ interface Props {
 
 const dbTypes: DbType[] = ['mysql', 'postgresql', 'sqlite', 'sqlserver', 'mongodb', 'redis'];
 
+const readableError = (error: unknown): string => {
+  const value = error as { message?: string; remediation?: string };
+  return [value?.message || String(error), value?.remediation]
+    .filter(Boolean)
+    .join(' ');
+};
+
 export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
   const { t } = useTranslation();
   const { addConnection, updateConnection, testConnection } = useConnectionStore();
@@ -35,6 +42,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
     color: '#00758F',
   });
   const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
@@ -47,7 +55,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
           host: editConfig.host,
           port: editConfig.port,
           username: editConfig.username,
-          password: editConfig.password,
+          password: '',
           database: editConfig.database || '',
           color: editConfig.color || '#00758F',
         });
@@ -73,7 +81,14 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
       port: DEFAULT_PORTS[dbType],
       host: dbType === 'sqlite' ? '' : prev.host || 'localhost',
       username: dbType === 'sqlite' || dbType === 'redis' ? '' : prev.username,
+      password: '',
     }));
+  };
+
+  const closeDialog = () => {
+    setForm((previous) => ({ ...previous, password: '' }));
+    setTestResult(null);
+    onClose();
   };
 
   const handleTest = async () => {
@@ -89,14 +104,14 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
       };
       const result = await testConnection(config);
       setTestResult(result);
-    } catch (e: any) {
-      setTestResult({ success: false, message: String(e) });
+    } catch (error: unknown) {
+      setTestResult({ success: false, message: readableError(error) });
     } finally {
       setTesting(false);
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name) return;
     const config: ConnectionConfig = {
       id: editConfig?.id || crypto.randomUUID(),
@@ -104,19 +119,32 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
       database: form.database || undefined,
       color: form.color || undefined,
     };
-    if (editConfig) {
-      updateConnection(config);
-    } else {
-      addConnection(config);
+    setSaving(true);
+    setTestResult(null);
+    try {
+      if (editConfig) {
+        await updateConnection({
+          ...config,
+          revision: editConfig.revision,
+          has_credential: editConfig.has_credential,
+          mcp_enabled: editConfig.mcp_enabled,
+        });
+      } else {
+        await addConnection(config);
+      }
+      closeDialog();
+    } catch (error) {
+      setTestResult({ success: false, message: readableError(error) });
+    } finally {
+      setSaving(false);
     }
-    onClose();
   };
 
   const isSqlite = form.db_type === 'sqlite';
   const isRedis = form.db_type === 'redis';
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && closeDialog()}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>
@@ -202,7 +230,11 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
               <Input
                 className="col-span-3"
                 type="password"
-                placeholder={t('connection.passwordPlaceholder')}
+                placeholder={
+                  editConfig?.has_credential
+                    ? t('connection.savedPasswordPlaceholder')
+                    : t('connection.passwordPlaceholder')
+                }
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
               />
@@ -256,14 +288,18 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
         </div>
 
         <DialogFooter className="mt-4 gap-2">
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={closeDialog}>
             {t('connection.cancel')}
           </Button>
           <Button variant="secondary" onClick={handleTest} disabled={testing || !form.name}>
             {testing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
             {t('connection.test')}
           </Button>
-          <Button onClick={handleSave} disabled={!form.name}>
+          <Button
+            onClick={() => void handleSave()}
+            disabled={!form.name || saving}
+          >
+            {saving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
             {t('connection.save')}
           </Button>
         </DialogFooter>

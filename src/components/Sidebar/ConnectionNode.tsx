@@ -11,6 +11,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useCreateResourceStore } from '@/stores/createResourceStore';
 import { DbIcon } from '@/components/ui/db-icon';
+import { Badge } from '@/components/ui/badge';
 
 interface ConnectionNodeProps {
   conn: ConnectionConfig;
@@ -36,6 +37,7 @@ export default function ConnectionNode({
 }: ConnectionNodeProps) {
   const { t } = useTranslation();
   const { openDialog } = useCreateResourceStore();
+  const isMcpManaged = conn.source === 'mcp_http';
   const color = conn.color || DB_TYPE_COLORS[conn.db_type];
   const showSpinner = isConnecting || isLoading;
 
@@ -46,13 +48,15 @@ export default function ConnectionNode({
           className={cn(
             "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-sidebar-accent",
             isConnected && "font-medium",
-            isConnecting && "cursor-wait opacity-70"
+            isConnecting && "cursor-wait opacity-70",
+            isMcpManaged && !isConnected && "cursor-default"
           )}
           disabled={isConnecting}
+          title={conn.last_error || (isMcpManaged ? t('connection.mcpManaged') : undefined)}
           onClick={async () => {
             if (isConnecting) return;
             if (!isConnected) {
-              await onConnect(conn);
+              if (!isMcpManaged) await onConnect(conn);
             } else {
               onToggleExpand(conn.id);
             }
@@ -73,7 +77,16 @@ export default function ConnectionNode({
           />
           <DbIcon dbType={conn.db_type} size={24} />
           <span className="truncate">{conn.name}</span>
-          <span className="ml-auto pl-2 text-[10px] text-muted-foreground">
+          {isMcpManaged && (
+            <Badge
+              variant={conn.mcp_connected ? 'info' : 'secondary'}
+              className="ml-auto px-1.5 py-0 text-[9px]"
+              title={t('connection.mcpManaged')}
+            >
+              MCP
+            </Badge>
+          )}
+          <span className={cn("pl-2 text-[10px] text-muted-foreground", !isMcpManaged && "ml-auto")}>
             {DB_TYPE_LABELS[conn.db_type]}
           </span>
         </button>
@@ -107,28 +120,40 @@ export default function ConnectionNode({
               <UserPlus className="h-4 w-4" /> {t('sidebar.newUser')}
             </ContextMenuItem>
             <ContextMenuSeparator />
-            <ContextMenuItem
-              className="gap-2 py-2"
-              onClick={() => onDisconnect(conn.id)}
-            >
-              <Unplug className="h-4 w-4" /> {t('sidebar.disconnect')}
-            </ContextMenuItem>
-            <ContextMenuSeparator />
+            {!isMcpManaged && (
+              <>
+                <ContextMenuItem
+                  className="gap-2 py-2"
+                  onClick={() => onDisconnect(conn.id)}
+                >
+                  <Unplug className="h-4 w-4" /> {t('sidebar.disconnect')}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+              </>
+            )}
           </>
         )}
-        <ContextMenuItem
-          className="gap-2 py-2"
-          onClick={() => onEdit(conn)}
-        >
-          <Pencil className="h-4 w-4" /> {t('common.edit')}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          className="gap-2 py-2 text-destructive focus:text-destructive"
-          onClick={() => onDelete(conn)}
-        >
-          <Trash2 className="h-4 w-4" /> {t('common.delete')}
-        </ContextMenuItem>
+        {isMcpManaged ? (
+          <ContextMenuItem disabled className="gap-2 py-2">
+            <Database className="h-4 w-4" /> {t('connection.mcpManaged')}
+          </ContextMenuItem>
+        ) : (
+          <>
+            <ContextMenuItem
+              className="gap-2 py-2"
+              onClick={() => onEdit(conn)}
+            >
+              <Pencil className="h-4 w-4" /> {t('common.edit')}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="gap-2 py-2 text-destructive focus:text-destructive"
+              onClick={() => onDelete(conn)}
+            >
+              <Trash2 className="h-4 w-4" /> {t('common.delete')}
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

@@ -8,6 +8,7 @@ export default {
     refresh: '刷新',
     disconnect: '断开连接',
     deleteConnection: '删除连接',
+    confirmDeleteConnection: '确认删除连接“{{name}}”吗？保存的系统凭据也会被移除，此操作不可撤销。',
     openQuery: '新建查询',
     viewData: '查看数据',
     viewStructure: '查看结构',
@@ -62,10 +63,22 @@ export default {
     hostPlaceholder: '请输入主机地址',
     usernamePlaceholder: '请输入用户名',
     passwordPlaceholder: '请输入密码',
+    savedPasswordPlaceholder: '密码已安全保存；留空将保留原密码',
     databasePlaceholder: '请输入数据库名（可选）',
     filePathPlaceholder: '请输入SQLite文件路径',
     edit: '编辑连接',
     new: '新建连接',
+    mcpManaged: '由 Streamable HTTP MCP 管理',
+  },
+  migration: {
+    title: '需要迁移数据库连接',
+    description: '检测到 {{count}} 个旧版连接。继续使用 Astesia 前，必须完成一次安全迁移。',
+    metadata: '连接名称、地址、账号和数据库信息将移入 App 与 STDIO MCP 共用的本地仓库。',
+    credentials: '系统凭据库只保存一个 Astesia 随机主密钥；每个连接密码会独立加密后存入 App 与 STDIO MCP 共用的本地保险库，不再保存在 WebView localStorage 中。打包的 astesia-mcp 会回读验证；macOS Sidecar 只需授权这个主密钥条目，不再按连接重复授权，请选择“始终允许”。验证失败会停止迁移并保留旧数据。',
+    required: '此迁移为强制迁移，不能跳过。只有全部连接迁移成功后，旧数据才会被删除。',
+    start: '开始安全迁移',
+    migrating: '正在迁移…',
+    errorCode: '错误码：{{code}}',
   },
   query: {
     execute: '执行',
@@ -101,6 +114,11 @@ export default {
     error: '错误',
     queryError: '查询错误',
     placeholderTip: '输入 SQL 并按 Ctrl+Enter 执行',
+  },
+  tabs: {
+    connectionUnavailable: '连接已不可用',
+    connectionUnavailableDescription:
+      '此连接已被移除。标签页会保留，但数据库操作已禁用。',
   },
   table: {
     structure: '表结构',

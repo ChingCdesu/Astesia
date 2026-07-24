@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::connection_repository::{ConnectionRepositoryError, SharedConnectionRepository};
 use crate::db::{
     mongo::MongoDriver, mysql::MySqlDriver, postgres::PostgresDriver, redis_db::RedisDriver,
     sqlite::SqliteDriver, sqlserver::SqlServerDriver, ConnectionConfig, DatabaseDriver, DbType,
@@ -10,17 +11,31 @@ use crate::tasks::TaskManager;
 
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, Box<dyn DatabaseDriver>>>>,
+    /// Revisions for drivers opened from the shared connection repository.
+    ///
+    /// HTTP-mirrored MCP drivers deliberately have no entry here, so repository
+    /// reconciliation cannot remove session-scoped HTTP connections.
+    pub shared_driver_revisions: Arc<Mutex<HashMap<String, i64>>>,
+    /// Serializes shared-driver install/removal with repository snapshots and
+    /// local profile mutations. Code taking the driver maps must always acquire
+    /// this coordinator first, then `connections`, then
+    /// `shared_driver_revisions`.
+    pub shared_driver_coordinator: Arc<Mutex<()>>,
+    pub connection_repository: SharedConnectionRepository,
     pub task_manager: TaskManager,
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, ConnectionRepositoryError> {
+        Ok(Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            shared_driver_revisions: Arc::new(Mutex::new(HashMap::new())),
+            shared_driver_coordinator: Arc::new(Mutex::new(())),
+            connection_repository: SharedConnectionRepository::new_default()?,
             task_manager: TaskManager::new(),
             app_handle: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     pub async fn set_app_handle(&self, handle: tauri::AppHandle) {

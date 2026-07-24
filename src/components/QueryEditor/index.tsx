@@ -11,7 +11,10 @@ import {
 } from 'lucide-react';
 import type { editor } from 'monaco-editor';
 import { cn } from '@/lib/utils';
-import { useTabStore } from '@/stores/tabStore';
+import {
+  flushTabContent,
+  stageTabContent,
+} from '@/stores/tabStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { configureMonacoForDialect, SqlDialect, registerDatabaseCompletions, clearDatabaseCompletions } from '@/lib/monacoSetup';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -71,7 +74,6 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
   const monacoInstanceRef = useRef<typeof import('monaco-editor') | null>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorResizeRef = useRef({ startY: 0, startHeight: 0 });
-  const updateTabContent = useTabStore((s) => s.updateTabContent);
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
 
   useEffect(() => {
@@ -79,8 +81,13 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
+      const currentContent = editorRef.current?.getValue();
+      if (currentContent !== undefined) {
+        stageTabContent(tabKey, currentContent);
+      }
+      flushTabContent(tabKey);
     };
-  }, []);
+  }, [tabKey]);
 
   // Fetch database metadata and register Monaco autocompletions
   useEffect(() => {
@@ -153,14 +160,15 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
 
   const handleContentChange = useCallback(
     (value: string | undefined) => {
+      stageTabContent(tabKey, value ?? '');
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
       debounceTimerRef.current = setTimeout(() => {
-        updateTabContent(tabKey, value ?? '');
+        flushTabContent(tabKey);
       }, 500);
     },
-    [tabKey, updateTabContent]
+    [tabKey]
   );
 
   const handleBeforeMount: BeforeMount = (monaco) => {

@@ -10,6 +10,73 @@ export interface ConnectionConfig {
   password: string;
   database?: string;
   color?: string;
+  source?: 'shared' | 'mcp_http';
+  has_credential?: boolean;
+  revision?: number;
+  mcp_enabled?: boolean;
+  mcp_session_id?: string;
+  mcp_connection_id?: string;
+  mcp_transition?: number;
+  mcp_connected?: boolean;
+  app_connected?: boolean;
+  last_error?: string | null;
+}
+
+export interface SharedConnectionProfile {
+  id: string;
+  name: string;
+  db_type: DbType;
+  host: string;
+  port: number;
+  username: string;
+  database?: string;
+  color?: string;
+  has_credential: boolean;
+  revision: number;
+  mcp_enabled: boolean;
+}
+
+export interface ConnectionProfilesSnapshot {
+  revision: number;
+  profiles: SharedConnectionProfile[];
+}
+
+export interface ConnectionRepositoryError {
+  code: string;
+  message: string;
+  remediation: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+}
+
+export interface LegacyMigrationResult {
+  imported: number;
+  skipped: number;
+  already_complete: boolean;
+  revision: number;
+}
+
+export interface McpSyncedConnection {
+  id: string;
+  name: string;
+  db_type: DbType;
+  host: string;
+  port: number;
+  username: string;
+  database?: string;
+  color?: string;
+  source: 'mcp_http';
+  mcp_session_id: string;
+  mcp_connection_id: string;
+  mcp_transition: number;
+  mcp_connected: boolean;
+  app_connected: boolean;
+  last_error?: string | null;
+}
+
+export interface McpConnectionsSnapshot {
+  revision: number;
+  connections: McpSyncedConnection[];
 }
 
 export interface ConnectionResult {
@@ -19,7 +86,7 @@ export interface ConnectionResult {
 
 export interface QueryResult {
   columns: ColumnInfo[];
-  rows: any[][];
+  rows: unknown[][];
   affected_rows: number;
   execution_time_ms: number;
 }
@@ -29,7 +96,7 @@ export interface StatementResult {
   success: boolean;
   error?: string | null;
   columns: ColumnInfo[];
-  rows: any[][];
+  rows: unknown[][];
   affected_rows: number;
   execution_time_ms: number;
 }

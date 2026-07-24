@@ -1,7 +1,11 @@
 mod commands;
+mod connection_repository;
+mod credential_vault;
 mod db;
 pub mod mcp;
 mod mcp_helper;
+mod mcp_sync;
+mod mcp_sync_server;
 mod state;
 mod tasks;
 
@@ -12,7 +16,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(AppState::new().expect("failed to initialize shared connection repository"))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -42,6 +46,12 @@ pub fn run() {
             commands::connection::connect_database,
             commands::connection::disconnect_database,
             commands::connection::get_default_port,
+            commands::connection::list_connection_profiles,
+            commands::connection::connection_profiles_snapshot,
+            commands::connection::shared_connections_revision,
+            commands::connection::save_connection_profile,
+            commands::connection::delete_connection_profile,
+            commands::connection::migrate_legacy_connections,
             commands::query::execute_query,
             commands::query::execute_statements,
             commands::query::get_table_data,
@@ -71,6 +81,7 @@ pub fn run() {
             commands::table_copy::copy_table,
             commands::export::export_data,
             commands::mcp_helper::mcp_service_status,
+            commands::mcp_helper::mcp_synced_connections,
             commands::mcp_helper::start_mcp_service,
             commands::mcp_helper::stop_mcp_service,
             commands::mcp_helper::restart_mcp_service,

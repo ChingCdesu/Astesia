@@ -10,9 +10,10 @@ use sqlparser::{
     ast::{
         ConnectByKind, Distinct, Expr, Function, FunctionArg, FunctionArgExpr,
         FunctionArgumentClause, FunctionArguments, GroupByExpr, GroupByWithModifier, Insert,
-        JoinConstraint, JoinOperator, LimitClause, NamedWindowExpr, OrderBy, OrderByKind, Query,
-        Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor,
-        TableWithJoins, TopQuantity, WindowFrameBound, WindowSpec,
+        JoinConstraint, JoinOperator, LimitClause, ListAggOnOverflow, NamedWindowExpr, OrderBy,
+        OrderByKind, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
+        Statement, TableFactor, TableWithJoins, TopQuantity, WildcardAdditionalOptions,
+        WindowFrameBound, WindowSpec, WindowType,
     },
     dialect::Dialect,
     parser::Parser,
@@ -475,11 +476,23 @@ fn classify_select_item(item: &SelectItem) -> QueryRisk {
         | SelectItem::ExprWithAliases {
             expr: expression, ..
         } => classify_expr(expression),
-        SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::Expr(expression), _) => {
-            classify_expr(expression)
+        SelectItem::QualifiedWildcard(
+            SelectItemQualifiedWildcardKind::Expr(expression),
+            options,
+        ) => classify_expr(expression).highest(classify_wildcard_options(options)),
+        SelectItem::QualifiedWildcard(_, options) | SelectItem::Wildcard(options) => {
+            classify_wildcard_options(options)
         }
-        SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => QueryRisk::ReadOnly,
     }
+}
+
+fn classify_wildcard_options(options: &WildcardAdditionalOptions) -> QueryRisk {
+    options
+        .opt_replace
+        .iter()
+        .flat_map(|replace| replace.items.iter())
+        .map(|item| classify_expr(&item.expr))
+        .fold(QueryRisk::ReadOnly, QueryRisk::highest)
 }
 
 fn classify_table_with_joins(table: &TableWithJoins) -> QueryRisk {
@@ -655,7 +668,11 @@ fn classify_expr(expression: &Expr) -> QueryRisk {
 }
 
 fn classify_function(function: &Function) -> QueryRisk {
-    let mut risk = QueryRisk::Unknown;
+    let mut risk = if is_safe_read_only_aggregate(function) {
+        QueryRisk::ReadOnly
+    } else {
+        QueryRisk::Unknown
+    };
 
     for arguments in [&function.parameters, &function.args] {
         risk = risk.highest(classify_function_arguments(arguments));
@@ -666,10 +683,67 @@ fn classify_function(function: &Function) -> QueryRisk {
     }
 
     for order_by in &function.within_group {
-        risk = risk.highest(classify_expr(&order_by.expr));
+        risk = risk.highest(classify_order_by_expr(order_by));
+    }
+
+    if let Some(WindowType::WindowSpec(specification)) = &function.over {
+        risk = risk.highest(classify_window_spec(specification));
     }
 
     risk
+}
+
+/// Only standard aggregate names with no schema qualification are trusted.
+///
+/// Keeping this list deliberately small prevents a schema-qualified UDF (or a
+/// dialect-specific function with possible side effects) from being mistaken
+/// for a built-in read-only aggregate.
+fn is_safe_read_only_aggregate(function: &Function) -> bool {
+    let [part] = function.name.0.as_slice() else {
+        return false;
+    };
+    let Some(identifier) = part.as_ident() else {
+        return false;
+    };
+    if identifier.quote_style.is_some() || !matches!(&function.parameters, FunctionArguments::None)
+    {
+        return false;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return false;
+    };
+
+    let positional = arguments.args.iter().all(|argument| {
+        matches!(
+            argument,
+            FunctionArg::Unnamed(
+                FunctionArgExpr::Expr(_)
+                    | FunctionArgExpr::Wildcard
+                    | FunctionArgExpr::QualifiedWildcard(_)
+            )
+        )
+    });
+    if !positional {
+        return false;
+    }
+
+    match identifier.value.to_ascii_uppercase().as_str() {
+        "COUNT" => matches!(
+            arguments.args.as_slice(),
+            [FunctionArg::Unnamed(
+                FunctionArgExpr::Expr(_)
+                    | FunctionArgExpr::Wildcard
+                    | FunctionArgExpr::QualifiedWildcard(_)
+            )]
+        ),
+        "SUM" | "AVG" | "MIN" | "MAX" => {
+            matches!(
+                arguments.args.as_slice(),
+                [FunctionArg::Unnamed(FunctionArgExpr::Expr(_))]
+            )
+        }
+        _ => false,
+    }
 }
 
 fn classify_function_arguments(arguments: &FunctionArguments) -> QueryRisk {
@@ -687,10 +761,24 @@ fn classify_function_arguments(arguments: &FunctionArguments) -> QueryRisk {
                 let clause_risk = match clause {
                     FunctionArgumentClause::OrderBy(expressions) => expressions
                         .iter()
-                        .map(|expression| classify_expr(&expression.expr))
+                        .map(classify_order_by_expr)
                         .fold(QueryRisk::ReadOnly, QueryRisk::highest),
                     FunctionArgumentClause::Limit(expression) => classify_expr(expression),
-                    _ => QueryRisk::ReadOnly,
+                    FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Error) => {
+                        QueryRisk::ReadOnly
+                    }
+                    FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate {
+                        filler,
+                        ..
+                    }) => filler
+                        .as_deref()
+                        .map(classify_expr)
+                        .unwrap_or(QueryRisk::ReadOnly),
+                    FunctionArgumentClause::Having(bound) => classify_expr(&bound.1),
+                    FunctionArgumentClause::IgnoreOrRespectNulls(_)
+                    | FunctionArgumentClause::Separator(_)
+                    | FunctionArgumentClause::JsonNullClause(_)
+                    | FunctionArgumentClause::JsonReturningClause(_) => QueryRisk::ReadOnly,
                 };
                 risk = risk.highest(clause_risk);
             }
@@ -714,9 +802,8 @@ fn classify_function_arg(argument: &FunctionArg) -> QueryRisk {
 fn classify_function_arg_expr(argument: &FunctionArgExpr) -> QueryRisk {
     match argument {
         FunctionArgExpr::Expr(expression) => classify_expr(expression),
-        FunctionArgExpr::QualifiedWildcard(_)
-        | FunctionArgExpr::Wildcard
-        | FunctionArgExpr::WildcardWithOptions(_) => QueryRisk::ReadOnly,
+        FunctionArgExpr::WildcardWithOptions(options) => classify_wildcard_options(options),
+        FunctionArgExpr::QualifiedWildcard(_) | FunctionArgExpr::Wildcard => QueryRisk::ReadOnly,
     }
 }
 
@@ -811,13 +898,41 @@ mod tests {
     }
 
     #[test]
-    fn function_calls_fail_closed_without_a_safe_function_whitelist() {
+    fn standard_read_only_aggregates_are_safe() {
         for sql in [
-            "SELECT count(*) FROM users",
+            "SELECT COUNT(*) FROM users",
+            "SELECT SUM(amount), AVG(amount), MIN(amount), MAX(amount) FROM orders",
+            "SELECT COUNT(CASE WHEN active = true THEN 1 END) FROM users",
+            "SELECT region, COUNT(*) AS total FROM users GROUP BY region \
+             UNION ALL \
+             SELECT region, SUM(CASE WHEN active = true THEN 1 ELSE 0 END) AS total \
+             FROM archived_users GROUP BY region",
+            "SELECT COUNT(*) FILTER (WHERE active = true) OVER (PARTITION BY region) FROM users",
+            "SELECT MAX(score) WITHIN GROUP (ORDER BY created_at) FROM results",
+        ] {
+            let analysis = analyze_sql(sql);
+            assert_eq!(analysis.parse_error, None, "{sql}");
+            assert_eq!(analysis.risk, QueryRisk::ReadOnly, "{sql}");
+            assert!(!analysis.requires_confirmation(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn untrusted_function_calls_still_fail_closed() {
+        for sql in [
             "SELECT user_defined_function()",
             "SELECT dblink_exec('remote', 'DELETE FROM users')",
             "SELECT 1 WHERE user_defined_function()",
             "SELECT * FROM user_defined_function()",
+            "SELECT custom_schema.count(*) FROM users",
+            "SELECT \"COUNT\"(*) FROM users",
+            "SELECT COUNT() FROM users",
+            "SELECT COUNT(id, email) FROM users",
+            "SELECT SUM(amount, tax) FROM orders",
+            "SELECT SUM(user_defined_function()) FROM users",
+            "SELECT COUNT(*) FILTER (WHERE user_defined_function()) FROM users",
+            "SELECT SUM(amount) OVER (PARTITION BY user_defined_function()) FROM users",
+            "SELECT MAX(score) WITHIN GROUP (ORDER BY user_defined_function()) FROM results",
         ] {
             let analysis = analyze_sql(sql);
             assert_eq!(analysis.parse_error, None, "{sql}");
