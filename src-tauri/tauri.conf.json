@@ -29,6 +29,9 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "targets": "all",
     "externalBin": [
       "binaries/astesia-mcp"
