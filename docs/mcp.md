@@ -116,8 +116,10 @@ type, endpoint, account, and database. The bundled `astesia-mcp` then proves it
 can open the exact enabled-credential set at the same repository revision. The
 App deletes the old `localStorage` value only after repository migration,
 legacy-item cleanup, and sidecar verification all succeed. The same verification
-runs on later App starts so a sidecar changed by an upgrade fails closed before
-use.
+runs only during an explicit migration. Later App starts load connection
+metadata without opening the credential vault; App and MCP credential access
+still fail closed when the user first performs an operation that needs a
+password.
 
 On Linux, a Secret Service provider and session D-Bus must be available (for
 example GNOME Keyring, KWallet, or KeePassXC Secret Service). If the system
@@ -137,14 +139,17 @@ below the 20% product threshold. Windows and macOS use their native credential
 stores. Reassess this decision if platform-specific Astesia telemetry or newer
 market data exceeds the threshold.
 
-On macOS, the App and `astesia-mcp` are separate executables. Keychain may ask
-the user to authorize the sidecar the first time it reads the single App-created
-master-key item; it no longer reads one Keychain item per connection. Choose
-**Always Allow**, not a one-time approval, in a graphical login session before
-using a non-interactive stdio client. Release builds must sign the App and
-sidecar with stable identities so an upgrade does not invalidate authorization.
-Windows Credential Manager normally resolves the same single master-key item
-without an interactive prompt.
+On macOS, the App and `astesia-mcp` are separate executables with separate data
+protection Keychain scopes. Each process lazily imports the shared master key
+into its own user-presence-protected item when that process first needs a
+database password. macOS then chooses Touch ID, Apple Watch, or the local
+account password according to System Settings. The legacy shared item remains
+as a migration bridge so an independently launched sidecar can import the same
+key without exposing it through WebView or MCP payloads. Authentication UI
+requires a graphical login session. Release builds should still sign the App
+and sidecar with stable identities so protected items survive upgrades. Windows
+Credential Manager normally resolves the same single master-key item without an
+interactive prompt.
 
 Standalone stdio and the bundled verifier run in strict mode: they never read or
 delete an older per-connection system-credential item. If App migration has not

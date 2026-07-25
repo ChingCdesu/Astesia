@@ -83,7 +83,7 @@ export default {
     title: 'Connection migration required',
     description: '{{count}} legacy connections were found. A one-time secure migration is required before Astesia can continue.',
     metadata: 'Names, endpoints, accounts, and database settings move to the local repository shared by the App and STDIO MCP.',
-    credentials: 'The system credential store keeps one random Astesia master key. Each connection password is encrypted separately in the local vault shared by the App and STDIO MCP, never WebView localStorage. The bundled astesia-mcp verifies the vault; on macOS, authorize this one master-key item and choose “Always Allow.” A failed verification stops migration and preserves the legacy data.',
+    credentials: 'The system credential store keeps one random Astesia master key. Each connection password is encrypted separately in the local vault shared by the App and STDIO MCP, never WebView localStorage. Migration runs only after you start it, and the bundled astesia-mcp verifies the vault. On macOS, the system can authenticate the App and sidecar with Touch ID, Apple Watch, or the local account password. A failed verification stops migration and preserves the legacy data.',
     required: 'This migration cannot be skipped. Legacy data is deleted only after every connection migrates successfully.',
     start: 'Start secure migration',
     migrating: 'Migrating…',

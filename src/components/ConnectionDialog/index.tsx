@@ -279,6 +279,10 @@ export default function ConnectionDialog({
                 value={form.database}
                 onChange={(e) => setForm({ ...form, database: e.target.value })}
                 readOnly={readOnly}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
               />
             </div>
           )}

@@ -40,6 +40,10 @@ export default function CreateDatabaseForm({ connectionId, onSuccess }: Props) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={t('create.database')}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
           autoFocus
         />
       </div>

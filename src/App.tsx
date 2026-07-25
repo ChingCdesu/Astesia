@@ -168,13 +168,9 @@ function App() {
       }
 
       try {
-        const result = await invoke<LegacyMigrationResult>('migrate_legacy_connections', {
-          connections: [],
-        });
-        if (result.imported !== 0 || result.skipped !== 0) {
-          throw new Error('空迁移返回了不一致的结果，旧数据未被删除。');
-        }
-        if (disposed) return;
+        // Hydrating shared profile metadata must not unlock the credential
+        // vault. Password access is deferred until the user connects, tests,
+        // saves, deletes, or explicitly starts an MCP credential migration.
         removeLegacySnapshot(legacy.raw);
         await hydrateSharedConnections();
         if (!disposed) setMigrationPhase('ready');

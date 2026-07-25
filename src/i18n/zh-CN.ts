@@ -83,7 +83,7 @@ export default {
     title: '需要迁移数据库连接',
     description: '检测到 {{count}} 个旧版连接。继续使用 Astesia 前，必须完成一次安全迁移。',
     metadata: '连接名称、地址、账号和数据库信息将移入 App 与 STDIO MCP 共用的本地仓库。',
-    credentials: '系统凭据库只保存一个 Astesia 随机主密钥；每个连接密码会独立加密后存入 App 与 STDIO MCP 共用的本地保险库，不再保存在 WebView localStorage 中。打包的 astesia-mcp 会回读验证；macOS Sidecar 只需授权这个主密钥条目，不再按连接重复授权，请选择“始终允许”。验证失败会停止迁移并保留旧数据。',
+    credentials: '系统凭据库只保存一个 Astesia 随机主密钥；每个连接密码会独立加密后存入 App 与 STDIO MCP 共用的本地保险库，不再保存在 WebView localStorage 中。迁移仅在你点击开始后执行，打包的 astesia-mcp 会回读验证。macOS 会按系统设置使用 Touch ID、Apple Watch 或本机密码验证 App 与 Sidecar；验证失败会停止迁移并保留旧数据。',
     required: '此迁移为强制迁移，不能跳过。只有全部连接迁移成功后，旧数据才会被删除。',
     start: '开始安全迁移',
     migrating: '正在迁移…',

@@ -18,6 +18,8 @@ use zeroize::Zeroizing;
 const CREDENTIAL_SERVICE: &str = "com.astesia.app.database";
 const MASTER_CREDENTIAL_SERVICE: &str = "com.astesia.app.credential-vault";
 const MASTER_CREDENTIAL_ACCOUNT: &str = "master-key-v1";
+#[cfg(target_os = "macos")]
+const PROTECTED_MASTER_CREDENTIAL_ACCOUNT: &str = "master-key-v2-user-presence";
 const MASTER_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const AUTH_TAG_LEN: usize = 16;
@@ -172,11 +174,42 @@ struct PlatformKeyringBackend;
 
 impl KeyringBackend for PlatformKeyringBackend {
     fn get_master(&self) -> keyring::Result<Vec<u8>> {
-        master_platform_entry()?.get_secret()
+        #[cfg(target_os = "macos")]
+        {
+            match get_macos_protected_master() {
+                Ok(secret) => Ok(secret),
+                Err(keyring::Error::NoEntry) => {
+                    // The classic shared item is intentionally retained as a
+                    // migration bridge: the App and the independently signed
+                    // sidecar have separate data-protection keychain scopes.
+                    // Each process imports it into its own user-presence item
+                    // only when that process first needs a database secret.
+                    let secret = master_platform_entry()?.get_secret()?;
+                    set_macos_protected_master(&secret)?;
+                    Ok(secret)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            master_platform_entry()?.get_secret()
+        }
     }
 
     fn set_master(&self, secret: &[u8]) -> keyring::Result<()> {
-        master_platform_entry()?.set_secret(secret)
+        #[cfg(target_os = "macos")]
+        {
+            // Write the cross-process migration bridge first. If creating the
+            // protected item fails, no envelope is committed and a retry can
+            // safely import this same key.
+            master_platform_entry()?.set_secret(secret)?;
+            set_macos_protected_master(secret)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            master_platform_entry()?.set_secret(secret)
+        }
     }
 
     fn get_legacy(&self, reference: &str) -> keyring::Result<String> {
@@ -302,8 +335,15 @@ impl SystemCredentialVault {
         &self,
         operation: &'static str,
     ) -> Result<Zeroizing<[u8; MASTER_KEY_LEN]>, CredentialVaultError> {
-        let _ = self.master_key(operation).await?;
-        self.verify_cached_master_for_write(operation).await
+        if self.master_key.initialized() {
+            return self.verify_cached_master_for_write(operation).await;
+        }
+
+        // A cold write loads (or creates) the OS-backed master only once. On
+        // macOS this avoids presenting two local-authentication sheets for one
+        // explicit save while retaining revalidation for later writes.
+        let key = self.master_key(operation).await?;
+        Ok(Zeroizing::new(*key))
     }
 
     async fn verify_cached_master_for_write(
@@ -882,6 +922,54 @@ fn master_platform_entry() -> keyring::Result<keyring::Entry> {
     keyring::Entry::new(MASTER_CREDENTIAL_SERVICE, MASTER_CREDENTIAL_ACCOUNT)
 }
 
+#[cfg(target_os = "macos")]
+fn get_macos_protected_master() -> keyring::Result<Vec<u8>> {
+    use security_framework::passwords::{generic_password, PasswordOptions};
+
+    let mut options = PasswordOptions::new_generic_password(
+        MASTER_CREDENTIAL_SERVICE,
+        PROTECTED_MASTER_CREDENTIAL_ACCOUNT,
+    );
+    options.use_protected_keychain();
+    generic_password(options).map_err(map_macos_keychain_error)
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_protected_master(secret: &[u8]) -> keyring::Result<()> {
+    use security_framework::passwords::{set_generic_password_options, PasswordOptions};
+
+    let mut options = PasswordOptions::new_generic_password(
+        MASTER_CREDENTIAL_SERVICE,
+        PROTECTED_MASTER_CREDENTIAL_ACCOUNT,
+    );
+    options.use_protected_keychain();
+    options.set_access_control_options(macos_master_access_control());
+    set_generic_password_options(secret, options).map_err(map_macos_keychain_error)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_master_access_control() -> security_framework::passwords::AccessControlOptions {
+    use security_framework::passwords::AccessControlOptions;
+
+    // `watch` is deprecated in favour of companion authentication on newer
+    // SDKs, but remains the backwards-compatible Security.framework flag.
+    // The OR constraint lets macOS choose Touch ID, Apple Watch, or the local
+    // account password according to the user's System Settings.
+    AccessControlOptions::BIOMETRY_ANY
+        | AccessControlOptions::WATCH
+        | AccessControlOptions::DEVICE_PASSCODE
+        | AccessControlOptions::OR
+}
+
+#[cfg(target_os = "macos")]
+fn map_macos_keychain_error(error: security_framework::base::Error) -> keyring::Error {
+    match error.code() {
+        -25_300 => keyring::Error::NoEntry,
+        -25_291 | -34_018 => keyring::Error::NoStorageAccess(Box::new(error)),
+        _ => keyring::Error::PlatformFailure(Box::new(error)),
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn platform_entry(_reference: &str) -> keyring::Result<keyring::Entry> {
     unsupported_platform_error()
@@ -965,7 +1053,7 @@ fn platform_remediation() -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        return "请解锁当前用户的 macOS Keychain，并在系统提示时同时允许 Astesia 与 astesia-mcp 访问。无交互的 STDIO 会话需要先在图形登录会话中完成授权。Astesia 不会回退为明文密码文件。"
+        return "请解锁当前用户的 macOS Keychain，并通过系统提供的 Touch ID、Apple Watch 或本机密码验证。Astesia App 与 astesia-mcp 会在各自首次实际读取凭据时请求验证；无图形登录会话无法显示系统授权界面。Astesia 不会回退为明文密码文件。"
             .to_string();
     }
     #[allow(unreachable_code)]
@@ -1240,7 +1328,7 @@ mod vault_tests {
             "first-password"
         );
 
-        assert_eq!(keyring.master_reads.load(Ordering::SeqCst), 4);
+        assert_eq!(keyring.master_reads.load(Ordering::SeqCst), 2);
         assert_eq!(keyring.master_writes.load(Ordering::SeqCst), 1);
     }
 
@@ -1403,7 +1491,7 @@ mod vault_tests {
         second_result.expect("second concurrent put");
 
         assert_eq!(keyring.master_writes.load(Ordering::SeqCst), 1);
-        assert_eq!(keyring.master_reads.load(Ordering::SeqCst), 4);
+        assert_eq!(keyring.master_reads.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1646,7 +1734,8 @@ mod vault_tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::platform_failure_is_access_denied;
+    use super::{macos_master_access_control, platform_failure_is_access_denied};
+    use security_framework::{access_control::SecAccessControl, passwords::AccessControlOptions};
 
     #[test]
     fn macos_authorization_failures_are_reported_as_access_denied() {
@@ -1657,5 +1746,16 @@ mod tests {
 
         let unavailable = security_framework::base::Error::from_code(-25_291);
         assert!(!platform_failure_is_access_denied(&unavailable));
+    }
+
+    #[test]
+    fn macos_master_accepts_biometry_watch_or_password() {
+        let options = macos_master_access_control();
+        assert!(options.contains(AccessControlOptions::BIOMETRY_ANY));
+        assert!(options.contains(AccessControlOptions::WATCH));
+        assert!(options.contains(AccessControlOptions::DEVICE_PASSCODE));
+        assert!(options.contains(AccessControlOptions::OR));
+        SecAccessControl::create_with_flags(options.bits())
+            .expect("macOS must accept the Astesia master-key access control");
     }
 }

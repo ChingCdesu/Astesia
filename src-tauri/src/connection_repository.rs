@@ -289,7 +289,7 @@ impl ConnectionRepositoryError {
         let mut error = Self::new(
             ConnectionRepositoryErrorCode::CredentialStoreUnavailable,
             message,
-            "请确认打包的 astesia-mcp 可执行文件存在并可运行，然后重试迁移。macOS 用户还应在图形登录会话中允许系统钥匙串访问。",
+            "请确认打包的 astesia-mcp 可执行文件存在并可运行，然后重试迁移。macOS 用户还应在图形登录会话中通过 Touch ID、Apple Watch 或本机密码完成系统验证。",
         );
         error.retryable = true;
         error
@@ -504,9 +504,15 @@ impl SharedConnectionRepository {
     }
 
     async fn pool(&self) -> Result<&SqlitePool, ConnectionRepositoryError> {
+        self.initialized_pool().await
+    }
+
+    async fn retry_pending_credential_cleanup_on_demand(
+        &self,
+    ) -> Result<(), ConnectionRepositoryError> {
         let pool = self.initialized_pool().await?;
         self.retry_pending_credential_cleanup(pool).await;
-        Ok(pool)
+        Ok(())
     }
 
     pub(crate) fn acquire_mcp_usage(
@@ -820,6 +826,7 @@ impl SharedConnectionRepository {
         mcp_enabled: bool,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         validate_config(&config)?;
+        self.retry_pending_credential_cleanup_on_demand().await?;
         self.pool().await?;
         let secret = std::mem::take(&mut config.password);
         let credential_ref = if secret.is_empty() {
@@ -910,6 +917,7 @@ impl SharedConnectionRepository {
         expected_revision: i64,
         mcp_enabled: bool,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
+        self.retry_pending_credential_cleanup_on_demand().await?;
         let current = self.get_record(&config.id).await?;
         if current.profile.revision != expected_revision {
             return Err(ConnectionRepositoryError::conflict(
@@ -1047,6 +1055,7 @@ impl SharedConnectionRepository {
         expected_revision: i64,
     ) -> Result<DeleteConnectionResult, ConnectionRepositoryError> {
         let _mutation_guard = self.acquire_mutation_guard(connection_id)?;
+        self.retry_pending_credential_cleanup_on_demand().await?;
         let mut transaction = self
             .pool()
             .await?
@@ -1121,6 +1130,7 @@ impl SharedConnectionRepository {
         for config in &configs {
             validate_config(config)?;
         }
+        self.retry_pending_credential_cleanup_on_demand().await?;
         if self.migration_complete().await? {
             return self.verify_completed_legacy_migration(&configs).await;
         }
@@ -2632,7 +2642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_compensation_is_persisted_and_retried() {
+    async fn metadata_reads_do_not_retry_failed_credential_cleanup() {
         let temp_dir = TempDir::new().expect("temp dir");
         let vault = DeleteFailingVault::shared();
         let repository = SharedConnectionRepository::new(
@@ -2659,7 +2669,19 @@ mod tests {
         assert_eq!(pending, 1);
 
         vault.set_fail_delete(false);
-        repository.list().await.expect("retry cleanup");
+        repository.list().await.expect("metadata-only list");
+        assert!(vault.contains_secret("orphan-candidate"));
+        let pending =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pending_credential_cleanup")
+                .fetch_one(repository.initialized_pool().await.expect("pool"))
+                .await
+                .expect("pending count");
+        assert_eq!(pending, 1);
+
+        repository
+            .create(config("warehouse", ""), true)
+            .await
+            .expect("explicit save retries cleanup");
         assert!(!vault.contains_secret("orphan-candidate"));
         assert!(vault.contains_secret("super-secret"));
         let pending =
@@ -2688,7 +2710,7 @@ mod tests {
             .await
             .expect("stage credential");
 
-        repository.list().await.expect("run pending cleanup retry");
+        repository.list().await.expect("metadata-only list");
 
         assert!(vault.contains_secret("operation-in-progress"));
         let cleanup_after = sqlx::query_scalar::<_, i64>(
@@ -2726,7 +2748,11 @@ mod tests {
         .await
         .expect("make staging entry eligible");
 
-        repository.list().await.expect("retry cleanup");
+        repository.list().await.expect("metadata-only list");
+        repository
+            .create(config("warehouse", ""), true)
+            .await
+            .expect("explicit save retries cleanup");
         assert!(vault.contains_secret("super-secret"));
         let pending =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pending_credential_cleanup")
