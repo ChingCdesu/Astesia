@@ -1,3 +1,13 @@
+## v1.0.8 - 2026-07-25
+
+- Add connection groups and tags with schema migration (2796309)
+- feat: add macOS signing identity configuration in tauri settings (82c2902)
+- fix: add tauri-update.private.pem to .gitignore (44b0866)
+- fix: update public key format in tauri configuration (1d20e3d)
+- Add command center and global keyboard shortcuts (a0656e9)
+- feat: enhance macOS credential management and improve migration process (5b9578b)
+
+
 ## v1.0.7 - 2026-07-25
 
 - feat: enhance connection management with MCP support (16d8cc4)
