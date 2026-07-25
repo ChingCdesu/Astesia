@@ -36,16 +36,39 @@ required by your client. The helper hides the token by default and can rotate it
 rotation restarts a running service. The endpoint is intended for native local
 MCP clients and does not enable browser CORS.
 
-Database password references still use the App process environment. For
-App-managed HTTP, variables referenced by `password_env` must use the dedicated
-`ASTESIA_DB_PASSWORD_` prefix, for example
-`ASTESIA_DB_PASSWORD_ANALYTICS`. Launch Astesia with only the database
-credentials that HTTP MCP sessions are allowed to use; other environment
-variables cannot be selected as connection passwords. Before the first test or
-access that would use one of these credentials, Astesia asks the MCP client to
-confirm the exact database type, host, port, user, and database. The approval is
-limited to that profile in the current HTTP session. If the client cannot show
-the prompt, the credential is not read and the connection attempt fails closed.
+Streamable HTTP and stdio both open the desktop app's shared connection
+repository. On connection tests and connection requests, the MCP server resolves
+and decrypts the saved credential on the server side using the App-managed
+vault and its OS-stored master key. Passwords and credential references are
+never sent to the MCP client, WebView, or synchronization channel. MCP clients
+cannot create, edit, or delete connection profiles; create and maintain them in
+the desktop app, then explicitly enable the profiles that MCP may use.
+
+## Cross-process Connection Leases
+
+Both transports acquire a per-connection shared OS file lock before
+`test_connection` starts and hold it for the entire test. A successfully
+connected driver retains the same kind of shared lease until it is disconnected,
+its session ends, or its process exits. Multiple MCP users may hold compatible
+shared leases for one connection at the same time.
+
+Before saving or deleting a connection, the desktop backend attempts a
+non-blocking exclusive lock for that connection. If any Streamable HTTP or
+stdio MCP process holds a shared lease, the backend returns
+`connection_in_use` without changing the profile, credential, or repository
+revision. This backend check is authoritative even when the UI cannot observe a
+standalone stdio session.
+
+Leases are released when their driver/test guard is dropped, and the operating
+system kernel releases them if a sidecar exits abnormally. The lock files are
+intentionally retained and contain no profile metadata or credentials; their
+names are hashes of connection IDs. File presence does not indicate occupancy:
+only the live OS lock does.
+
+This lease contract is part of shared repository schema v3. The App upgrades
+the repository first, and bundled-sidecar verification must succeed against
+that schema before MCP access is enabled, so an older lease-unaware sidecar is
+not accepted.
 
 ## Configure a Standalone Stdio Client
 
@@ -56,35 +79,33 @@ MCP client configuration formats vary, but a generic stdio entry looks like this
   "mcpServers": {
     "astesia": {
       "command": "/absolute/path/to/Astesia/src-tauri/binaries/astesia-mcp-<target-triple>",
-      "args": [],
-      "env": {
-        "ASTESIA_ANALYTICS_PASSWORD": "<inject with your client's secret manager>"
-      }
+      "args": []
     }
   }
 }
 ```
 
-Use an absolute executable path. Do not commit a configuration containing real credentials.
+Use an absolute executable path. The MCP client configuration does not contain
+database credentials.
 
-Connections use a password environment-variable reference rather than a
-password value. A standalone stdio client may pass, for example,
-`"password_env": "ASTESIA_ANALYTICS_PASSWORD"` to `create_connection`. Before
-reading that variable, Astesia asks the client to confirm the exact endpoint.
-After approval, stdio saves the password in the current user's system
-credential store and writes only a random credential reference to the shared
-SQLite metadata repository. Plaintext passwords are neither accepted in tool
-arguments nor returned in tool results.
+A standalone stdio sidecar opens the same shared connection repository as the
+desktop app. It accepts only existing connection IDs, and resolves encrypted
+credentials on the server side when a test or connection is requested. MCP
+clients cannot create, edit, or delete connection profiles and never receive a
+password or credential reference. Configure profiles in the desktop app and
+set `mcp_enabled=true` for every profile that stdio may use.
 
-Desktop and stdio connection profiles are persistent and bidirectionally
-shared. A connection created by either surface appears in the other; edits and
-confirmed deletes also persist. Live drivers and `connected` state remain local
-to each process, so a stdio connection does not appear connected in the App.
-Saved MCP queries and update-confirmation preferences remain scoped to one MCP
-session. For a shared profile, `mcp_enabled=true` is the App-side authorization
-for stdio to resolve that profile's system-store credential; it does not prompt
-again in every MCP session. Importing a new `password_env` credential through
-stdio still requires endpoint-specific elicitation before the variable is read.
+Live drivers and `connected` state remain local to each process, so a stdio
+connection does not appear connected in the App. Unlike App-managed HTTP,
+stdio has no bidirectional control channel: the desktop app cannot push a
+force-disconnect command to a stdio session or receive its real-time driver
+state. Its OS lease remains visible to the desktop backend, so profile saves
+and deletes are still rejected while stdio uses the connection. If the user
+requests an App-side disconnect while stdio still holds the lease, Astesia
+disconnects the drivers it can reach and returns a structured partial result
+that instructs the user to call `disconnect_connection` in the MCP client or
+close the stdio process. Saved MCP queries and update-confirmation preferences
+remain scoped to one MCP session.
 
 On the first App start after upgrading, Astesia blocks access until legacy
 WebView connection data has been migrated. It explains the change before
@@ -130,22 +151,38 @@ delete an older per-connection system-credential item. If App migration has not
 finished, MCP returns `credential_migration_required` with instructions to open
 Astesia, preserves the old item, and refuses the operation.
 
-Each App-managed Streamable HTTP session keeps a transient catalog, but its
-connection lifecycle is mirrored into the desktop app. Mirrored profiles are
-removed when their MCP session or helper service ends and are not written to
-the shared connection repository.
+Each App-managed Streamable HTTP session opens and owns its database drivers in
+the sidecar while reading profile metadata and credentials from the shared
+repository. The desktop app does not create a duplicate driver for an HTTP
+session.
 
-The desktop app opens its own driver for a connected HTTP profile so the
-mirrored entry can be queried normally. It resolves the same `password_env`
-inside the App process; resolved password values are never sent to the WebView
-or synchronization events. Mirrored HTTP profile lifecycle controls are
-read-only in the app and remain owned by the HTTP MCP session.
+A private synchronization channel reports sanitized occupancy and disconnect
+state to the App using only the connection ID, profile revision, session
+generation, phase, and optional error information. It never transports profile
+details or credentials. This lets the App display HTTP occupancy and proactively
+disable editing and deletion; the cross-process exclusive-lock check remains
+the authoritative protection for both HTTP and stdio.
+
+When the user disconnects a connection from the App, Astesia closes its own
+driver and sends generation-scoped control commands to every reachable HTTP
+session. A connection test is reported as HTTP occupancy too; the control
+command cancels it and waits for its test future and shared lease to be dropped.
+Each HTTP session otherwise closes its driver and acknowledges the result before
+the App checks the cross-process lease again. If stdio or another external MCP
+process still holds a lease, the operation returns a structured partial result
+with `partial=true`, `error_code="external_mcp_in_use"`, and
+`external_mcp_in_use=true`. Its remediation tells the user to call
+`disconnect_connection` in that MCP client or close the stdio process.
+
+Ending an HTTP session or stopping the helper releases its synchronized
+occupancy state and driver lease. Stale commands cannot disconnect a newer
+session generation.
 
 ## Tools
 
 Tools are grouped by purpose:
 
-- Connections: `list_connections`, `create_connection`, `test_connection`, `connect_connection`, `disconnect_connection`, `delete_connection`
+- Connections: `list_connections`, `test_connection`, `connect_connection`, `disconnect_connection`
 - Objects and schema: `create_database_object`, `delete_database_object`, `create_schema`, `delete_schema`, `create_table`, `delete_table`
 - Saved queries: `list_queries`, `create_query`, `execute_query`, `delete_query`
 - Rows: `insert_row`, `read_rows`, `update_row`, `delete_rows`
@@ -178,13 +215,10 @@ function can have write side effects. Database administrators must not shadow
 these standard aggregate names with side-effecting functions in an earlier
 function-resolution path.
 
-App-managed HTTP additionally requires a one-time, endpoint-specific
-confirmation before a connection test or access can read a referenced database
-credential. Standalone stdio requires the same endpoint-specific confirmation
-when `create_connection` imports an environment credential into the system
-credential store. Existing shared profiles marked `mcp_enabled` use the App's
-authorization instead of repeating this credential prompt. These prompts are
-independent of destructive SQL confirmation.
+Connection tests and access resolve credentials entirely on the server side
+and only for shared profiles marked `mcp_enabled`. MCP clients do not import
+environment credentials or participate in password handling. This connection
+authorization is independent of destructive SQL confirmation.
 
 High-risk operations use MCP elicitation before any change is made. If a client
 does not advertise elicitation support, Astesia fails closed: it returns an
@@ -198,10 +232,9 @@ trusted security boundary.
 
 For `UPDATE` operations only, the prompt includes `do_not_ask_again`. Accepting
 it suppresses later update prompts only until that connection is disconnected
-in the current MCP session, and only while the exact profile revision,
-endpoint, credential reference, and target database remain unchanged. HTTP
-profiles with revision zero are isolated by their endpoint fingerprint. The
-choice is not persisted and never suppresses confirmations for deletes,
-permissions, destructive DDL, or unknown SQL.
+in the current MCP session, and only while the exact shared profile revision,
+endpoint configuration, and target database remain unchanged. The choice is
+not persisted and never suppresses confirmations for deletes, permissions,
+destructive DDL, or unknown SQL.
 
 Structured row updates and deletes first verify the table metadata and currently require a single-column primary key. Database calls have a 60-second client-side timeout; verify database state before retrying a timed-out write. Add an explicit database-side row limit to large saved `SELECT` queries; the MCP response cap limits returned output but cannot prevent every driver from materializing a larger result internally.

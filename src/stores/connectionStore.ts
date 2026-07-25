@@ -4,7 +4,9 @@ import {
   ConnectionConfig,
   ConnectionRepositoryError,
   ConnectionResult,
+  DisconnectConnectionResult,
   FunctionInfo,
+  McpConnectionUsage,
   McpConnectionsSnapshot,
   ProcedureInfo,
   SharedConnectionProfile,
@@ -39,6 +41,7 @@ interface TreeNode {
 interface ConnectionStore {
   connections: ConnectionConfig[];
   mcpRevision: number;
+  mcpUsageByConnectionId: Record<string, McpConnectionUsage>;
   treeData: Record<string, TreeNode>;
   /// Connection IDs currently mid-connect. Sidebar reads this to render a
   /// spinner on the connection node while the user waits for the network
@@ -132,6 +135,49 @@ const backendConnectionConfig = (
   color: config.color,
 });
 
+const isMcpProfileLocked = (connection: ConnectionConfig): boolean =>
+  connection.mcp_in_use === true || connection.disconnecting === true;
+
+const withMcpUsage = (
+  connection: ConnectionConfig,
+  usage?: McpConnectionUsage
+): ConnectionConfig => {
+  const currentUsage =
+    Number.isSafeInteger(connection.revision)
+    && usage?.profile_revision === connection.revision
+      ? usage
+      : undefined;
+
+  return {
+    ...connection,
+    mcp_in_use: currentUsage?.mcp_in_use ?? false,
+    mcp_connected: currentUsage?.mcp_connected ?? false,
+    mcp_session_count: currentUsage?.mcp_session_count ?? 0,
+    disconnecting: currentUsage?.disconnecting ?? false,
+    last_error: currentUsage?.last_error ?? null,
+  };
+};
+
+const isValidMcpConnectionUsage = (
+  value: unknown
+): value is McpConnectionUsage => {
+  if (!value || typeof value !== 'object') return false;
+  const usage = value as Partial<McpConnectionUsage>;
+  return typeof usage.id === 'string'
+    && usage.id.length > 0
+    && Number.isSafeInteger(usage.profile_revision)
+    && typeof usage.mcp_in_use === 'boolean'
+    && typeof usage.mcp_connected === 'boolean'
+    && Number.isSafeInteger(usage.mcp_session_count)
+    && (usage.mcp_session_count ?? -1) >= 0
+    && typeof usage.disconnecting === 'boolean'
+    && (
+      usage.last_error === undefined
+      || usage.last_error === null
+      || typeof usage.last_error === 'string'
+    );
+};
+
 let nextTreeEpoch = 0;
 let nextTreeRequest = 0;
 const latestTreeRequests = new Map<string, number>();
@@ -160,8 +206,7 @@ const isTreeLoadCurrent = (
   const connection = state.connections.find((item) => item.id === connectionId);
   return node?.connected === true
     && node.epoch === epoch
-    && connection !== undefined
-    && (connection.source !== 'mcp_http' || connection.app_connected === true);
+    && connection !== undefined;
 };
 
 const withoutConnectionLoadingKeys = (
@@ -271,6 +316,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
   return {
   connections: [],
   mcpRevision: -1,
+  mcpUsageByConnectionId: {},
   treeData: {},
   connectingIds: new Set<string>(),
   loadingKeys: new Set<string>(),
@@ -279,7 +325,12 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
 
   addConnection: async (config) => {
     if (!isTauri()) {
-      set((state) => ({ connections: [...state.connections, config] }));
+      set((state) => ({
+        connections: [
+          ...state.connections,
+          withMcpUsage(config, state.mcpUsageByConnectionId[config.id]),
+        ],
+      }));
       return;
     }
     const profile = await invoke<SharedConnectionProfile>('save_connection_profile', {
@@ -290,7 +341,13 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
       },
     });
     set((state) => ({
-      connections: [...state.connections, sharedProfileToConfig(profile)],
+      connections: [
+        ...state.connections,
+        withMcpUsage(
+          sharedProfileToConfig(profile),
+          state.mcpUsageByConnectionId[profile.id]
+        ),
+      ],
     }));
   },
 
@@ -299,10 +356,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
     if (!existing) {
       throw new Error('连接配置不存在，请刷新连接列表后重试');
     }
+    if (isMcpProfileLocked(existing)) {
+      throw new Error('连接正被 MCP 使用或断开中，请先断开后再删除');
+    }
     if (isTauri()) {
-      if (existing.source === 'mcp_http') {
-        throw new Error('Streamable HTTP MCP 管理的连接不能从 App 中删除');
-      }
       if (!Number.isSafeInteger(existing.revision)) {
         throw new Error('连接缺少有效 revision，请刷新连接列表后重试');
       }
@@ -333,10 +390,21 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
   },
 
   updateConnection: async (config) => {
+    const existing = get().connections.find(
+      (connection) => connection.id === config.id
+    );
+    if (!existing) {
+      throw new Error('连接配置不存在，请刷新连接列表后重试');
+    }
+    if (isMcpProfileLocked(existing)) {
+      throw new Error('连接正被 MCP 使用或断开中，请先断开后再编辑');
+    }
     if (!isTauri()) {
       set((state) => ({
         connections: state.connections.map((connection) =>
-          connection.id === config.id ? config : connection
+          connection.id === config.id
+            ? withMcpUsage(config, state.mcpUsageByConnectionId[config.id])
+            : connection
         ),
       }));
       return;
@@ -358,7 +426,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
       return {
         connections: state.connections.map((connection) =>
           connection.id === config.id
-            ? sharedProfileToConfig(profile)
+            ? withMcpUsage(
+              sharedProfileToConfig(profile),
+              state.mcpUsageByConnectionId[profile.id]
+            )
             : connection
         ),
         treeData: nextTreeData,
@@ -372,19 +443,19 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
 
   setConnections: (connections) =>
     set((state) => {
-      const sharedConnections = connections.filter(
-        (connection) => connection.source !== 'mcp_http'
+      const nextConnections = connections.map((connection) =>
+        withMcpUsage(
+          connection,
+          state.mcpUsageByConnectionId[connection.id]
+        )
       );
-      const nextSharedById = new Map(
-        sharedConnections
-          .filter((connection) => connection.source === 'shared')
-          .map((connection) => [connection.id, connection])
+      const nextConnectionsById = new Map(
+        nextConnections.map((connection) => [connection.id, connection])
       );
       const invalidatedIds = new Set(
         state.connections
-          .filter((connection) => connection.source === 'shared')
           .filter((connection) => {
-            const next = nextSharedById.get(connection.id);
+            const next = nextConnectionsById.get(connection.id);
             return !next || next.revision !== connection.revision;
           })
           .map((connection) => connection.id)
@@ -402,10 +473,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
         && invalidatedIds.has(state.activeConnectionId);
 
       return {
-        connections: [
-          ...sharedConnections,
-          ...state.connections.filter((connection) => connection.source === 'mcp_http'),
-        ],
+        connections: nextConnections,
         treeData: nextTreeData,
         loadingKeys: nextLoadingKeys,
         connectingIds: nextConnectingIds,
@@ -419,88 +487,31 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
       !Number.isSafeInteger(snapshot.revision)
       || snapshot.revision < 0
       || !Array.isArray(snapshot.connections)
+      || !snapshot.connections.every(isValidMcpConnectionUsage)
     ) {
       console.error('Invalid MCP connections snapshot:', snapshot);
       return;
     }
 
-    const newlyConnectedIds: string[] = [];
     set((state) => {
       if (snapshot.revision <= state.mcpRevision) return state;
 
-      const syncedConnections: ConnectionConfig[] = snapshot.connections.map((connection) => ({
-        ...connection,
-        password: '',
-      }));
-      const previousMcpConnections = new Map(
-        state.connections
-          .filter((connection) => connection.source === 'mcp_http')
-          .map((connection) => [connection.id, connection])
-      );
-      const syncedIds = new Set(syncedConnections.map((connection) => connection.id));
-      const nextTreeData = Object.fromEntries(
-        Object.entries(state.treeData).filter(([id]) => {
-          const existing = state.connections.find((connection) => connection.id === id);
-          return existing !== undefined
-            && (existing.source !== 'mcp_http' || syncedIds.has(id));
-        })
-      );
-      let nextLoadingKeys = state.loadingKeys;
-
-      for (const connection of syncedConnections) {
-        const previous = previousMcpConnections.get(connection.id);
-        const transitionChanged =
-          previous?.mcp_transition !== connection.mcp_transition;
-        if (connection.app_connected) {
-          if (transitionChanged || !nextTreeData[connection.id]?.connected) {
-            newlyConnectedIds.push(connection.id);
-            nextLoadingKeys = withoutConnectionLoadingKeys(
-              nextLoadingKeys,
-              connection.id
-            );
-            nextTreeData[connection.id] = emptyConnectedTreeNode(connection.id);
-          }
-        } else {
-          delete nextTreeData[connection.id];
-          nextLoadingKeys = withoutConnectionLoadingKeys(
-            nextLoadingKeys,
-            connection.id
-          );
-        }
-      }
-      for (const previousId of previousMcpConnections.keys()) {
-        if (!syncedIds.has(previousId)) {
-          nextLoadingKeys = withoutConnectionLoadingKeys(nextLoadingKeys, previousId);
-        }
-      }
-
-      const activeMcpConnection = syncedConnections.find(
-        (connection) => connection.id === state.activeConnectionId
-      );
-      const resetActiveConnection = activeMcpConnection
-        ? !activeMcpConnection.app_connected
-        : state.connections.some(
-          (connection) =>
-            connection.id === state.activeConnectionId
-            && connection.source === 'mcp_http'
+      const mcpUsageByConnectionId: Record<string, McpConnectionUsage> =
+        Object.fromEntries(
+          snapshot.connections.map((connection) => [connection.id, connection])
         );
 
       return {
         mcpRevision: snapshot.revision,
-        connections: [
-          ...state.connections.filter((connection) => connection.source !== 'mcp_http'),
-          ...syncedConnections,
-        ],
-        treeData: nextTreeData,
-        loadingKeys: nextLoadingKeys,
-        activeConnectionId: resetActiveConnection ? null : state.activeConnectionId,
-        activeDatabase: resetActiveConnection ? null : state.activeDatabase,
+        mcpUsageByConnectionId,
+        connections: state.connections.map((connection) =>
+          withMcpUsage(
+            connection,
+            mcpUsageByConnectionId[connection.id]
+          )
+        ),
       };
     });
-
-    for (const connectionId of newlyConnectedIds) {
-      void get().loadDatabases(connectionId);
-    }
   },
 
   connectDatabase: async (id) => {
@@ -541,19 +552,32 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
   },
 
   disconnectDatabase: async (id) => {
-    await invoke('disconnect_database', { connectionId: id });
-    set((state) => {
-      const newTreeData = { ...state.treeData };
-      delete newTreeData[id];
-      return {
-        treeData: newTreeData,
-        loadingKeys: withoutConnectionLoadingKeys(state.loadingKeys, id),
-        activeConnectionId:
-          state.activeConnectionId === id ? null : state.activeConnectionId,
-        activeDatabase:
-          state.activeConnectionId === id ? null : state.activeDatabase,
-      };
-    });
+    try {
+      const result = await invoke<DisconnectConnectionResult>(
+        'disconnect_database',
+        { connectionId: id }
+      );
+      if (result.partial) {
+        notify.warning('连接未完全断开', result.message);
+      } else if (!result.success) {
+        notify.info('连接状态', result.message);
+      }
+    } catch (error) {
+      notify.error('断开连接失败', repositoryErrorMessage(error));
+    } finally {
+      set((state) => {
+        const newTreeData = { ...state.treeData };
+        delete newTreeData[id];
+        return {
+          treeData: newTreeData,
+          loadingKeys: withoutConnectionLoadingKeys(state.loadingKeys, id),
+          activeConnectionId:
+            state.activeConnectionId === id ? null : state.activeConnectionId,
+          activeDatabase:
+            state.activeConnectionId === id ? null : state.activeDatabase,
+        };
+      });
+    }
   },
 
   testConnection: async (config) => {

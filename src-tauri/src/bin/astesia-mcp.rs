@@ -40,7 +40,7 @@ fn parse_transport() -> anyhow::Result<Option<Transport>> {
         }
         "--help" | "-h" => {
             println!(
-                "Astesia MCP server\n\nUSAGE:\n  astesia-mcp\n  astesia-mcp --http-port <PORT>\n\nSTDIO mode is standalone. HTTP mode is managed by the Astesia app, binds only to 127.0.0.1, requires the App-provided authentication and synchronization environment, and exits when its parent stdin closes."
+                "Astesia MCP server\n\nUSAGE:\n  astesia-mcp\n  astesia-mcp --http-port <PORT>\n\nBoth modes read the desktop shared connection repository and resolve credentials only inside Astesia. STDIO has no App push channel. HTTP mode is managed by the Astesia app, binds only to 127.0.0.1, requires the App-provided authentication and synchronization environment, and exits when its parent stdin closes."
             );
             Ok(None)
         }

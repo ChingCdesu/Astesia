@@ -12,45 +12,18 @@ use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::DbType;
-
 pub const SYNC_ENDPOINT_ENV: &str = "ASTESIA_MCP_SYNC_ENDPOINT";
 pub const SYNC_TOKEN_ENV: &str = "ASTESIA_MCP_SYNC_TOKEN";
 pub const SYNC_SERVICE_ID_ENV: &str = "ASTESIA_MCP_SERVICE_ID";
 pub const MCP_AUTH_TOKEN_ENV: &str = "ASTESIA_MCP_AUTH_TOKEN";
-pub const SYNC_PASSWORD_ENV_PREFIX: &str = "ASTESIA_DB_PASSWORD_";
 pub const SYNC_PATH: &str = "/v1/sync";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(65);
 const MIN_TOKEN_BYTES: usize = 32;
 const MAX_TOKEN_BYTES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 256;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct McpSyncProfile {
-    pub connection_id: String,
-    pub name: String,
-    pub db_type: DbType,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub database: Option<String>,
-    pub color: Option<String>,
-    pub password_env: Option<String>,
-}
-
-impl McpSyncProfile {
-    pub fn validate(&self) -> Result<(), McpSyncError> {
-        validate_identifier("connection_id", &self.connection_id)?;
-        validate_non_empty("name", &self.name)?;
-        validate_non_empty("host", &self.host)?;
-        if let Some(password_env) = self.password_env.as_deref() {
-            validate_password_env(password_env)?;
-        }
-        Ok(())
-    }
-}
+const MAX_CONTROL_ERROR_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpSyncContext {
@@ -60,28 +33,46 @@ pub struct McpSyncContext {
     pub operation_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum McpSyncRequest {
-    Upsert {
+    Acquire {
         context: McpSyncContext,
-        profile: McpSyncProfile,
+        connection_id: String,
+        profile_revision: i64,
     },
     Connected {
         context: McpSyncContext,
         connection_id: String,
+        generation: u64,
     },
-    Disconnected {
+    Released {
         context: McpSyncContext,
         connection_id: String,
+        generation: u64,
     },
-    Deleted {
+    PollControl {
         context: McpSyncContext,
+    },
+    ControlResult {
+        context: McpSyncContext,
+        command_id: Uuid,
         connection_id: String,
+        generation: u64,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     SessionClosed {
         context: McpSyncContext,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpControlCommand {
+    pub command_id: Uuid,
+    pub connection_id: String,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,7 +81,9 @@ pub struct McpSyncResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_connection_id: Option<String>,
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<McpControlCommand>,
 }
 
 #[derive(Clone)]
@@ -115,9 +108,8 @@ impl fmt::Debug for McpSyncConfig {
 impl McpSyncConfig {
     /// Load the private App synchronization channel.
     ///
-    /// Only the Streamable HTTP entry point should call this method. The stdio
-    /// entry point deliberately constructs no sync config, even if these
-    /// environment variables happen to be present.
+    /// Only the App-managed Streamable HTTP entry point should call this
+    /// method. Standalone stdio intentionally has no reverse-control channel.
     pub fn from_env() -> Result<Self, McpSyncError> {
         let endpoint = required_env(SYNC_ENDPOINT_ENV)?;
         let token = required_env(SYNC_TOKEN_ENV)?;
@@ -199,52 +191,126 @@ impl fmt::Debug for McpSyncClient {
 }
 
 impl McpSyncClient {
-    pub async fn upsert(&self, profile: McpSyncProfile) -> Result<McpSyncResponse, McpSyncError> {
-        profile.validate()?;
-        self.send(McpSyncRequest::Upsert {
-            context: self.context(),
-            profile,
-        })
-        .await
+    /// Reserve a shared profile revision before opening its database driver.
+    ///
+    /// The returned generation must accompany every later state transition.
+    /// This makes a delayed force-disconnect command harmless after reconnect.
+    pub async fn acquire(
+        &self,
+        connection_id: impl Into<String>,
+        profile_revision: i64,
+    ) -> Result<u64, McpSyncError> {
+        let connection_id = connection_id.into();
+        validate_identifier("connection_id", &connection_id)?;
+        if profile_revision < 0 {
+            return Err(McpSyncError::InvalidConfig(
+                "profile_revision must not be negative".into(),
+            ));
+        }
+        let response = self
+            .send(McpSyncRequest::Acquire {
+                context: self.context(),
+                connection_id,
+                profile_revision,
+            })
+            .await?;
+        response
+            .generation
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| {
+                McpSyncError::InvalidResponse(
+                    "Astesia App did not return an acquire generation".into(),
+                )
+            })
     }
 
     pub async fn connected(
         &self,
         connection_id: impl Into<String>,
-    ) -> Result<McpSyncResponse, McpSyncError> {
+        generation: u64,
+    ) -> Result<(), McpSyncError> {
         let connection_id = connection_id.into();
         validate_identifier("connection_id", &connection_id)?;
+        validate_generation(generation)?;
         self.send(McpSyncRequest::Connected {
             context: self.context(),
             connection_id,
+            generation,
         })
         .await
+        .map(|_| ())
     }
 
-    pub async fn disconnected(
+    pub async fn released(
         &self,
         connection_id: impl Into<String>,
-    ) -> Result<McpSyncResponse, McpSyncError> {
+        generation: u64,
+    ) -> Result<(), McpSyncError> {
         let connection_id = connection_id.into();
         validate_identifier("connection_id", &connection_id)?;
-        self.send(McpSyncRequest::Disconnected {
+        validate_generation(generation)?;
+        self.send(McpSyncRequest::Released {
             context: self.context(),
             connection_id,
+            generation,
         })
         .await
+        .map(|_| ())
     }
 
-    pub async fn deleted(
-        &self,
-        connection_id: impl Into<String>,
-    ) -> Result<McpSyncResponse, McpSyncError> {
-        let connection_id = connection_id.into();
-        validate_identifier("connection_id", &connection_id)?;
-        self.send(McpSyncRequest::Deleted {
+    /// Long-poll for a private App-to-HTTP-session control command.
+    ///
+    /// Callers should run at most one poll loop for each MCP session and stop
+    /// that loop when the session handler is dropped.
+    pub async fn poll_control(&self) -> Result<Option<McpControlCommand>, McpSyncError> {
+        self.send(McpSyncRequest::PollControl {
             context: self.context(),
-            connection_id,
         })
         .await
+        .map(|response| response.control)
+    }
+
+    pub async fn control_result(
+        &self,
+        command: &McpControlCommand,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), McpSyncError> {
+        validate_identifier("connection_id", &command.connection_id)?;
+        validate_generation(command.generation)?;
+        if command.command_id.is_nil() {
+            return Err(McpSyncError::InvalidConfig(
+                "command_id must not be a nil UUID".into(),
+            ));
+        }
+        if ok && error.is_some() {
+            return Err(McpSyncError::InvalidConfig(
+                "a successful control result must not include an error".into(),
+            ));
+        }
+        if !ok && error.as_deref().is_none_or(str::is_empty) {
+            return Err(McpSyncError::InvalidConfig(
+                "a failed control result must include an error".into(),
+            ));
+        }
+        if error
+            .as_ref()
+            .is_some_and(|message| message.len() > MAX_CONTROL_ERROR_BYTES)
+        {
+            return Err(McpSyncError::InvalidConfig(format!(
+                "control result error must not exceed {MAX_CONTROL_ERROR_BYTES} bytes"
+            )));
+        }
+        self.send(McpSyncRequest::ControlResult {
+            context: self.context(),
+            command_id: command.command_id,
+            connection_id: command.connection_id.clone(),
+            generation: command.generation,
+            ok,
+            error,
+        })
+        .await
+        .map(|_| ())
     }
 
     fn context(&self) -> McpSyncContext {
@@ -296,6 +362,7 @@ impl Drop for SessionInner {
 pub enum McpSyncError {
     MissingEnvironment(&'static str),
     InvalidConfig(String),
+    InvalidResponse(String),
     Http(reqwest::Error),
     HttpStatus(StatusCode),
     Remote(String),
@@ -307,7 +374,9 @@ impl fmt::Display for McpSyncError {
             Self::MissingEnvironment(name) => {
                 write!(formatter, "required environment variable {name} is not set")
             }
-            Self::InvalidConfig(message) => formatter.write_str(message),
+            Self::InvalidConfig(message) | Self::InvalidResponse(message) => {
+                formatter.write_str(message)
+            }
             Self::Http(error) => write!(formatter, "MCP synchronization request failed: {error}"),
             Self::HttpStatus(status) => {
                 write!(
@@ -396,7 +465,7 @@ fn validate_token(token: &str) -> Result<(), McpSyncError> {
 fn validate_non_empty(field: &str, value: &str) -> Result<(), McpSyncError> {
     if value.trim().is_empty() {
         Err(McpSyncError::InvalidConfig(format!(
-            "MCP sync profile {field} must not be empty"
+            "MCP sync {field} must not be empty"
         )))
     } else {
         Ok(())
@@ -407,37 +476,20 @@ fn validate_identifier(field: &str, value: &str) -> Result<(), McpSyncError> {
     validate_non_empty(field, value)?;
     if value.len() > MAX_IDENTIFIER_BYTES {
         return Err(McpSyncError::InvalidConfig(format!(
-            "MCP sync profile {field} must not exceed {MAX_IDENTIFIER_BYTES} bytes"
+            "MCP sync {field} must not exceed {MAX_IDENTIFIER_BYTES} bytes"
         )));
     }
     Ok(())
 }
 
-fn validate_password_env(name: &str) -> Result<(), McpSyncError> {
-    let mut characters = name.chars();
-    let valid = characters
-        .next()
-        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
-    if !valid {
-        return Err(McpSyncError::InvalidConfig(
-            "password_env must be a valid environment variable name".into(),
-        ));
+fn validate_generation(generation: u64) -> Result<(), McpSyncError> {
+    if generation == 0 {
+        Err(McpSyncError::InvalidConfig(
+            "MCP sync generation must be greater than zero".into(),
+        ))
+    } else {
+        Ok(())
     }
-    if !name
-        .to_ascii_uppercase()
-        .starts_with(SYNC_PASSWORD_ENV_PREFIX)
-    {
-        return Err(McpSyncError::InvalidConfig(format!(
-            "App-managed HTTP password_env must start with {SYNC_PASSWORD_ENV_PREFIX}"
-        )));
-    }
-    if name.eq_ignore_ascii_case(MCP_AUTH_TOKEN_ENV) || name.eq_ignore_ascii_case(SYNC_TOKEN_ENV) {
-        return Err(McpSyncError::InvalidConfig(format!(
-            "password_env must not reference Astesia's MCP authentication variables"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -453,17 +505,12 @@ mod tests {
         )
     }
 
-    fn profile(password_env: Option<&str>) -> McpSyncProfile {
-        McpSyncProfile {
-            connection_id: "analytics".into(),
-            name: "Analytics".into(),
-            db_type: DbType::PostgreSQL,
-            host: "127.0.0.1".into(),
-            port: 5432,
-            username: "reader".into(),
-            database: Some("warehouse".into()),
-            color: None,
-            password_env: password_env.map(str::to_string),
+    fn context() -> McpSyncContext {
+        McpSyncContext {
+            protocol_version: PROTOCOL_VERSION,
+            service_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
         }
     }
 
@@ -503,75 +550,104 @@ mod tests {
     }
 
     #[test]
-    fn serializes_profiles_without_a_plaintext_password_field() {
-        let request = McpSyncRequest::Upsert {
-            context: McpSyncContext {
-                protocol_version: PROTOCOL_VERSION,
-                service_id: Uuid::nil(),
-                session_id: Uuid::nil(),
-                operation_id: Uuid::nil(),
-            },
-            profile: profile(Some("ASTESIA_DB_PASSWORD_ANALYTICS")),
+    fn protocol_transfers_only_shared_ids_revisions_generations_and_control_state() {
+        let request = McpSyncRequest::Acquire {
+            context: context(),
+            connection_id: "analytics".into(),
+            profile_revision: 7,
         };
         let value = serde_json::to_value(request).expect("serialize sync request");
-        assert_eq!(value["event"], "upsert");
-        let object = value["profile"].as_object().expect("profile object");
-        assert!(!object.contains_key("password"));
-        assert_eq!(
-            object.get("password_env"),
-            Some(&Value::String("ASTESIA_DB_PASSWORD_ANALYTICS".into()))
-        );
-    }
-
-    #[test]
-    fn rejects_using_mcp_authentication_tokens_as_database_passwords() {
-        assert!(profile(Some(MCP_AUTH_TOKEN_ENV)).validate().is_err());
-        assert!(profile(Some("astesia_mcp_auth_token")).validate().is_err());
-        assert!(profile(Some(SYNC_TOKEN_ENV)).validate().is_err());
-        assert!(profile(Some("ASTESIA_DB_PASSWORD_ANALYTICS"))
-            .validate()
-            .is_ok());
-        assert!(profile(Some("AWS_SECRET_ACCESS_KEY")).validate().is_err());
-        assert!(profile(Some("GITHUB_TOKEN")).validate().is_err());
+        assert_eq!(value["event"], "acquire");
+        assert_eq!(value["connection_id"], "analytics");
+        assert_eq!(value["profile_revision"], 7);
+        let serialized = serde_json::to_string(&value).expect("serialize JSON");
+        for forbidden in [
+            "password",
+            "password_env",
+            "username",
+            "host",
+            "database",
+            "credential",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "protocol leaked forbidden field {forbidden}"
+            );
+        }
     }
 
     #[test]
     fn request_variants_have_stable_event_names() {
-        let context = McpSyncContext {
-            protocol_version: PROTOCOL_VERSION,
-            service_id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            operation_id: Uuid::nil(),
+        let command = McpControlCommand {
+            command_id: Uuid::new_v4(),
+            connection_id: "one".into(),
+            generation: 1,
         };
         let requests = [
             (
-                McpSyncRequest::Connected {
-                    context: context.clone(),
+                McpSyncRequest::Acquire {
+                    context: context(),
                     connection_id: "one".into(),
+                    profile_revision: 1,
+                },
+                "acquire",
+            ),
+            (
+                McpSyncRequest::Connected {
+                    context: context(),
+                    connection_id: "one".into(),
+                    generation: 1,
                 },
                 "connected",
             ),
             (
-                McpSyncRequest::Disconnected {
-                    context: context.clone(),
+                McpSyncRequest::Released {
+                    context: context(),
                     connection_id: "one".into(),
+                    generation: 1,
                 },
-                "disconnected",
+                "released",
             ),
             (
-                McpSyncRequest::Deleted {
-                    context: context.clone(),
-                    connection_id: "one".into(),
-                },
-                "deleted",
+                McpSyncRequest::PollControl { context: context() },
+                "poll_control",
             ),
-            (McpSyncRequest::SessionClosed { context }, "session_closed"),
+            (
+                McpSyncRequest::ControlResult {
+                    context: context(),
+                    command_id: command.command_id,
+                    connection_id: command.connection_id,
+                    generation: command.generation,
+                    ok: true,
+                    error: None,
+                },
+                "control_result",
+            ),
+            (
+                McpSyncRequest::SessionClosed { context: context() },
+                "session_closed",
+            ),
         ];
         for (request, expected) in requests {
             assert_eq!(
                 serde_json::to_value(request).expect("serialize request")["event"],
-                expected
+                Value::String(expected.into())
             );
         }
+    }
+
+    #[test]
+    fn response_omits_absent_control_and_generation() {
+        let value = serde_json::to_value(McpSyncResponse {
+            ok: true,
+            error: None,
+            generation: None,
+            control: None,
+        })
+        .expect("serialize response");
+        let object = value.as_object().expect("response object");
+        assert_eq!(object.get("ok"), Some(&Value::Bool(true)));
+        assert!(!object.contains_key("generation"));
+        assert!(!object.contains_key("control"));
     }
 }

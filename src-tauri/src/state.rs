@@ -11,10 +11,12 @@ use crate::tasks::TaskManager;
 
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, Box<dyn DatabaseDriver>>>>,
-    /// Revisions for drivers opened from the shared connection repository.
+    /// Revisions for drivers opened by the desktop app from the shared
+    /// connection repository.
     ///
-    /// HTTP-mirrored MCP drivers deliberately have no entry here, so repository
-    /// reconciliation cannot remove session-scoped HTTP connections.
+    /// Streamable HTTP drivers stay in the MCP sidecar. The private sync server
+    /// records only their sanitized occupancy/control state, so they are never
+    /// installed in this App-owned driver map.
     pub shared_driver_revisions: Arc<Mutex<HashMap<String, i64>>>,
     /// Serializes shared-driver install/removal with repository snapshots and
     /// local profile mutations. Code taking the driver maps must always acquire

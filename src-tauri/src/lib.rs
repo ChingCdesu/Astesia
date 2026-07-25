@@ -1,5 +1,6 @@
 mod commands;
 mod connection_repository;
+mod connection_usage;
 mod credential_vault;
 mod db;
 pub mod mcp;

@@ -12,6 +12,9 @@ use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
 use crate::{
+    connection_usage::{
+        ConnectionMutationGuard, ConnectionUsageError, ConnectionUsageLease, ConnectionUsageLocks,
+    },
     credential_vault::{
         CredentialVaultError, CredentialVaultErrorCode, CredentialVaultHandle,
         SystemCredentialVault,
@@ -21,7 +24,7 @@ use crate::{
 
 const APP_IDENTIFIER: &str = "com.astesia.app";
 const DATABASE_FILENAME: &str = "connections.sqlite3";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 // A staged credential may still be committed by another process after an
 // arbitrarily long OS prompt or suspension. Never expire it by wall-clock
 // time; only an explicit failed operation may mark it ready for cleanup.
@@ -117,6 +120,7 @@ pub enum ConnectionRepositoryErrorCode {
     MigrationIncomplete,
     ProfileNotFound,
     ProfileConflict,
+    ConnectionInUse,
     CredentialReentryRequired,
     CredentialMissing,
     CredentialMigrationRequired,
@@ -136,6 +140,7 @@ impl ConnectionRepositoryErrorCode {
             Self::MigrationIncomplete => "migration_incomplete",
             Self::ProfileNotFound => "profile_not_found",
             Self::ProfileConflict => "profile_conflict",
+            Self::ConnectionInUse => "connection_in_use",
             Self::CredentialReentryRequired => "credential_reentry_required",
             Self::CredentialMissing => "credential_missing",
             Self::CredentialMigrationRequired => "credential_migration_required",
@@ -169,7 +174,11 @@ impl ConnectionRepositoryError {
             code,
             message: message.into(),
             remediation: remediation.into(),
-            retryable: matches!(code, ConnectionRepositoryErrorCode::StorageBusy),
+            retryable: matches!(
+                code,
+                ConnectionRepositoryErrorCode::StorageBusy
+                    | ConnectionRepositoryErrorCode::ConnectionInUse
+            ),
             details: json!({}),
         }
     }
@@ -218,6 +227,53 @@ impl ConnectionRepositoryError {
             "connection_id": connection_id,
             "expected_revision": expected,
             "actual_revision": actual,
+        }))
+    }
+
+    pub(crate) fn connection_in_use(connection_id: &str) -> Self {
+        Self::new(
+            ConnectionRepositoryErrorCode::ConnectionInUse,
+            format!("连接 {connection_id} 正被 MCP 使用，不能修改或删除"),
+            "请先在对应 MCP 客户端断开该连接；Streamable HTTP 也可由 Astesia App 强制断开，然后重试。",
+        )
+        .with_details(json!({
+            "connection_id": connection_id,
+            "transport": "mcp",
+            "scope": "cross_process",
+        }))
+    }
+
+    fn connection_usage_busy(connection_id: &str) -> Self {
+        Self::new(
+            ConnectionRepositoryErrorCode::StorageBusy,
+            format!("连接 {connection_id} 的资料正在被修改，MCP 暂时不能使用"),
+            "请稍后重新调用 connect_connection 或 test_connection。",
+        )
+        .with_details(json!({
+            "connection_id": connection_id,
+            "operation": "acquire_mcp_usage",
+        }))
+    }
+
+    fn connection_usage_probe_busy(connection_id: &str) -> Self {
+        Self::new(
+            ConnectionRepositoryErrorCode::StorageBusy,
+            format!("连接 {connection_id} 的资料正在被其他进程修改，暂时无法确认 MCP 占用"),
+            "请等待资料修改完成后重试断开操作。",
+        )
+        .with_details(json!({
+            "connection_id": connection_id,
+            "operation": "probe_mcp_usage",
+        }))
+    }
+
+    fn usage_lock_unavailable(connection_id: &str, operation: &str, error: std::io::Error) -> Self {
+        Self::storage_unavailable(format!(
+            "无法为连接 {connection_id} 打开跨进程占用锁：{error}"
+        ))
+        .with_details(json!({
+            "connection_id": connection_id,
+            "operation": operation,
         }))
     }
 
@@ -383,6 +439,7 @@ impl std::error::Error for ConnectionRepositoryError {}
 #[derive(Clone)]
 pub struct SharedConnectionRepository {
     database_path: Arc<PathBuf>,
+    usage_locks: ConnectionUsageLocks,
     pool: Arc<OnceCell<SqlitePool>>,
     vault: CredentialVaultHandle,
     cleanup_lock: Arc<Mutex<()>>,
@@ -390,8 +447,10 @@ pub struct SharedConnectionRepository {
 
 impl SharedConnectionRepository {
     pub fn new(database_path: PathBuf, vault: CredentialVaultHandle) -> Self {
+        let usage_locks = ConnectionUsageLocks::for_repository(&database_path);
         Self {
             database_path: Arc::new(database_path),
+            usage_locks,
             pool: Arc::new(OnceCell::new()),
             vault,
             cleanup_lock: Arc::new(Mutex::new(())),
@@ -448,6 +507,66 @@ impl SharedConnectionRepository {
         let pool = self.initialized_pool().await?;
         self.retry_pending_credential_cleanup(pool).await;
         Ok(pool)
+    }
+
+    pub(crate) fn acquire_mcp_usage(
+        &self,
+        connection_id: &str,
+    ) -> Result<ConnectionUsageLease, ConnectionRepositoryError> {
+        self.usage_locks
+            .try_acquire_usage(connection_id)
+            .map_err(|error| match error {
+                ConnectionUsageError::Contended => {
+                    ConnectionRepositoryError::connection_usage_busy(connection_id)
+                }
+                ConnectionUsageError::Io(error) => {
+                    ConnectionRepositoryError::usage_lock_unavailable(
+                        connection_id,
+                        "acquire_mcp_usage",
+                        error,
+                    )
+                }
+            })
+    }
+
+    pub(crate) fn is_connection_externally_in_use(
+        &self,
+        connection_id: &str,
+    ) -> Result<bool, ConnectionRepositoryError> {
+        self.usage_locks
+            .is_in_use(connection_id)
+            .map_err(|error| match error {
+                ConnectionUsageError::Contended => {
+                    ConnectionRepositoryError::connection_usage_probe_busy(connection_id)
+                }
+                ConnectionUsageError::Io(error) => {
+                    ConnectionRepositoryError::usage_lock_unavailable(
+                        connection_id,
+                        "probe_mcp_usage",
+                        error,
+                    )
+                }
+            })
+    }
+
+    fn acquire_mutation_guard(
+        &self,
+        connection_id: &str,
+    ) -> Result<ConnectionMutationGuard, ConnectionRepositoryError> {
+        self.usage_locks
+            .try_acquire_mutation(connection_id)
+            .map_err(|error| match error {
+                ConnectionUsageError::Contended => {
+                    ConnectionRepositoryError::connection_in_use(connection_id)
+                }
+                ConnectionUsageError::Io(error) => {
+                    ConnectionRepositoryError::usage_lock_unavailable(
+                        connection_id,
+                        "mutate_connection_profile",
+                        error,
+                    )
+                }
+            })
     }
 
     pub async fn current_revision(&self) -> Result<i64, ConnectionRepositoryError> {
@@ -684,6 +803,8 @@ impl SharedConnectionRepository {
         request: SaveConnectionRequest,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         validate_config(&request.config)?;
+        let connection_id = request.config.id.clone();
+        let _mutation_guard = self.acquire_mutation_guard(&connection_id)?;
         match request.expected_revision {
             Some(expected_revision) => {
                 self.update(request.config, expected_revision, request.mcp_enabled)
@@ -925,6 +1046,7 @@ impl SharedConnectionRepository {
         connection_id: &str,
         expected_revision: i64,
     ) -> Result<DeleteConnectionResult, ConnectionRepositoryError> {
+        let _mutation_guard = self.acquire_mutation_guard(connection_id)?;
         let mut transaction = self
             .pool()
             .await?
@@ -2054,6 +2176,79 @@ mod tests {
         let (resolved, revision) = second.resolve_config("analytics").await.expect("resolve");
         assert_eq!(resolved.password, "super-secret");
         assert_eq!(revision, created.revision);
+    }
+
+    #[tokio::test]
+    async fn mcp_usage_lease_blocks_profile_save_and_delete_across_repositories() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let vault = MemoryCredentialVault::shared();
+        let mcp_repository = repository(&temp_dir, vault.clone());
+        let app_repository = repository(&temp_dir, vault);
+        let created = mcp_repository
+            .create(config("analytics", "super-secret"), true)
+            .await
+            .expect("create");
+        let usage = mcp_repository
+            .acquire_mcp_usage("analytics")
+            .expect("MCP usage");
+
+        assert!(app_repository
+            .is_connection_externally_in_use("analytics")
+            .expect("probe"));
+
+        let mut changed = config("analytics", "");
+        changed.name = "Blocked update".to_string();
+        let save_error = app_repository
+            .save(SaveConnectionRequest {
+                config: changed,
+                expected_revision: Some(created.revision),
+                mcp_enabled: true,
+            })
+            .await
+            .expect_err("save must be non-blockingly rejected");
+        assert_eq!(
+            save_error.code,
+            ConnectionRepositoryErrorCode::ConnectionInUse
+        );
+        assert!(save_error.retryable);
+        assert_eq!(save_error.details["transport"], "mcp");
+
+        let delete_error = app_repository
+            .delete("analytics", created.revision)
+            .await
+            .expect_err("delete must be non-blockingly rejected");
+        assert_eq!(
+            delete_error.code,
+            ConnectionRepositoryErrorCode::ConnectionInUse
+        );
+        assert_eq!(
+            app_repository
+                .get("analytics")
+                .await
+                .expect("unchanged")
+                .name,
+            created.name
+        );
+
+        drop(usage);
+        assert!(!app_repository
+            .is_connection_externally_in_use("analytics")
+            .expect("released probe"));
+        let mut changed = config("analytics", "");
+        changed.name = "Allowed update".to_string();
+        let updated = app_repository
+            .save(SaveConnectionRequest {
+                config: changed,
+                expected_revision: Some(created.revision),
+                mcp_enabled: true,
+            })
+            .await
+            .expect("save after release");
+        let deleted = app_repository
+            .delete("analytics", updated.revision)
+            .await
+            .expect("delete after release");
+        assert!(deleted.deleted);
     }
 
     #[tokio::test]

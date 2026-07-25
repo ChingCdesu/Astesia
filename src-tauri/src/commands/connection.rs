@@ -11,16 +11,30 @@ use crate::connection_repository::{
 };
 use crate::db::{ConnectionConfig, DatabaseDriver, DbType};
 use crate::mcp::CREDENTIAL_VERIFY_MARKER;
+use crate::mcp_helper::McpHelperState;
 use crate::state::{create_driver, AppState};
 
 const MCP_SIDECAR_NAME: &str = "astesia-mcp";
 const CREDENTIAL_VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CREDENTIAL_VERIFY_OUTPUT: usize = 16_384;
+const DISCONNECT_PARTIAL_EXTERNAL_MCP_IN_USE: &str = "external_mcp_in_use";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectionResult {
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DisconnectConnectionResult {
+    pub success: bool,
+    pub message: String,
+    #[serde(default)]
+    pub partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub external_mcp_in_use: bool,
 }
 
 #[tauri::command]
@@ -134,12 +148,20 @@ pub async fn shared_connections_revision(
 #[tauri::command]
 pub async fn save_connection_profile(
     state: State<'_, AppState>,
+    mcp: State<'_, McpHelperState>,
     request: SaveConnectionRequest,
 ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
+    let connection_id = request.config.id.clone();
+    let mcp_guard = mcp.lock_connection_lifecycle(&connection_id).await;
+    ensure_connection_profile_mutable(
+        &connection_id,
+        mcp.is_connection_in_use(&connection_id).await,
+    )?;
     let coordinator = state.shared_driver_coordinator.lock().await;
     let profile = state.connection_repository.save(request).await?;
     let driver = detach_shared_driver(&state, &profile.id).await;
     drop(coordinator);
+    drop(mcp_guard);
     disconnect_driver(driver).await;
     Ok(profile)
 }
@@ -147,9 +169,15 @@ pub async fn save_connection_profile(
 #[tauri::command]
 pub async fn delete_connection_profile(
     state: State<'_, AppState>,
+    mcp: State<'_, McpHelperState>,
     connection_id: String,
     expected_revision: i64,
 ) -> Result<DeleteConnectionResult, ConnectionRepositoryError> {
+    let mcp_guard = mcp.lock_connection_lifecycle(&connection_id).await;
+    ensure_connection_profile_mutable(
+        &connection_id,
+        mcp.is_connection_in_use(&connection_id).await,
+    )?;
     let coordinator = state.shared_driver_coordinator.lock().await;
     let result = state
         .connection_repository
@@ -157,8 +185,20 @@ pub async fn delete_connection_profile(
         .await?;
     let driver = detach_shared_driver(&state, &connection_id).await;
     drop(coordinator);
+    drop(mcp_guard);
     disconnect_driver(driver).await;
     Ok(result)
+}
+
+fn ensure_connection_profile_mutable(
+    connection_id: &str,
+    mcp_in_use: bool,
+) -> Result<(), ConnectionRepositoryError> {
+    if mcp_in_use {
+        Err(ConnectionRepositoryError::connection_in_use(connection_id))
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -338,22 +378,90 @@ fn append_bounded(target: &mut Vec<u8>, bytes: &[u8]) {
 #[tauri::command]
 pub async fn disconnect_database(
     state: State<'_, AppState>,
+    mcp: State<'_, McpHelperState>,
     connection_id: String,
-) -> Result<ConnectionResult, String> {
+) -> Result<DisconnectConnectionResult, String> {
     let coordinator = state.shared_driver_coordinator.lock().await;
     let driver = detach_shared_driver(&state, &connection_id).await;
     drop(coordinator);
-    if driver.is_some() {
-        disconnect_driver(driver).await;
-        Ok(ConnectionResult {
-            success: true,
-            message: "已断开连接".to_string(),
-        })
-    } else {
-        Ok(ConnectionResult {
-            success: false,
-            message: "连接不存在".to_string(),
-        })
+    let app_disconnected = driver.is_some();
+    let ((), mcp_result) = tokio::join!(
+        disconnect_driver(driver),
+        mcp.force_disconnect(&connection_id)
+    );
+
+    match mcp_result {
+        Ok(result) => match state
+            .connection_repository
+            .is_connection_externally_in_use(&connection_id)
+        {
+            Ok(true) => Ok(disconnect_partial_external_mcp_result(
+                app_disconnected,
+                result.completed,
+            )),
+            Ok(false) => Ok(disconnect_connection_result(
+                app_disconnected,
+                result.completed,
+            )),
+            Err(error) => {
+                let progress =
+                    disconnect_connection_result(app_disconnected, result.completed).message;
+                Err(format!(
+                    "{progress}，但无法确认连接 {connection_id} 是否仍被 STDIO 或其他外部 MCP 使用: {error}"
+                ))
+            }
+        },
+        Err(error) if app_disconnected => Err(format!(
+            "App 连接已断开，但无法断开 Streamable HTTP MCP 对连接 {connection_id} 的占用: {error}"
+        )),
+        Err(error) => Err(format!(
+            "无法断开 Streamable HTTP MCP 对连接 {connection_id} 的占用: {error}"
+        )),
+    }
+}
+
+fn disconnect_connection_result(
+    app_disconnected: bool,
+    mcp_disconnected: usize,
+) -> DisconnectConnectionResult {
+    let message = match (app_disconnected, mcp_disconnected) {
+        (true, 0) => "已断开 App 连接".to_string(),
+        (true, count) => format!("已断开 App 连接及 {count} 个 Streamable HTTP MCP 会话"),
+        (false, 0) => "连接当前未连接".to_string(),
+        (false, count) => format!("已断开 {count} 个 Streamable HTTP MCP 会话"),
+    };
+    DisconnectConnectionResult {
+        success: app_disconnected || mcp_disconnected > 0,
+        message,
+        partial: false,
+        error_code: None,
+        external_mcp_in_use: false,
+    }
+}
+
+fn disconnect_partial_external_mcp_result(
+    app_disconnected: bool,
+    mcp_disconnected: usize,
+) -> DisconnectConnectionResult {
+    let progress = match (app_disconnected, mcp_disconnected) {
+        (true, 0) => Some("已断开 App 连接".to_string()),
+        (true, count) => Some(format!(
+            "已断开 App 连接及 {count} 个 Streamable HTTP MCP 会话"
+        )),
+        (false, 0) => None,
+        (false, count) => Some(format!("已断开 {count} 个 Streamable HTTP MCP 会话")),
+    };
+    let prefix = progress
+        .map(|progress| format!("{progress}；"))
+        .unwrap_or_default();
+    DisconnectConnectionResult {
+        success: false,
+        message: format!(
+            "{prefix}仍有 STDIO 或其他外部 MCP 进程占用该连接。Astesia 无法向 STDIO 推送强制断开；请在对应 MCP 客户端调用 disconnect_connection，或关闭该 STDIO 进程。"
+        ),
+        partial: true,
+        error_code: Some(DISCONNECT_PARTIAL_EXTERNAL_MCP_IN_USE.to_string()),
+        external_mcp_in_use: true,
     }
 }
 
@@ -464,6 +572,57 @@ mod tests {
             revision,
             mcp_enabled: true,
         }
+    }
+
+    #[test]
+    fn registered_mcp_usage_blocks_profile_mutation() {
+        assert!(ensure_connection_profile_mutable("analytics", false).is_ok());
+
+        let error = ensure_connection_profile_mutable("analytics", true)
+            .expect_err("an in-use profile must be immutable");
+        assert_eq!(error.code, ConnectionRepositoryErrorCode::ConnectionInUse);
+        assert_eq!(error.code.as_str(), "connection_in_use");
+        assert_eq!(error.details["connection_id"], "analytics");
+        assert_eq!(error.details["transport"], "mcp");
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn disconnect_result_combines_app_and_http_outcomes() {
+        let neither = disconnect_connection_result(false, 0);
+        assert!(!neither.success);
+        assert_eq!(neither.message, "连接当前未连接");
+
+        let app_only = disconnect_connection_result(true, 0);
+        assert!(app_only.success);
+        assert_eq!(app_only.message, "已断开 App 连接");
+
+        let mcp_only = disconnect_connection_result(false, 2);
+        assert!(mcp_only.success);
+        assert_eq!(mcp_only.message, "已断开 2 个 Streamable HTTP MCP 会话");
+
+        let both = disconnect_connection_result(true, 1);
+        assert!(both.success);
+        assert_eq!(
+            both.message,
+            "已断开 App 连接及 1 个 Streamable HTTP MCP 会话"
+        );
+    }
+
+    #[test]
+    fn external_stdio_usage_returns_a_structured_partial_result() {
+        let partial = disconnect_partial_external_mcp_result(true, 2);
+
+        assert!(!partial.success);
+        assert!(partial.partial);
+        assert_eq!(
+            partial.error_code.as_deref(),
+            Some(DISCONNECT_PARTIAL_EXTERNAL_MCP_IN_USE)
+        );
+        assert!(partial.external_mcp_in_use);
+        assert!(partial.message.contains("STDIO"));
+        assert!(partial.message.contains("disconnect_connection"));
+        assert!(partial.message.contains("已断开 App 连接及 2 个"));
     }
 
     #[test]

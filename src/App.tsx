@@ -50,9 +50,11 @@ const readLegacyConnections = (): {
     }
     return {
       raw,
-      connections: (parsed as ConnectionConfig[]).filter(
-        (connection) => connection?.source !== 'mcp_http'
-      ),
+      connections: (parsed as unknown[])
+        .filter((connection) =>
+          (connection as { source?: unknown } | null)?.source !== 'mcp_http'
+        )
+        .map((connection) => connection as ConnectionConfig),
       failure: null,
     };
   } catch {
@@ -146,9 +148,7 @@ function App() {
         localStorage.setItem(
           'astesia_connections',
           JSON.stringify(
-            state.connections
-              .filter((connection) => connection.source !== 'mcp_http')
-              .map((connection) => ({ ...connection, password: '' }))
+            state.connections.map((connection) => ({ ...connection, password: '' }))
           )
         );
       });

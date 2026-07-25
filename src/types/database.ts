@@ -10,15 +10,14 @@ export interface ConnectionConfig {
   password: string;
   database?: string;
   color?: string;
-  source?: 'shared' | 'mcp_http';
+  source?: 'shared';
   has_credential?: boolean;
   revision?: number;
   mcp_enabled?: boolean;
-  mcp_session_id?: string;
-  mcp_connection_id?: string;
-  mcp_transition?: number;
+  mcp_in_use?: boolean;
   mcp_connected?: boolean;
-  app_connected?: boolean;
+  mcp_session_count?: number;
+  disconnecting?: boolean;
   last_error?: string | null;
 }
 
@@ -56,32 +55,30 @@ export interface LegacyMigrationResult {
   revision: number;
 }
 
-export interface McpSyncedConnection {
+export interface McpConnectionUsage {
   id: string;
-  name: string;
-  db_type: DbType;
-  host: string;
-  port: number;
-  username: string;
-  database?: string;
-  color?: string;
-  source: 'mcp_http';
-  mcp_session_id: string;
-  mcp_connection_id: string;
-  mcp_transition: number;
+  profile_revision: number;
+  mcp_in_use: boolean;
   mcp_connected: boolean;
-  app_connected: boolean;
+  mcp_session_count: number;
+  disconnecting: boolean;
   last_error?: string | null;
 }
 
 export interface McpConnectionsSnapshot {
   revision: number;
-  connections: McpSyncedConnection[];
+  connections: McpConnectionUsage[];
 }
 
 export interface ConnectionResult {
   success: boolean;
   message: string;
+}
+
+export interface DisconnectConnectionResult extends ConnectionResult {
+  partial: boolean;
+  error_code?: string;
+  external_mcp_in_use: boolean;
 }
 
 export interface QueryResult {

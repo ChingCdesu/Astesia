@@ -2,7 +2,11 @@ mod catalog;
 mod policy;
 mod sql;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex, Weak},
+    time::Duration,
+};
 
 use axum::{
     body::Body,
@@ -32,17 +36,16 @@ use sqlparser::{
     },
     parser::Parser,
 };
-use tokio::io::AsyncReadExt;
+use tokio::{io::AsyncReadExt, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::connection_repository::{
     ConnectionRepositoryError, CredentialVerificationReport, SharedConnectionRepository,
 };
-use crate::db::{ConnectionConfig, DbType, QueryResult};
-use crate::mcp_sync::{
-    McpSyncClient, McpSyncConfig, McpSyncProfile, MCP_AUTH_TOKEN_ENV, SYNC_TOKEN_ENV,
-};
-use catalog::{Catalog, CatalogError, ConnectionProfile, SavedQuery};
+use crate::db::{DbType, QueryResult};
+use crate::mcp_sync::{McpControlCommand, McpSyncClient, McpSyncConfig};
+use catalog::{Catalog, CatalogError, SavedQuery};
 use policy::{QueryRisk, SqlAnalysis};
 
 const DEFAULT_RESULT_ROWS: usize = 200;
@@ -67,33 +70,190 @@ const ERROR_CODE_APPROVAL_INVALID_RESPONSE: &str = "astesia.approval.invalid_res
 const ERROR_CODE_APPROVAL_UNAVAILABLE: &str = "astesia.approval.unavailable";
 pub(crate) const CREDENTIAL_VERIFY_MARKER: &str = "ASTESIA_SHARED_CREDENTIALS_VERIFIED ";
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AstesiaMcp {
+    active_tests: ActiveConnectionTests,
     catalog: Catalog,
     sync: Option<McpSyncClient>,
+    _control_loop: Option<Arc<ControlLoopTask>>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-enum McpDbType {
-    MySQL,
-    PostgreSQL,
-    SQLite,
-    SQLServer,
-    MongoDB,
-    Redis,
+#[derive(Clone, Default)]
+struct ActiveConnectionTests {
+    inner: Arc<StdMutex<HashMap<String, Weak<ActiveConnectionTest>>>>,
 }
 
-impl McpDbType {
-    fn into_db_type(self) -> DbType {
-        match self {
-            Self::MySQL => DbType::MySQL,
-            Self::PostgreSQL => DbType::PostgreSQL,
-            Self::SQLite => DbType::SQLite,
-            Self::SQLServer => DbType::SQLServer,
-            Self::MongoDB => DbType::MongoDB,
-            Self::Redis => DbType::Redis,
+struct ActiveConnectionTest {
+    generation: u64,
+    owns_sync_ownership: bool,
+    cancellation: CancellationToken,
+    future_dropped: CancellationToken,
+}
+
+impl ActiveConnectionTest {
+    fn new(generation: u64, owns_sync_ownership: bool) -> Self {
+        Self {
+            generation,
+            owns_sync_ownership,
+            cancellation: CancellationToken::new(),
+            future_dropped: CancellationToken::new(),
         }
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    async fn wait_until_future_dropped(&self) {
+        self.future_dropped.cancelled().await;
+    }
+
+    fn mark_future_dropped(&self) {
+        self.future_dropped.cancel();
+    }
+}
+
+impl ActiveConnectionTests {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<ActiveConnectionTest>>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn current(&self, connection_id: &str) -> Option<Arc<ActiveConnectionTest>> {
+        let mut active = self.lock();
+        let current = active.get(connection_id).and_then(Weak::upgrade);
+        if current.is_none() {
+            active.remove(connection_id);
+        }
+        current
+    }
+
+    fn register(
+        &self,
+        connection_id: &str,
+        generation: u64,
+        owns_sync_ownership: bool,
+        pending_release: Option<(McpSyncClient, String)>,
+    ) -> Result<ActiveConnectionTestGuard, String> {
+        let mut active = self.lock();
+        if active.get(connection_id).and_then(Weak::upgrade).is_some() {
+            return Err(format!(
+                "连接 {connection_id} 已有并发测试，请等待其完成后重试"
+            ));
+        }
+        let test = Arc::new(ActiveConnectionTest::new(generation, owns_sync_ownership));
+        active.insert(connection_id.to_string(), Arc::downgrade(&test));
+        let pending_release = pending_release.map(|(sync, owned_connection_id)| {
+            PendingTestRelease::new(sync, owned_connection_id, generation, test.clone())
+        });
+        Ok(ActiveConnectionTestGuard {
+            test,
+            pending_release,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ActiveTestMarker {
+    _state: Arc<ActiveConnectionTest>,
+}
+
+impl ActiveTestMarker {
+    fn new(state: Arc<ActiveConnectionTest>) -> Self {
+        Self { _state: state }
+    }
+}
+
+struct PendingTestRelease {
+    sync: McpSyncClient,
+    marker: ActiveTestMarker,
+    connection_id: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl PendingTestRelease {
+    fn new(
+        sync: McpSyncClient,
+        connection_id: String,
+        generation: u64,
+        active_test: Arc<ActiveConnectionTest>,
+    ) -> Self {
+        Self {
+            sync,
+            marker: ActiveTestMarker::new(active_test),
+            connection_id,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingTestRelease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let sync = self.sync.clone();
+        let connection_id = self.connection_id.clone();
+        let generation = self.generation;
+        // Keep the Weak-map marker live until the delayed Released finishes,
+        // otherwise a new connect could race with the old generation (ABA).
+        let marker = self.marker.clone();
+        runtime.spawn(async move {
+            let _marker = marker;
+            if let Err(error) = sync.released(connection_id, generation).await {
+                log::debug!(
+                    "Unable to release an abandoned HTTP connection test generation: {error}"
+                );
+            }
+        });
+    }
+}
+
+struct ActiveConnectionTestGuard {
+    test: Arc<ActiveConnectionTest>,
+    pending_release: Option<PendingTestRelease>,
+}
+
+impl std::ops::Deref for ActiveConnectionTestGuard {
+    type Target = ActiveConnectionTest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.test
+    }
+}
+
+impl ActiveConnectionTestGuard {
+    fn disarm_pending_release(&mut self) {
+        if let Some(mut pending_release) = self.pending_release.take() {
+            pending_release.disarm();
+        }
+    }
+}
+
+impl Drop for ActiveConnectionTestGuard {
+    fn drop(&mut self) {
+        // Dropping an MCP request future must always tell App controls that
+        // the database test future (and its shared OS lease) is gone.
+        self.test.mark_future_dropped();
+    }
+}
+struct ControlLoopTask {
+    handle: JoinHandle<()>,
+}
+
+impl Drop for ControlLoopTask {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -130,36 +290,8 @@ impl McpObjectType {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct CreateConnectionArgs {
-    #[schemars(description = "Stable connection identifier; generated when omitted")]
-    connection_id: Option<String>,
-    #[schemars(description = "Human-readable connection name")]
-    name: String,
-    db_type: McpDbType,
-    #[schemars(description = "Hostname, or the SQLite database file path")]
-    host: String,
-    #[schemars(description = "Database port; the driver default is used when omitted")]
-    port: Option<u16>,
-    username: Option<String>,
-    #[schemars(
-        description = "Environment variable containing the password. The secret itself must never be passed as a tool argument."
-    )]
-    password_env: Option<String>,
-    database: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct ConnectionIdArgs {
     connection_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct DeleteConnectionArgs {
-    connection_id: String,
-    #[schemars(
-        description = "Also delete saved queries that reference this connection. Required when such queries exist."
-    )]
-    cascade_queries: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -295,15 +427,7 @@ struct UpdateApproval {
     do_not_ask_again: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct CredentialUseApproval {
-    #[schemars(
-        description = "Allow this MCP session to use the named database credential for the exact displayed connection profile"
-    )]
-    confirm: bool,
-}
-
-rmcp::elicit_safe!(CredentialUseApproval, DestructiveApproval, UpdateApproval);
+rmcp::elicit_safe!(DestructiveApproval, UpdateApproval);
 
 #[derive(Debug, Clone, PartialEq)]
 struct McpToolFailure {
@@ -404,7 +528,6 @@ impl From<sql::SqlBuildError> for McpFailureSource {
 enum ApprovalKind {
     Destructive,
     Update,
-    Credential,
 }
 
 impl ApprovalKind {
@@ -412,7 +535,6 @@ impl ApprovalKind {
         match self {
             Self::Destructive => "destructive",
             Self::Update => "update",
-            Self::Credential => "credential",
         }
     }
 
@@ -424,9 +546,6 @@ impl ApprovalKind {
             Self::Update => {
                 format!("更新操作已阻止：MCP 客户端未提供可用的用户确认（{error}）")
             }
-            Self::Credential => {
-                format!("数据库凭据使用已阻止：MCP 客户端未提供可用的用户确认（{error}）")
-            }
         }
     }
 
@@ -434,7 +553,6 @@ impl ApprovalKind {
         match self {
             Self::Destructive => "高危操作已取消：未收到确认内容",
             Self::Update => "更新操作已取消：未收到确认内容",
-            Self::Credential => "数据库凭据使用已取消：未收到确认内容",
         }
     }
 
@@ -442,7 +560,6 @@ impl ApprovalKind {
         match self {
             Self::Destructive => "用户拒绝确认，高危操作未执行",
             Self::Update => "用户拒绝确认，更新操作未执行",
-            Self::Credential => "用户拒绝确认，数据库凭据使用未执行，凭据未被读取或发送",
         }
     }
 
@@ -450,7 +567,6 @@ impl ApprovalKind {
         match self {
             Self::Destructive => "用户取消确认，高危操作未执行",
             Self::Update => "用户取消确认，更新操作未执行",
-            Self::Credential => "用户取消确认，数据库凭据使用未执行，凭据未被读取或发送",
         }
     }
 }
@@ -479,7 +595,6 @@ fn map_elicitation_failure(kind: ApprovalKind, error: ElicitationError) -> McpTo
             match kind {
                 ApprovalKind::Destructive => "高危操作",
                 ApprovalKind::Update => "更新操作",
-                ApprovalKind::Credential => "数据库凭据使用",
             }
         ),
         ElicitationError::UserDeclined => kind.declined_message().to_string(),
@@ -507,32 +622,86 @@ fn declined_approval(kind: ApprovalKind) -> McpToolFailure {
     )
 }
 
+async fn handle_control_command(
+    catalog: &Catalog,
+    active_tests: &ActiveConnectionTests,
+    command: &McpControlCommand,
+) -> Result<bool, CatalogError> {
+    // This lock linearizes App controls with HTTP test Acquire + registration.
+    // Once the control owns it, an acquired test is either registered here or
+    // has already dropped its future and lease.
+    let _lifecycle = catalog
+        .lock_connection_lifecycle(&command.connection_id)
+        .await;
+    let active_test = active_tests.current(&command.connection_id);
+    if let Some(active_test) =
+        active_test.filter(|active_test| active_test.generation == command.generation)
+    {
+        active_test.cancel();
+        active_test.wait_until_future_dropped().await;
+        if active_test.owns_sync_ownership {
+            // The test owns this generation and has no persistent driver. Its
+            // Released request may still be in flight; ACK is safe now because
+            // the test future and cross-process shared lease are already gone.
+            return Ok(true);
+        }
+    }
+    catalog
+        .disconnect_if_generation_under_lifecycle(&command.connection_id, command.generation)
+        .await
+}
+
 impl AstesiaMcp {
     fn with_repository(repository: SharedConnectionRepository) -> Self {
         Self {
             catalog: Catalog::with_repository(repository),
+            active_tests: ActiveConnectionTests::default(),
             sync: None,
+            _control_loop: None,
         }
     }
 
-    fn with_sync(sync: McpSyncClient) -> Self {
+    fn with_repository_and_sync(
+        repository: SharedConnectionRepository,
+        sync: McpSyncClient,
+    ) -> Self {
+        let catalog = Catalog::with_repository(repository);
+        let active_tests = ActiveConnectionTests::default();
+        let loop_catalog = catalog.clone();
+        let loop_sync = sync.clone();
+        let loop_active_tests = active_tests.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                match loop_sync.poll_control().await {
+                    Ok(Some(command)) => {
+                        let result =
+                            handle_control_command(&loop_catalog, &loop_active_tests, &command)
+                                .await;
+                        let (ok, error) = match result {
+                            Ok(_) => (true, None),
+                            Err(error) => (false, Some(error.to_string())),
+                        };
+                        if let Err(report_error) =
+                            loop_sync.control_result(&command, ok, error).await
+                        {
+                            log::warn!(
+                                "Unable to report an App-requested MCP disconnect: {report_error}"
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::warn!("Unable to poll Astesia MCP control commands: {error}");
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        });
         Self {
-            catalog: Catalog::default(),
+            catalog,
+            active_tests,
             sync: Some(sync),
-        }
-    }
-
-    fn sync_profile(profile: &ConnectionProfile) -> McpSyncProfile {
-        McpSyncProfile {
-            connection_id: profile.config.id.clone(),
-            name: profile.config.name.clone(),
-            db_type: profile.config.db_type.clone(),
-            host: profile.config.host.clone(),
-            port: profile.config.port,
-            username: profile.config.username.clone(),
-            database: profile.config.database.clone(),
-            color: profile.config.color.clone(),
-            password_env: profile.password_env.clone(),
+            _control_loop: Some(Arc::new(ControlLoopTask { handle })),
         }
     }
 
@@ -549,17 +718,6 @@ impl AstesiaMcp {
         }
     }
 
-    fn default_port(db_type: &DbType) -> u16 {
-        match db_type {
-            DbType::MySQL => 3306,
-            DbType::PostgreSQL => 5432,
-            DbType::SQLite => 0,
-            DbType::SQLServer => 1433,
-            DbType::MongoDB => 27017,
-            DbType::Redis => 6379,
-        }
-    }
-
     fn db_type_name(db_type: &DbType) -> &'static str {
         match db_type {
             DbType::MySQL => "mysql",
@@ -569,27 +727,6 @@ impl AstesiaMcp {
             DbType::MongoDB => "mongodb",
             DbType::Redis => "redis",
         }
-    }
-
-    fn validate_environment_variable(name: &str) -> Result<(), String> {
-        if name.eq_ignore_ascii_case(MCP_AUTH_TOKEN_ENV)
-            || name.eq_ignore_ascii_case(SYNC_TOKEN_ENV)
-        {
-            return Err("password_env 不能引用 Astesia MCP 的认证变量".to_string());
-        }
-        let mut chars = name.chars();
-        let first = chars
-            .next()
-            .ok_or_else(|| "password_env 不能为空".to_string())?;
-        if !(first == '_' || first.is_ascii_alphabetic())
-            || !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        {
-            return Err("password_env 必须是合法的环境变量名".to_string());
-        }
-        // Do not probe the environment here: STDIO creation must obtain
-        // credential-use approval before the process reads the secret value.
-        // The approved insert/connect path reports a missing variable.
-        Ok(())
     }
 
     fn dialect(db_type: &DbType) -> Box<dyn Dialect> {
@@ -929,66 +1066,6 @@ impl AstesiaMcp {
         Ok(())
     }
 
-    async fn require_profile_credential_approval(
-        &self,
-        peer: &Peer<RoleServer>,
-        profile: &ConnectionProfile,
-        action: &str,
-    ) -> Result<(), McpToolFailure> {
-        let Some(password_env) = profile.password_env.as_deref() else {
-            return Ok(());
-        };
-        if self.catalog.credential_use_is_approved(&profile).await {
-            return Ok(());
-        }
-
-        let database = profile.config.database.as_deref().unwrap_or("(default)");
-        let message = format!(
-            "Astesia MCP 即将读取数据库凭据环境变量 {password_env}，{action}：\n\
-             类型: {}\n主机: {}\n端口: {}\n用户: {}\n数据库: {}\n\n\
-             仅在你信任该端点时确认。确认仅对当前 MCP 会话中的这一精确连接配置有效。",
-            Self::db_type_name(&profile.config.db_type),
-            profile.config.host,
-            profile.config.port,
-            profile.config.username,
-            database,
-        );
-        let kind = ApprovalKind::Credential;
-        let response = peer
-            .elicit_with_timeout::<CredentialUseApproval>(message, Some(CONFIRMATION_TIMEOUT))
-            .await
-            .map_err(|error| map_elicitation_failure(kind, error))?
-            .ok_or_else(|| missing_approval_content(kind))?;
-        if !response.confirm {
-            return Err(declined_approval(kind));
-        }
-
-        self.catalog.approve_credential_use(&profile).await;
-        Ok(())
-    }
-
-    async fn require_connection_credential_approval(
-        &self,
-        peer: &Peer<RoleServer>,
-        connection_id: &str,
-    ) -> Result<(), McpToolFailure> {
-        let profile = self
-            .catalog
-            .profile(connection_id)
-            .await
-            .map_err(|error| match error {
-                CatalogError::Repository(error) => McpToolFailure::from_repository(error),
-                CatalogError::Message(message) => McpToolFailure::new(
-                    ERROR_CODE_CONNECTION_NOT_FOUND,
-                    message,
-                    false,
-                    json!({ "connection_id": connection_id }),
-                ),
-            })?;
-        self.require_profile_credential_approval(peer, &profile, "并将其用于以下数据库连接")
-            .await
-    }
-
     async fn approve_query_risk(
         &self,
         peer: &Peer<RoleServer>,
@@ -1048,7 +1125,7 @@ impl AstesiaMcp {
 #[tool_router]
 impl AstesiaMcp {
     #[tool(
-        description = "List MCP-session connection profiles without returning credentials.",
+        description = "List desktop connection profiles that are enabled for MCP, without returning credentials.",
         annotations(
             title = "List Astesia connections",
             read_only_hint = true,
@@ -1064,13 +1141,7 @@ impl AstesiaMcp {
         };
         let mut output = Vec::with_capacity(profiles.len());
         for profile in profiles {
-            let credential_source = if profile.password_env.is_some() {
-                Some("environment")
-            } else if profile.credential_ref.is_some() {
-                Some("system_vault")
-            } else {
-                None
-            };
+            let generation = self.catalog.connected_generation(&profile.config.id).await;
             output.push(json!({
                 "connection_id": profile.config.id,
                 "name": profile.config.name,
@@ -1079,113 +1150,14 @@ impl AstesiaMcp {
                 "port": profile.config.port,
                 "username": profile.config.username,
                 "database": profile.config.database,
-                "credential_source": credential_source,
+                "credential_source": profile.has_credential.then_some("system_vault"),
                 "revision": profile.revision,
-                "persistent": self.catalog.uses_shared_repository(),
-                "connected": self.catalog.is_connected(&profile.config.id).await,
+                "persistent": true,
+                "connected": generation.is_some(),
+                "generation": generation,
             }));
         }
         Self::success(json!(output))
-    }
-
-    #[tool(
-        description = "Create a connection profile. STDIO stores it in Astesia's shared repository; Streamable HTTP keeps it session-scoped. Pass only a password environment-variable reference, never the password itself.",
-        annotations(
-            title = "Create Astesia connection",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    async fn create_connection(
-        &self,
-        peer: Peer<RoleServer>,
-        Parameters(args): Parameters<CreateConnectionArgs>,
-    ) -> CallToolResult {
-        let db_type = args.db_type.into_db_type();
-        let id = args
-            .connection_id
-            .unwrap_or_else(|| Uuid::new_v4().to_string())
-            .trim()
-            .to_string();
-        if id.is_empty() || args.name.trim().is_empty() || args.host.trim().is_empty() {
-            return Self::failure("connection_id、name 和 host 不能为空");
-        }
-        if let Some(variable) = args.password_env.as_deref() {
-            if let Err(error) = Self::validate_environment_variable(variable) {
-                return Self::failure(error);
-            }
-        }
-        let _lifecycle = self.catalog.lock_connection_lifecycle(&id).await;
-        let config = ConnectionConfig {
-            id: id.clone(),
-            name: args.name.trim().to_string(),
-            db_type: db_type.clone(),
-            host: args.host.trim().to_string(),
-            port: args.port.unwrap_or_else(|| Self::default_port(&db_type)),
-            username: args.username.unwrap_or_default(),
-            password: String::new(),
-            database: args.database,
-            color: None,
-        };
-        let profile = ConnectionProfile {
-            config,
-            password_env: args.password_env,
-            credential_ref: None,
-            revision: 0,
-        };
-        if self.catalog.uses_shared_repository() {
-            if let Err(error) = self
-                .require_profile_credential_approval(
-                    &peer,
-                    &profile,
-                    "并将其保存到当前用户的系统凭据库，再用于以下数据库连接",
-                )
-                .await
-            {
-                return error.into();
-            }
-        }
-        let sync_profile = Self::sync_profile(&profile);
-        if self.sync.is_some() {
-            if let Err(error) = sync_profile.validate() {
-                return Self::failure(error.to_string());
-            }
-        }
-        match self.catalog.insert_profile(profile).await {
-            Ok(()) => {
-                if let Some(sync) = self.sync.as_ref() {
-                    if let Err(error) = sync.upsert(sync_profile).await {
-                        let local_rollback = self.catalog.remove_profile(&id, 0).await;
-                        let app_rollback = sync.deleted(id.clone()).await;
-                        let rollback_status = match (local_rollback, app_rollback) {
-                            (Ok(()), Ok(_)) => "连接创建已完整回滚".to_string(),
-                            (local, app) => format!(
-                                "连接创建回滚不完整（MCP: {}; App: {}）",
-                                local
-                                    .err()
-                                    .map(|error| error.to_string())
-                                    .unwrap_or_else(|| "已清理".to_string()),
-                                app.err()
-                                    .map(|error| error.to_string())
-                                    .unwrap_or_else(|| "已清理".to_string()),
-                            ),
-                        };
-                        return Self::failure(format!(
-                            "无法同步连接到 Astesia App: {error}; {rollback_status}"
-                        ));
-                    }
-                }
-                Self::success(json!({
-                    "connection_id": id,
-                    "app_synced": self.sync.is_some(),
-                    "shared_with_app": self.catalog.uses_shared_repository(),
-                    "persistent": self.catalog.uses_shared_repository(),
-                }))
-            }
-            Err(error) => Self::failure(error),
-        }
     }
 
     #[tool(
@@ -1200,35 +1172,130 @@ impl AstesiaMcp {
     )]
     async fn test_connection(
         &self,
-        peer: Peer<RoleServer>,
         Parameters(args): Parameters<ConnectionIdArgs>,
     ) -> CallToolResult {
-        let _lifecycle = self
+        let Some(sync) = self.sync.as_ref() else {
+            let _lifecycle = self
+                .catalog
+                .lock_connection_lifecycle(&args.connection_id)
+                .await;
+            return match tokio::time::timeout(
+                DATABASE_OPERATION_TIMEOUT,
+                self.catalog.test_connection(&args.connection_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    Self::success(json!({ "connection_id": args.connection_id, "reachable": true }))
+                }
+                Ok(Err(error)) => Self::failure(error),
+                Err(_) => Self::failure("测试连接超时（60 秒）"),
+            };
+        };
+
+        let lifecycle = self
             .catalog
             .lock_connection_lifecycle(&args.connection_id)
             .await;
-        if let Err(error) = self
-            .require_connection_credential_approval(&peer, &args.connection_id)
+        if self.active_tests.current(&args.connection_id).is_some() {
+            return Self::failure(format!(
+                "连接 {} 已有并发测试，请等待其完成后重试",
+                args.connection_id
+            ));
+        }
+        let profile = match self.catalog.profile(&args.connection_id).await {
+            Ok(profile) => profile,
+            Err(error) => return Self::failure(error),
+        };
+        let (generation, owns_sync_ownership) =
+            match self.catalog.connected_generation(&args.connection_id).await {
+                Some(generation) => (generation, false),
+                None => match sync
+                    .acquire(args.connection_id.clone(), profile.revision)
+                    .await
+                {
+                    Ok(generation) => (generation, true),
+                    Err(error) => {
+                        return Self::failure(format!(
+                            "无法向 Astesia App 申请测试连接占用: {error}"
+                        ))
+                    }
+                },
+            };
+        let pending_release =
+            owns_sync_ownership.then(|| (sync.clone(), args.connection_id.clone()));
+        let mut active_test = match self.active_tests.register(
+            &args.connection_id,
+            generation,
+            owns_sync_ownership,
+            pending_release,
+        ) {
+            Ok(active_test) => active_test,
+            Err(error) => return Self::failure(error),
+        };
+        let prepared_test = match self
+            .catalog
+            .prepare_connection_test(&args.connection_id, profile.revision)
             .await
         {
-            return error.into();
+            Ok(prepared_test) => prepared_test,
+            Err(error) => {
+                // prepare_connection_test has already dropped any partial OS
+                // lease. Keep the same RAII/release path as a completed test.
+                active_test.mark_future_dropped();
+                // Let an already queued App control ACK this generation while
+                // the best-effort Released request is in flight.
+                drop(lifecycle);
+                if owns_sync_ownership {
+                    match sync.released(args.connection_id.clone(), generation).await {
+                        Ok(()) => active_test.disarm_pending_release(),
+                        Err(release_error) => {
+                            return Self::failure(format!(
+                            "{error}; 同时无法释放 Astesia App 中的测试连接占用: {release_error}"
+                        ))
+                        }
+                    }
+                }
+                return Self::failure(error);
+            }
+        };
+        drop(lifecycle);
+
+        let test_result = {
+            let operation = tokio::time::timeout(DATABASE_OPERATION_TIMEOUT, prepared_test.run());
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => Some(result),
+                _ = active_test.cancellation.cancelled() => None,
+            }
+        };
+        // The timeout/test future (and therefore its shared OS lease) is
+        // dropped before controls are allowed to ACK this generation.
+        active_test.mark_future_dropped();
+
+        if owns_sync_ownership {
+            match sync.released(args.connection_id.clone(), generation).await {
+                Ok(()) => active_test.disarm_pending_release(),
+                Err(error) => {
+                    return Self::failure(format!(
+                        "测试连接已结束，但无法释放 Astesia App 中的连接占用: {error}"
+                    ))
+                }
+            }
         }
-        match tokio::time::timeout(
-            DATABASE_OPERATION_TIMEOUT,
-            self.catalog.test_connection(&args.connection_id),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
+
+        match test_result {
+            None => Self::failure("连接测试已由 Astesia App 取消"),
+            Some(Ok(Ok(()))) => {
                 Self::success(json!({ "connection_id": args.connection_id, "reachable": true }))
             }
-            Ok(Err(error)) => Self::failure(error),
-            Err(_) => Self::failure("测试连接超时（60 秒）"),
+            Some(Ok(Err(error))) => Self::failure(error),
+            Some(Err(_)) => Self::failure("测试连接超时（60 秒）"),
         }
     }
 
     #[tool(
-        description = "Open a saved connection for subsequent metadata, query, and row tools.",
+        description = "Open a desktop connection by ID for subsequent metadata, query, and row tools.",
         annotations(
             title = "Access Astesia connection",
             read_only_hint = false,
@@ -1239,62 +1306,118 @@ impl AstesiaMcp {
     )]
     async fn connect_connection(
         &self,
-        peer: Peer<RoleServer>,
         Parameters(args): Parameters<ConnectionIdArgs>,
     ) -> CallToolResult {
         let _lifecycle = self
             .catalog
             .lock_connection_lifecycle(&args.connection_id)
             .await;
-        if let Err(error) = self
-            .require_connection_credential_approval(&peer, &args.connection_id)
-            .await
-        {
-            return error.into();
+        if self.active_tests.current(&args.connection_id).is_some() {
+            return Self::failure("连接测试正在进行或仍在释放占用，请稍后再连接");
         }
-        match tokio::time::timeout(
-            DATABASE_OPERATION_TIMEOUT,
-            self.catalog.connect(&args.connection_id),
-        )
-        .await
-        {
-            Ok(Ok(opened)) => {
-                if let Some(sync) = self.sync.as_ref() {
-                    if let Err(error) = sync.connected(args.connection_id.clone()).await {
-                        let local_rollback = self.catalog.disconnect(&args.connection_id).await;
-                        let app_rollback = sync.disconnected(args.connection_id.clone()).await;
-                        let rollback_status = match (local_rollback, app_rollback) {
-                            (Ok(_), Ok(_)) => "连接访问已完整回滚".to_string(),
-                            (local, app) => format!(
-                                "连接访问回滚不完整（MCP: {}; App: {}）",
-                                local
-                                    .err()
-                                    .map(|error| error.to_string())
-                                    .unwrap_or_else(|| "已断开".to_string()),
-                                app.err()
-                                    .map(|error| error.to_string())
-                                    .unwrap_or_else(|| "已断开".to_string()),
-                            ),
-                        };
+        let profile = match self.catalog.profile(&args.connection_id).await {
+            Ok(profile) => profile,
+            Err(error) => return Self::failure(error),
+        };
+
+        let acquired_generation = match self.sync.as_ref() {
+            Some(sync) => match sync
+                .acquire(args.connection_id.clone(), profile.revision)
+                .await
+            {
+                Ok(generation) => Some(generation),
+                Err(error) => {
+                    return Self::failure(format!("无法向 Astesia App 申请连接占用: {error}"))
+                }
+            },
+            None => None,
+        };
+
+        let connect_result = if let Some(generation) = acquired_generation {
+            tokio::time::timeout(
+                DATABASE_OPERATION_TIMEOUT,
+                self.catalog.connect_with_generation(
+                    &args.connection_id,
+                    generation,
+                    profile.revision,
+                ),
+            )
+            .await
+        } else {
+            tokio::time::timeout(
+                DATABASE_OPERATION_TIMEOUT,
+                self.catalog.connect(&args.connection_id),
+            )
+            .await
+        };
+
+        let outcome = match connect_result {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                if let (Some(sync), Some(generation)) = (self.sync.as_ref(), acquired_generation) {
+                    if let Err(release_error) =
+                        sync.released(args.connection_id.clone(), generation).await
+                    {
                         return Self::failure(format!(
-                            "无法同步连接状态到 Astesia App: {error}; {rollback_status}"
+                            "{error}; 同时无法释放 Astesia App 中的连接占用: {release_error}"
                         ));
                     }
                 }
-                Self::success(json!({
-                    "connection_id": args.connection_id,
-                    "connected": true,
-                    "opened_now": opened,
-                    "app_synced": self.sync.is_some(),
-                }))
+                return Self::failure(error);
             }
-            Ok(Err(error)) => Self::failure(error),
-            Err(_) => Self::failure("访问连接超时（60 秒）"),
+            Err(_) => {
+                if let (Some(sync), Some(generation)) = (self.sync.as_ref(), acquired_generation) {
+                    if let Err(release_error) =
+                        sync.released(args.connection_id.clone(), generation).await
+                    {
+                        return Self::failure(format!(
+                            "访问连接超时（60 秒）；同时无法释放 Astesia App 中的连接占用: {release_error}"
+                        ));
+                    }
+                }
+                return Self::failure("访问连接超时（60 秒）");
+            }
+        };
+
+        if let Some(sync) = self.sync.as_ref() {
+            if let Err(error) = sync
+                .connected(args.connection_id.clone(), outcome.generation)
+                .await
+            {
+                let local_rollback = self.catalog.disconnect(&args.connection_id).await.result;
+                let app_rollback = sync
+                    .released(args.connection_id.clone(), outcome.generation)
+                    .await;
+                let rollback_status = match (local_rollback, app_rollback) {
+                    (Ok(_), Ok(_)) => "连接访问已完整回滚".to_string(),
+                    (local, app) => format!(
+                        "连接访问回滚不完整（MCP: {}; App: {}）",
+                        local
+                            .err()
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "已断开".to_string()),
+                        app.err()
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "已释放".to_string()),
+                    ),
+                };
+                return Self::failure(format!(
+                    "无法同步连接状态到 Astesia App: {error}; {rollback_status}"
+                ));
+            }
         }
+
+        Self::success(json!({
+            "connection_id": args.connection_id,
+            "connected": true,
+            "opened_now": outcome.opened_now,
+            "generation": outcome.generation,
+            "app_synced": self.sync.is_some(),
+        }))
     }
 
     #[tool(
-        description = "Close an active connection while retaining its profile.",
+        description = "Close the active MCP database connection while retaining its desktop profile.",
         annotations(
             title = "Disconnect Astesia connection",
             read_only_hint = false,
@@ -1311,18 +1434,26 @@ impl AstesiaMcp {
             .catalog
             .lock_connection_lifecycle(&args.connection_id)
             .await;
-        let disconnected = self.catalog.disconnect(&args.connection_id).await;
-        let sync_error = if !self.catalog.is_connected(&args.connection_id).await {
-            match self.sync.as_ref() {
-                Some(sync) => sync
-                    .disconnected(args.connection_id.clone())
-                    .await
-                    .err()
-                    .map(|error| error.to_string()),
-                None => None,
-            }
-        } else {
-            None
+        let active_test = self.active_tests.current(&args.connection_id);
+        if let Some(active_test) = active_test.as_ref() {
+            active_test.cancel();
+            active_test.wait_until_future_dropped().await;
+        }
+        let disconnect_outcome = self.catalog.disconnect(&args.connection_id).await;
+        let generation = active_test
+            .as_ref()
+            .map(|active_test| active_test.generation)
+            .or(disconnect_outcome.generation);
+        let disconnected = disconnect_outcome
+            .result
+            .map(|closed| closed || active_test.is_some());
+        let sync_error = match (self.sync.as_ref(), generation) {
+            (Some(sync), Some(generation)) => sync
+                .released(args.connection_id.clone(), generation)
+                .await
+                .err()
+                .map(|error| error.to_string()),
+            _ => None,
         };
 
         match (disconnected, sync_error) {
@@ -1330,6 +1461,7 @@ impl AstesiaMcp {
                 "connection_id": args.connection_id,
                 "connected": false,
                 "closed_now": closed,
+                "generation": generation,
                 "app_synced": self.sync.is_some(),
             })),
             (Ok(_), Some(error)) => {
@@ -1340,108 +1472,6 @@ impl AstesiaMcp {
             }
             (Err(error), None) => Self::failure(error),
         }
-    }
-
-    #[tool(
-        description = "Permanently delete an MCP-session connection profile after explicit user confirmation.",
-        annotations(
-            title = "Delete Astesia connection",
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    async fn delete_connection(
-        &self,
-        peer: Peer<RoleServer>,
-        Parameters(args): Parameters<DeleteConnectionArgs>,
-    ) -> CallToolResult {
-        let _lifecycle = self
-            .catalog
-            .lock_connection_lifecycle(&args.connection_id)
-            .await;
-        let profile = match self.catalog.profile(&args.connection_id).await {
-            Ok(profile) => profile,
-            Err(error) => return Self::failure(error),
-        };
-        let query_count = self
-            .catalog
-            .query_count_for_connection(&args.connection_id)
-            .await;
-        if query_count > 0 && !args.cascade_queries {
-            return Self::failure(format!(
-                "连接仍被 {query_count} 个保存查询引用；如需同时删除请设置 cascade_queries=true"
-            ));
-        }
-        let message = format!(
-            "删除连接配置“{}”({})。连接将被断开，并删除 {} 个关联查询。此操作不可撤销。",
-            profile.config.name, args.connection_id, query_count
-        );
-        if let Err(error) = self.require_destructive_approval(&peer, message).await {
-            return error.into();
-        }
-        let current_query_count = self
-            .catalog
-            .query_count_for_connection(&args.connection_id)
-            .await;
-        if current_query_count != query_count {
-            return Self::failure(format!(
-                "确认期间关联查询数量从 {query_count} 变为 {current_query_count}，连接及查询均未删除；请重新确认"
-            ));
-        }
-        if current_query_count > 0 && !args.cascade_queries {
-            return Self::failure(format!(
-                "确认期间连接新增了 {current_query_count} 个保存查询；未设置 cascade_queries，因此未删除连接"
-            ));
-        }
-        if let Err(error) = self.catalog.disconnect(&args.connection_id).await {
-            if let Some(sync) = self.sync.as_ref() {
-                if let Err(sync_error) = sync.disconnected(args.connection_id.clone()).await {
-                    return Self::failure(format!(
-                        "{error}; 同时无法同步断开状态到 Astesia App: {sync_error}"
-                    ));
-                }
-            }
-            return Self::failure(error);
-        }
-
-        if let Some(sync) = self.sync.as_ref() {
-            if let Err(error) = sync.deleted(args.connection_id.clone()).await {
-                return Self::failure(format!(
-                    "连接已断开，但配置尚未删除，因为无法同步到 Astesia App: {error}"
-                ));
-            }
-        }
-
-        if let Err(error) = self
-            .catalog
-            .remove_profile(&args.connection_id, profile.revision)
-            .await
-        {
-            if let Some(sync) = self.sync.as_ref() {
-                let app_restore = sync.upsert(Self::sync_profile(&profile)).await;
-                return match app_restore {
-                    Ok(_) => Self::failure(format!(
-                        "删除 MCP 连接配置失败，Astesia App 显示已恢复: {error}"
-                    )),
-                    Err(restore_error) => Self::failure(format!(
-                        "删除 MCP 连接配置失败，且无法恢复 Astesia App 显示: {error}; {restore_error}"
-                    )),
-                };
-            }
-            return Self::failure(error);
-        }
-
-        let deleted_queries = self
-            .catalog
-            .remove_queries_for_connection(&args.connection_id)
-            .await;
-        Self::success(json!({
-            "connection_id": args.connection_id,
-            "deleted_queries": deleted_queries,
-            "app_synced": self.sync.is_some(),
-        }))
     }
 
     #[tool(
@@ -2196,6 +2226,7 @@ async fn require_http_auth(
 }
 
 pub async fn run_http(port: u16, auth_token: String) -> anyhow::Result<()> {
+    let repository = SharedConnectionRepository::new_default_strict()?;
     let sync_config = McpSyncConfig::from_env()?;
     let auth = HttpAuth::new(auth_token)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
@@ -2204,7 +2235,12 @@ pub async fn run_http(port: u16, auth_token: String) -> anyhow::Result<()> {
 
     let service: StreamableHttpService<AstesiaMcp, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(AstesiaMcp::with_sync(sync_config.new_session())),
+            move || {
+                Ok(AstesiaMcp::with_repository_and_sync(
+                    repository.clone(),
+                    sync_config.new_session(),
+                ))
+            },
             Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig::default().with_allowed_origins([
                 format!("http://127.0.0.1:{}", address.port()),
@@ -2244,11 +2280,6 @@ mod tests {
         result
             .structured_content
             .expect("structured MCP error payload")
-    }
-
-    #[test]
-    fn default_service_keeps_stdio_isolated_from_app_sync() {
-        assert!(AstesiaMcp::default().sync.is_none());
     }
 
     #[test]
@@ -2357,11 +2388,7 @@ mod tests {
 
     #[test]
     fn unsupported_elicitation_explains_refusal_for_every_approval_kind() {
-        for kind in [
-            ApprovalKind::Destructive,
-            ApprovalKind::Update,
-            ApprovalKind::Credential,
-        ] {
+        for kind in [ApprovalKind::Destructive, ApprovalKind::Update] {
             let failure = map_elicitation_failure(kind, ElicitationError::CapabilityNotSupported);
 
             assert_eq!(failure.code, ERROR_CODE_APPROVAL_UNSUPPORTED);
@@ -2383,11 +2410,7 @@ mod tests {
 
     #[test]
     fn declined_and_cancelled_elicitation_explain_that_nothing_was_executed() {
-        for kind in [
-            ApprovalKind::Destructive,
-            ApprovalKind::Update,
-            ApprovalKind::Credential,
-        ] {
+        for kind in [ApprovalKind::Destructive, ApprovalKind::Update] {
             let declined = map_elicitation_failure(kind, ElicitationError::UserDeclined);
             assert_eq!(declined.code, ERROR_CODE_APPROVAL_DECLINED);
             assert!(declined.message.contains("用户拒绝确认"));
@@ -2401,20 +2424,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_approval_failure_uses_the_compatible_structured_payload() {
-        let result: CallToolResult = declined_approval(ApprovalKind::Credential).into();
-        let payload = structured_error_payload(result);
-
-        assert_eq!(
-            payload["error"],
-            "用户拒绝确认，数据库凭据使用未执行，凭据未被读取或发送"
-        );
-        assert_eq!(payload["error_code"], ERROR_CODE_APPROVAL_DECLINED);
-        assert_eq!(payload["retryable"], false);
-        assert_eq!(payload["details"], json!({ "approval_kind": "credential" }));
-    }
-
-    #[test]
     fn exposes_the_complete_tool_set() {
         let tools = AstesiaMcp::tool_router().list_all();
         let names = tools
@@ -2422,14 +2431,12 @@ mod tests {
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 18);
         for expected in [
             "list_connections",
-            "create_connection",
             "test_connection",
             "connect_connection",
             "disconnect_connection",
-            "delete_connection",
             "create_database_object",
             "delete_database_object",
             "create_schema",
@@ -2447,6 +2454,8 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing MCP tool {expected}");
         }
+        assert!(!names.contains(&"create_connection"));
+        assert!(!names.contains(&"delete_connection"));
     }
 
     #[test]
@@ -2454,7 +2463,6 @@ mod tests {
         let tools = AstesiaMcp::tool_router().list_all();
 
         for name in [
-            "delete_connection",
             "delete_database_object",
             "delete_schema",
             "delete_table",
@@ -2477,35 +2485,6 @@ mod tests {
                 "{name} must advertise destructive behavior"
             );
         }
-    }
-
-    #[test]
-    fn connection_schema_accepts_only_a_credential_reference() {
-        let tools = AstesiaMcp::tool_router().list_all();
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name == "create_connection")
-            .expect("create_connection tool");
-        let schema = serde_json::to_value(&tool.input_schema).expect("serialize input schema");
-        let properties = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .expect("input schema properties");
-
-        assert!(properties.contains_key("password_env"));
-        assert!(!properties.contains_key("password"));
-    }
-
-    #[test]
-    fn validates_credential_reference_without_reading_the_environment() {
-        assert!(AstesiaMcp::validate_environment_variable(
-            "ASTESIA_TEST_INTENTIONALLY_UNSET_CREDENTIAL"
-        )
-        .is_ok());
-        assert!(AstesiaMcp::validate_environment_variable("").is_err());
-        assert!(AstesiaMcp::validate_environment_variable("INVALID-NAME").is_err());
-        assert!(AstesiaMcp::validate_environment_variable(MCP_AUTH_TOKEN_ENV).is_err());
-        assert!(AstesiaMcp::validate_environment_variable(SYNC_TOKEN_ENV).is_err());
     }
 
     #[test]
@@ -2556,5 +2535,93 @@ mod tests {
         assert!(
             AstesiaMcp::validate_no_credential_sql(&DbType::PostgreSQL, sql, &analysis).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn active_test_guard_drop_unblocks_controls_and_clears_the_weak_marker() {
+        let active_tests = ActiveConnectionTests::default();
+        let active_test = active_tests
+            .register("connection-a", 17, false, None)
+            .expect("register test");
+        let state = active_tests
+            .current("connection-a")
+            .expect("active test state");
+        let waiting_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_state.cancel();
+            waiting_state.wait_until_future_dropped().await;
+            waiting_state.generation
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), state.cancellation.cancelled())
+            .await
+            .expect("cancellation observed");
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "control must wait until the database test future is dropped"
+        );
+
+        drop(state);
+        drop(active_test);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("control waiter completed")
+                .expect("control waiter task"),
+            17
+        );
+        assert!(
+            active_tests.current("connection-a").is_none(),
+            "a cancelled handler future must not leave a stale active-test marker"
+        );
+    }
+
+    #[test]
+    fn active_test_marker_survives_until_the_handler_finishes_sync_release() {
+        let active_tests = ActiveConnectionTests::default();
+        let active_test = active_tests
+            .register("connection-a", 23, true, None)
+            .expect("register test");
+
+        active_test.mark_future_dropped();
+        assert!(
+            active_tests.current("connection-a").is_some(),
+            "owned generation remains visible while Released is in flight"
+        );
+        drop(active_test);
+        assert!(active_tests.current("connection-a").is_none());
+
+        active_tests
+            .register("connection-a", 24, false, None)
+            .expect("a completed handler must allow another test");
+    }
+
+    #[test]
+    fn delayed_release_marker_prevents_generation_aba() {
+        let active_tests = ActiveConnectionTests::default();
+        let active_test = active_tests
+            .register("connection-a", 31, true, None)
+            .expect("register test");
+        let marker = ActiveTestMarker::new(active_test.test.clone());
+
+        active_test.mark_future_dropped();
+        drop(active_test);
+        assert!(
+            active_tests.current("connection-a").is_some(),
+            "the delayed Released task must keep connect/test blocked"
+        );
+        assert!(
+            active_tests
+                .register("connection-a", 32, false, None)
+                .is_err(),
+            "a new generation must not start before old Released completes"
+        );
+
+        drop(marker);
+        assert!(active_tests.current("connection-a").is_none());
+        active_tests
+            .register("connection-a", 32, false, None)
+            .expect("new generation after Released");
     }
 }

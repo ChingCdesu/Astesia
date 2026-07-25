@@ -7,10 +7,12 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, OwnedMutexGuard};
 
 use crate::mcp_sync::{MCP_AUTH_TOKEN_ENV, SYNC_ENDPOINT_ENV, SYNC_SERVICE_ID_ENV, SYNC_TOKEN_ENV};
-use crate::mcp_sync_server::{McpConnectionsSnapshot, McpSyncRegistry, McpSyncServerHandle};
+use crate::mcp_sync_server::{
+    ForceDisconnectResult, McpConnectionsSnapshot, McpSyncRegistry, McpSyncServerHandle,
+};
 
 const SIDECAR_NAME: &str = "astesia-mcp";
 const READY_PREFIX: &str = "ASTESIA_MCP_READY";
@@ -122,6 +124,23 @@ impl McpHelperState {
 
     pub async fn synced_connections(&self) -> McpConnectionsSnapshot {
         self.sync_registry.snapshot().await
+    }
+
+    pub async fn lock_connection_lifecycle(&self, connection_id: &str) -> OwnedMutexGuard<()> {
+        self.sync_registry
+            .lock_connection_lifecycle(connection_id)
+            .await
+    }
+
+    pub async fn is_connection_in_use(&self, connection_id: &str) -> bool {
+        self.sync_registry.is_connection_in_use(connection_id).await
+    }
+
+    pub async fn force_disconnect(
+        &self,
+        connection_id: &str,
+    ) -> Result<ForceDisconnectResult, String> {
+        self.sync_registry.force_disconnect(connection_id).await
     }
 
     pub async fn start(&self, port: u16, auth_token: String) -> Result<McpServiceStatus, String> {

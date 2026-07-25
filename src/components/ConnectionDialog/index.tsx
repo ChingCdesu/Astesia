@@ -16,6 +16,7 @@ interface Props {
   open: boolean;
   onClose: () => void;
   editConfig?: ConnectionConfig | null;
+  readOnly?: boolean;
 }
 
 const dbTypes: DbType[] = ['mysql', 'postgresql', 'sqlite', 'sqlserver', 'mongodb', 'redis'];
@@ -27,7 +28,12 @@ const readableError = (error: unknown): string => {
     .join(' ');
 };
 
-export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
+export default function ConnectionDialog({
+  open,
+  onClose,
+  editConfig,
+  readOnly = false,
+}: Props) {
   const { t } = useTranslation();
   const { addConnection, updateConnection, testConnection } = useConnectionStore();
 
@@ -75,6 +81,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
   }, [open, editConfig]);
 
   const handleDbTypeChange = (dbType: DbType) => {
+    if (readOnly) return;
     setForm((prev) => ({
       ...prev,
       db_type: dbType,
@@ -92,7 +99,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
   };
 
   const handleTest = async () => {
-    if (!form.name) return;
+    if (readOnly || !form.name) return;
     setTesting(true);
     setTestResult(null);
     try {
@@ -112,7 +119,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
   };
 
   const handleSave = async () => {
-    if (!form.name) return;
+    if (readOnly || !form.name) return;
     const config: ConnectionConfig = {
       id: editConfig?.id || crypto.randomUUID(),
       ...form,
@@ -148,10 +155,18 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>
-            {editConfig ? t('connection.edit') : t('connection.new')}
+            {readOnly
+              ? t('connection.view')
+              : editConfig
+                ? t('connection.edit')
+                : t('connection.new')}
           </DialogTitle>
           <DialogDescription>
-            {editConfig ? '修改数据库连接配置' : '配置一个新的数据库连接'}
+            {readOnly
+              ? t('connection.viewDescription')
+              : editConfig
+                ? t('connection.editDescription')
+                : t('connection.newDescription')}
           </DialogDescription>
         </DialogHeader>
 
@@ -164,13 +179,18 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
               placeholder={t('connection.namePlaceholder')}
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
+              readOnly={readOnly}
             />
           </div>
 
           {/* DB Type */}
           <div className="grid grid-cols-4 items-center gap-4">
             <Label className="text-right">{t('connection.type')}</Label>
-            <Select value={form.db_type} onValueChange={(v) => handleDbTypeChange(v as DbType)}>
+            <Select
+              value={form.db_type}
+              onValueChange={(v) => handleDbTypeChange(v as DbType)}
+              disabled={readOnly}
+            >
               <SelectTrigger className="col-span-3">
                 <SelectValue />
               </SelectTrigger>
@@ -194,6 +214,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
               placeholder={isSqlite ? t('connection.filePathPlaceholder') : t('connection.hostPlaceholder')}
               value={form.host}
               onChange={(e) => setForm({ ...form, host: e.target.value })}
+              readOnly={readOnly}
             />
           </div>
 
@@ -206,6 +227,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
                 type="number"
                 value={form.port}
                 onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 0 })}
+                readOnly={readOnly}
               />
             </div>
           )}
@@ -219,6 +241,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
                 placeholder={t('connection.usernamePlaceholder')}
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
+                readOnly={readOnly}
               />
             </div>
           )}
@@ -231,12 +254,17 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
                 className="col-span-3"
                 type="password"
                 placeholder={
-                  editConfig?.has_credential
-                    ? t('connection.savedPasswordPlaceholder')
-                    : t('connection.passwordPlaceholder')
+                  readOnly
+                    ? editConfig?.has_credential
+                      ? t('connection.savedPasswordReadOnlyPlaceholder')
+                      : t('connection.noSavedPasswordPlaceholder')
+                    : editConfig?.has_credential
+                      ? t('connection.savedPasswordPlaceholder')
+                      : t('connection.passwordPlaceholder')
                 }
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
+                readOnly={readOnly}
               />
             </div>
           )}
@@ -250,6 +278,7 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
                 placeholder={t('connection.databasePlaceholder')}
                 value={form.database}
                 onChange={(e) => setForm({ ...form, database: e.target.value })}
+                readOnly={readOnly}
               />
             </div>
           )}
@@ -262,7 +291,11 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
                 type="color"
                 value={form.color}
                 onChange={(e) => setForm({ ...form, color: e.target.value })}
-                className="h-9 w-12 cursor-pointer rounded-md border border-input p-1"
+                disabled={readOnly}
+                className={cn(
+                  "h-9 w-12 rounded-md border border-input p-1",
+                  readOnly ? "cursor-default" : "cursor-pointer"
+                )}
               />
               <span className="text-xs text-muted-foreground">{form.color}</span>
             </div>
@@ -289,19 +322,23 @@ export default function ConnectionDialog({ open, onClose, editConfig }: Props) {
 
         <DialogFooter className="mt-4 gap-2">
           <Button variant="outline" onClick={closeDialog}>
-            {t('connection.cancel')}
+            {readOnly ? t('connection.close') : t('connection.cancel')}
           </Button>
-          <Button variant="secondary" onClick={handleTest} disabled={testing || !form.name}>
-            {testing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-            {t('connection.test')}
-          </Button>
-          <Button
-            onClick={() => void handleSave()}
-            disabled={!form.name || saving}
-          >
-            {saving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-            {t('connection.save')}
-          </Button>
+          {!readOnly && (
+            <>
+              <Button variant="secondary" onClick={handleTest} disabled={testing || !form.name}>
+                {testing && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+                {t('connection.test')}
+              </Button>
+              <Button
+                onClick={() => void handleSave()}
+                disabled={!form.name || saving}
+              >
+                {saving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+                {t('connection.save')}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -43,6 +43,7 @@ export default function Sidebar() {
   const { t } = useTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editConfig, setEditConfig] = useState<ConnectionConfig | null>(null);
+  const [dialogReadOnly, setDialogReadOnly] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [backupTarget, setBackupTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
@@ -76,7 +77,6 @@ export default function Sidebar() {
   }, []);
 
   const handleConnect = async (config: ConnectionConfig) => {
-    if (config.source === 'mcp_http') return;
     const result = await connectDatabase(config.id);
     if (result.success) {
       setExpandedKeys((prev) => new Set(prev).add(config.id));
@@ -226,7 +226,7 @@ export default function Sidebar() {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
-                onClick={() => { setEditConfig(null); setDialogOpen(true); }}
+                onClick={() => { setEditConfig(null); setDialogReadOnly(false); setDialogOpen(true); }}
               >
                 <Plus className="h-4 w-4" />
               </Button>
@@ -245,7 +245,7 @@ export default function Sidebar() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => { setEditConfig(null); setDialogOpen(true); }}
+                  onClick={() => { setEditConfig(null); setDialogReadOnly(false); setDialogOpen(true); }}
                 >
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
                   {t('sidebar.newConnection')}
@@ -255,9 +255,7 @@ export default function Sidebar() {
               <div className="flex flex-col gap-0.5">
                 {connections.map((conn) => {
                   const node = treeData[conn.id];
-                  const isConnected = conn.source === 'mcp_http'
-                    ? conn.app_connected === true
-                    : node?.connected;
+                  const isConnected = node?.connected;
                   const isExpanded = expandedKeys.has(conn.id);
 
                   return (
@@ -275,7 +273,11 @@ export default function Sidebar() {
                         onOpenQuery={handleOpenQuery}
                         onRefresh={loadDatabases}
                         onDisconnect={disconnectDatabase}
-                        onEdit={(c) => { setEditConfig(c); setDialogOpen(true); }}
+                        onEdit={(c, readOnly) => {
+                          setEditConfig(c);
+                          setDialogReadOnly(readOnly);
+                          setDialogOpen(true);
+                        }}
                         onDelete={(c) => {
                           void (async () => {
                             try {
@@ -630,8 +632,15 @@ export default function Sidebar() {
 
         <ConnectionDialog
           open={dialogOpen}
-          onClose={() => setDialogOpen(false)}
+          onClose={() => {
+            setDialogOpen(false);
+            setDialogReadOnly(false);
+          }}
           editConfig={editConfig}
+          readOnly={dialogReadOnly || Boolean(editConfig && (
+            connections.find((connection) => connection.id === editConfig.id)?.mcp_in_use
+            || connections.find((connection) => connection.id === editConfig.id)?.disconnecting
+          ))}
         />
 
         <BackupDialog
