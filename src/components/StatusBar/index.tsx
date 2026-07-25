@@ -3,7 +3,7 @@ import { useConnectionStore } from '@/stores/connectionStore';
 import { DB_TYPE_LABELS } from '@/types/database';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Languages } from 'lucide-react';
+import { Command, Languages } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,6 +15,7 @@ import ThemeToggle from '@/components/ThemeToggle';
 import TaskPanel from '@/components/TaskPanel';
 import NotificationPanel from '@/components/NotificationPanel';
 import McpHelper from '@/components/McpHelper';
+import { executeCommand, getPrimaryShortcut } from '@/lib/commands';
 
 export default function StatusBar() {
   const { t, i18n } = useTranslation();
@@ -34,6 +35,18 @@ export default function StatusBar() {
         </span>
       </div>
       <div className="ml-auto flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          aria-label={t('commands.commandPalette')}
+          title={`${t('commands.commandPalette')} (${getPrimaryShortcut('app.commandPalette')})`}
+          onClick={() => {
+            void executeCommand('app.commandPalette');
+          }}
+        >
+          <Command className="h-3.5 w-3.5" />
+        </Button>
         <McpHelper />
         <TaskPanel />
         <NotificationPanel />

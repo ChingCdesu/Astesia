@@ -30,6 +30,11 @@ import { splitSqlStatements, isTransactionControl } from '@/lib/sqlSplit';
 import ExportDialog from '@/components/ExportDialog';
 import { notify } from '@/stores/notificationStore';
 import {
+  executeCommand,
+  getPrimaryShortcut,
+  useCommandHandler,
+} from '@/lib/commands';
+import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 
@@ -39,6 +44,7 @@ interface Props {
   tabKey: string;
   dbType?: string;
   initialContent?: string;
+  isActive: boolean;
 }
 
 // Dialects that support an EXPLAIN-prefix that returns a result set the way
@@ -61,7 +67,14 @@ function buildExplainSql(sql: string, dbType: string | undefined): string {
   }
 }
 
-export default function QueryEditor({ connectionId, database, tabKey, dbType, initialContent }: Props) {
+export default function QueryEditor({
+  connectionId,
+  database,
+  tabKey,
+  dbType,
+  initialContent,
+  isActive,
+}: Props) {
   const { t } = useTranslation();
   const [results, setResults] = useState<StatementResult[]>([]);
   const [activeIdx, setActiveIdx] = useState(0);
@@ -253,6 +266,10 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
     runStatements(collectSqlToRun());
   }, [collectSqlToRun, runStatements]);
 
+  const handleExecuteCurrent = useCallback(() => {
+    runStatements(collectStatementAtCursor());
+  }, [collectStatementAtCursor, runStatements]);
+
   const handleExplain = useCallback(() => {
     if (!dbType || !EXPLAINABLE_DIALECTS.includes(dbType)) return;
     const stmt = collectStatementAtCursor().trim();
@@ -266,19 +283,33 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
       id: 'execute-query',
       label: 'Execute Query',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
-      run: () => handleExecute(),
+      run: () => {
+        void executeCommand('query.execute');
+      },
+    });
+    editor.addAction({
+      id: 'execute-current-statement',
+      label: 'Execute Current Statement',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter],
+      run: () => {
+        void executeCommand('query.executeCurrent');
+      },
     });
     editor.addAction({
       id: 'open-file',
       label: 'Open SQL File',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO],
-      run: () => handleOpenFile(),
+      run: () => {
+        void executeCommand('query.openFile');
+      },
     });
     editor.addAction({
       id: 'save-file',
       label: 'Save SQL File',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-      run: () => handleSaveFile(),
+      run: () => {
+        void executeCommand('query.saveFile');
+      },
     });
   };
 
@@ -310,6 +341,24 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
     }
   }, []);
 
+  useCommandHandler('query.execute', handleExecute, isActive && !loading, 10);
+  useCommandHandler(
+    'query.executeCurrent',
+    handleExecuteCurrent,
+    isActive && !loading,
+    10
+  );
+  useCommandHandler('query.openFile', handleOpenFile, isActive, 10);
+  useCommandHandler('query.saveFile', handleSaveFile, isActive, 10);
+  useCommandHandler(
+    'view.refresh',
+    () => {
+      if (!loading) handleExecute();
+    },
+    isActive,
+    10
+  );
+
   const showExplain = dbType ? EXPLAINABLE_DIALECTS.includes(dbType) : false;
   const multipleResults = results.length > 1;
   const hasTransaction = useMemo(
@@ -321,7 +370,12 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
     <div className="flex h-full flex-col">
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b bg-muted/30 px-4 py-2">
-        <Button size="sm" onClick={handleExecute} disabled={loading}>
+        <Button
+          size="sm"
+          onClick={handleExecute}
+          disabled={loading}
+          title={`${t('query.execute')} (${getPrimaryShortcut('query.execute')})`}
+        >
           {loading
             ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             : <Play className="mr-1.5 h-3.5 w-3.5" />
@@ -342,11 +396,21 @@ export default function QueryEditor({ connectionId, database, tabKey, dbType, in
           <Download className="mr-1.5 h-3.5 w-3.5" />
           {t('query.export')}
         </Button>
-        <Button variant="ghost" size="sm" onClick={handleOpenFile}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleOpenFile}
+          title={`${t('query.open')} (${getPrimaryShortcut('query.openFile')})`}
+        >
           <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
           {t('query.open')}
         </Button>
-        <Button variant="ghost" size="sm" onClick={handleSaveFile}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleSaveFile}
+          title={`${t('query.save')} (${getPrimaryShortcut('query.saveFile')})`}
+        >
           <Save className="mr-1.5 h-3.5 w-3.5" />
           {t('query.save')}
         </Button>

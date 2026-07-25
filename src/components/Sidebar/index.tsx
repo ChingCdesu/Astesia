@@ -63,7 +63,7 @@ export default function Sidebar() {
     connections, treeData, connectDatabase, disconnectDatabase,
     removeConnection, loadTables, loadDatabases, loadSchemas,
     loadViews, loadFunctions, loadProcedures, loadTriggers, loadUsers,
-    connectingIds, loadingKeys,
+    connectingIds, loadingKeys, setActiveConnection, setActiveDatabase,
   } = useConnectionStore();
   const { addTab } = useTabStore();
 
@@ -84,6 +84,8 @@ export default function Sidebar() {
   };
 
   const handleOpenQuery = (connectionId: string, database: string) => {
+    setActiveConnection(connectionId);
+    setActiveDatabase(database);
     addTab({
       key: `query-${connectionId}-${database}-${Date.now()}`,
       label: `查询 [${database}]`,
@@ -330,6 +332,8 @@ export default function Sidebar() {
                                     dragOverDbKey === dbKey && "ring-2 ring-primary bg-sidebar-accent"
                                   )}
                                   onClick={async () => {
+                                    setActiveConnection(conn.id);
+                                    setActiveDatabase(db);
                                     toggleExpand(dbKey);
                                     if (!dbExpanded) {
                                       if (isPG) {

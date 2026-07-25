@@ -14,6 +14,7 @@ import { useTabStore } from '@/stores/tabStore';
 import ValueViewer from '@/components/DataViewers/DataGrid/ValueViewer';
 import ExportDialog from '@/components/ExportDialog';
 import { notify } from '@/stores/notificationStore';
+import { getPrimaryShortcut, useCommandHandler } from '@/lib/commands';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
@@ -63,6 +64,7 @@ interface Props {
   database: string;
   table: string;
   dbType?: string;
+  isActive: boolean;
 }
 
 /** Quote a SQL identifier based on database type */
@@ -158,7 +160,13 @@ interface HistoryEntry {
   newRowIndex?: number;
 }
 
-export default function DataGrid({ connectionId, database, table, dbType }: Props) {
+export default function DataGrid({
+  connectionId,
+  database,
+  table,
+  dbType,
+  isActive,
+}: Props) {
   const { t } = useTranslation();
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1004,11 +1012,27 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
     });
   };
 
+  useCommandHandler(
+    'view.refresh',
+    () => {
+      if (!loading && !saving) void loadData();
+    },
+    isActive,
+    10
+  );
+  useCommandHandler('view.save', handleSave, isActive && hasChanges && !saving, 10);
+
   return (
     <div ref={containerRef} className="flex h-full flex-col" tabIndex={-1} onContextMenu={(e) => e.preventDefault()}>
       {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 border-b bg-muted/30 px-4 py-2">
-        <Button variant="ghost" size="sm" onClick={loadData} disabled={loading || saving}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={loadData}
+          disabled={loading || saving}
+          title={`${t('table.refresh')} (${getPrimaryShortcut('view.refresh')})`}
+        >
           <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", loading && "animate-spin")} />
           {t('table.refresh')}
         </Button>
@@ -1045,6 +1069,7 @@ export default function DataGrid({ connectionId, database, table, dbType }: Prop
           size="sm"
           onClick={handleSave}
           disabled={!hasChanges || saving}
+          title={`${t('table.saveChanges')} (${getPrimaryShortcut('view.save')})`}
         >
           <Save className={cn("mr-1.5 h-3.5 w-3.5", saving && "animate-spin")} />
           保存更改

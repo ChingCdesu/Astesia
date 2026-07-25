@@ -21,6 +21,7 @@ import UpdateDialog from './components/UpdateDialog';
 import ConnectionMigrationGate, {
   type MigrationFailure,
 } from './components/ConnectionMigrationGate';
+import CommandCenter from './components/CommandCenter';
 import { useUpdateStore } from './stores/updateStore';
 import i18n from './i18n';
 import '@/lib/plugins'; // Initialize plugin registry
@@ -292,30 +293,6 @@ function App() {
     return () => document.removeEventListener('contextmenu', handleContextMenu);
   }, []);
 
-  // Global keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+/- zoom
-      if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
-        e.preventDefault();
-        document.documentElement.style.fontSize =
-          Math.min(24, parseFloat(getComputedStyle(document.documentElement).fontSize) + 1) + 'px';
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === '-') {
-        e.preventDefault();
-        document.documentElement.style.fontSize =
-          Math.max(10, parseFloat(getComputedStyle(document.documentElement).fontSize) - 1) + 'px';
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === '0') {
-        e.preventDefault();
-        document.documentElement.style.fontSize = '';
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
   if (migrationPhase !== 'ready') {
     return (
       <>
@@ -337,6 +314,7 @@ function App() {
 
   return (
     <>
+      <CommandCenter />
       <AppLayout />
       <ToastContainer />
       <CreateResourceDialog />

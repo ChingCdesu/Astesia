@@ -20,6 +20,8 @@ import Sidebar from '../Sidebar';
 import StatusBar from '../StatusBar';
 import { Database, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { notify } from '@/stores/notificationStore';
+import { getPrimaryShortcut, useCommandHandler } from '@/lib/commands';
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -36,6 +38,9 @@ export default function AppLayout() {
   const { t } = useTranslation();
   const { tabs, activeTabKey, setActiveTab, removeTab, removeAllTabs, removeOtherTabs, removeLeftTabs, removeRightTabs } = useTabStore();
   const connections = useConnectionStore((s) => s.connections);
+  const [sidebarVisible, setSidebarVisible] = useState(
+    () => localStorage.getItem('astesia_sidebar_visible') !== 'false'
+  );
 
   // Sidebar resize state
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -138,7 +143,82 @@ export default function AppLayout() {
     removeRightTabs(key);
   }, [hasUnsavedContent, removeRightTabs]);
 
-  const renderTabContent = (tab: (typeof tabs)[0]) => {
+  const activateTab = useCallback((key: string) => {
+    const tab = useTabStore.getState().tabs.find((candidate) => candidate.key === key);
+    if (!tab) return;
+    setActiveTab(key);
+    const connectionState = useConnectionStore.getState();
+    connectionState.setActiveConnection(tab.connectionId);
+    connectionState.setActiveDatabase(tab.database);
+  }, [setActiveTab]);
+
+  const handleNewQuery = useCallback(() => {
+    const tabState = useTabStore.getState();
+    const connectionState = useConnectionStore.getState();
+    const activeTab = tabState.tabs.find((tab) => tab.key === tabState.activeTabKey);
+    const activeTabConnection = activeTab
+      ? connectionState.connections.find((connection) => connection.id === activeTab.connectionId)
+      : undefined;
+    const activeConnection = connectionState.connections.find(
+      (connection) => connection.id === connectionState.activeConnectionId
+    );
+    const selectedDatabase = activeConnection
+      && connectionState.activeDatabase
+      && connectionState.treeData[activeConnection.id]?.databases.includes(
+        connectionState.activeDatabase
+      )
+      ? connectionState.activeDatabase
+      : undefined;
+    const connectionId = activeTabConnection?.id ?? activeConnection?.id;
+    const database = (activeTabConnection ? activeTab?.database : undefined)
+      ?? selectedDatabase
+      ?? activeConnection?.database;
+
+    if (!connectionId || !database) {
+      notify.info(t('commands.noQueryContextTitle'), t('commands.noQueryContextDescription'));
+      return;
+    }
+
+    const key = `query-${connectionId}-${database}-${crypto.randomUUID()}`;
+    tabState.addTab({
+      key,
+      label: `${t('commands.queryLabel')} [${database}]`,
+      type: 'query',
+      connectionId,
+      database,
+    });
+    connectionState.setActiveConnection(connectionId);
+    connectionState.setActiveDatabase(database);
+  }, [t]);
+
+  const moveActiveTab = useCallback((delta: number) => {
+    const state = useTabStore.getState();
+    if (state.tabs.length < 2) return;
+    const currentIndex = state.tabs.findIndex((tab) => tab.key === state.activeTabKey);
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = (baseIndex + delta + state.tabs.length) % state.tabs.length;
+    activateTab(state.tabs[nextIndex].key);
+  }, [activateTab]);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarVisible((visible) => {
+      const next = !visible;
+      localStorage.setItem('astesia_sidebar_visible', String(next));
+      return next;
+    });
+  }, []);
+
+  useCommandHandler('workspace.newQuery', handleNewQuery);
+  useCommandHandler('workspace.toggleSidebar', toggleSidebar);
+  useCommandHandler(
+    'tabs.closeActive',
+    () => activeTabKey ? handleCloseTab(activeTabKey) : undefined,
+    activeTabKey !== null
+  );
+  useCommandHandler('tabs.next', () => moveActiveTab(1), tabs.length > 1);
+  useCommandHandler('tabs.previous', () => moveActiveTab(-1), tabs.length > 1);
+
+  const renderTabContent = (tab: (typeof tabs)[0], isActive: boolean) => {
     const connection = connections.find((c) => c.id === tab.connectionId);
     if (!connection) {
       return (
@@ -168,10 +248,19 @@ export default function AppLayout() {
             tabKey={tab.key}
             initialContent={tab.sqlContent}
             dbType={connDbType}
+            isActive={isActive}
           />
         );
       case 'table-data':
-        return <DataGrid connectionId={tab.connectionId} database={tab.database} table={tab.table!} dbType={connDbType} />;
+        return (
+          <DataGrid
+            connectionId={tab.connectionId}
+            database={tab.database}
+            table={tab.table!}
+            dbType={connDbType}
+            isActive={isActive}
+          />
+        );
       case 'table-structure':
         return <TableStructure connectionId={tab.connectionId} database={tab.database} table={tab.table!} />;
       case 'view-definition':
@@ -204,18 +293,22 @@ export default function AppLayout() {
     <div className="flex h-screen flex-col bg-background text-foreground">
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar with fixed width */}
-        <div className="shrink-0 border-r" style={{ width: sidebarWidth }}>
-          <Sidebar />
-        </div>
+        {sidebarVisible && (
+          <>
+            <div className="shrink-0 border-r" style={{ width: sidebarWidth }}>
+              <Sidebar />
+            </div>
 
-        {/* Resize handle */}
-        <div
-          className={cn(
-            "w-1 shrink-0 cursor-col-resize transition-colors hover:bg-primary/20",
-            isResizing && "bg-primary/30"
-          )}
-          onMouseDown={handleResizeStart}
-        />
+            {/* Resize handle */}
+            <div
+              className={cn(
+                "w-1 shrink-0 cursor-col-resize transition-colors hover:bg-primary/20",
+                isResizing && "bg-primary/30"
+              )}
+              onMouseDown={handleResizeStart}
+            />
+          </>
+        )}
 
         {/* Main content */}
         <div className="flex flex-1 flex-col overflow-hidden">
@@ -233,7 +326,7 @@ export default function AppLayout() {
                             ? "border-border bg-background text-foreground"
                             : "border-transparent bg-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                         )}
-                        onClick={() => setActiveTab(tab.key)}
+                        onClick={() => activateTab(tab.key)}
                       >
                         <span className="max-w-[150px] truncate">{tab.label}</span>
                         <button
@@ -245,7 +338,12 @@ export default function AppLayout() {
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent>
-                      <ContextMenuItem onClick={() => handleCloseTab(tab.key)}>关闭当前标签页</ContextMenuItem>
+                      <ContextMenuItem onClick={() => handleCloseTab(tab.key)}>
+                        <span>关闭当前标签页</span>
+                        <span className="ml-auto pl-6 text-xs text-muted-foreground">
+                          {getPrimaryShortcut('tabs.closeActive')}
+                        </span>
+                      </ContextMenuItem>
                       <ContextMenuItem onClick={() => handleCloseAllTabs()}>关闭所有标签页</ContextMenuItem>
                       <ContextMenuItem onClick={() => handleCloseOtherTabs(tab.key)}>关闭其他标签页</ContextMenuItem>
                       <ContextMenuSeparator />
@@ -263,7 +361,7 @@ export default function AppLayout() {
                     key={tab.key}
                     className={cn("h-full", tab.key === activeTabKey ? "block" : "hidden")}
                   >
-                    {renderTabContent(tab)}
+                    {renderTabContent(tab, tab.key === activeTabKey)}
                   </div>
                 ))}
               </div>
