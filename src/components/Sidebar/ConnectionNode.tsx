@@ -59,7 +59,11 @@ export default function ConnectionNode({
             isConnecting && "cursor-wait opacity-70"
           )}
           disabled={isConnecting}
-          title={conn.last_error || mcpStatusTitle}
+          title={[
+            conn.last_error || mcpStatusTitle,
+            conn.group_name,
+            conn.tags?.join(', '),
+          ].filter(Boolean).join(' · ') || undefined}
           onClick={async () => {
             if (isConnecting) return;
             if (!isConnected) {
@@ -83,7 +87,27 @@ export default function ConnectionNode({
             style={{ background: isConnected ? '#22c55e' : color }}
           />
           <DbIcon dbType={conn.db_type} size={24} />
-          <span className="truncate">{conn.name}</span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate">{conn.name}</div>
+            {Boolean(conn.tags?.length) && (
+              <div className="mt-0.5 flex min-w-0 gap-1 overflow-hidden">
+                {conn.tags?.slice(0, 2).map((tag) => (
+                  <Badge
+                    key={tag}
+                    variant="outline"
+                    className="max-w-20 truncate px-1 py-0 text-[9px] font-normal"
+                  >
+                    {tag}
+                  </Badge>
+                ))}
+                {(conn.tags?.length ?? 0) > 2 && (
+                  <span className="shrink-0 text-[9px] text-muted-foreground">
+                    +{(conn.tags?.length ?? 0) - 2}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
           {isMcpLocked && (
             <Badge
               variant={
@@ -93,14 +117,14 @@ export default function ConnectionNode({
                     ? 'info'
                     : 'secondary'
               }
-              className="ml-auto gap-1 px-1.5 py-0 text-[9px]"
+              className="shrink-0 gap-1 px-1.5 py-0 text-[9px]"
               title={conn.last_error || mcpStatusTitle}
             >
               {isMcpDisconnecting && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
               MCP{mcpSessionCount > 1 ? ` ${mcpSessionCount}` : ''}
             </Badge>
           )}
-          <span className={cn("pl-2 text-[10px] text-muted-foreground", !isMcpLocked && "ml-auto")}>
+          <span className="shrink-0 pl-1 text-[10px] text-muted-foreground">
             {DB_TYPE_LABELS[conn.db_type]}
           </span>
         </button>

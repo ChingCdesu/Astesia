@@ -5,6 +5,9 @@ export default {
   sidebar: {
     connections: '连接',
     newConnection: '新建连接',
+    filterConnections: '按名称、分组或标签筛选',
+    noMatchingConnections: '没有匹配的连接',
+    ungrouped: '未分组',
     refresh: '刷新',
     disconnect: '断开连接',
     deleteConnection: '删除连接',
@@ -47,6 +50,13 @@ export default {
   connection: {
     title: '连接配置',
     name: '连接名称',
+    group: '分组',
+    groupPlaceholder: '选择或输入分组名称（可选）',
+    tags: '标签',
+    tagsPlaceholder: '输入标签，按回车或逗号添加',
+    tagsHint: '已添加 {{count}}/20 个标签',
+    noTags: '暂无标签',
+    removeTag: '移除标签 {{tag}}',
     type: '数据库类型',
     host: '主机',
     port: '端口',

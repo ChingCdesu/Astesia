@@ -745,6 +745,8 @@ mod tests {
                 config: updated,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect("mutate before test lease");
@@ -801,6 +803,8 @@ mod tests {
                 config: updated.clone(),
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect_err("prepared test must block profile mutation");
@@ -812,6 +816,8 @@ mod tests {
                 config: updated,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect("mutation after prepared test drops");
@@ -888,6 +894,8 @@ mod tests {
                 config: updated.clone(),
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect_err("connected MCP profile must be immutable");

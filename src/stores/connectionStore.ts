@@ -338,6 +338,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
         config: backendConnectionConfig(config),
         expected_revision: null,
         mcp_enabled: true,
+        group_name: config.group_name,
+        tags: config.tags ?? [],
       },
     });
     set((state) => ({
@@ -417,6 +419,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
         config: backendConnectionConfig(config),
         expected_revision: config.revision,
         mcp_enabled: config.mcp_enabled ?? true,
+        group_name: config.group_name,
+        tags: config.tags ?? [],
       },
     });
     set((state) => {
@@ -581,7 +585,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => {
   },
 
   testConnection: async (config) => {
-    return await invoke<ConnectionResult>('test_connection', { config });
+    return await invoke<ConnectionResult>('test_connection', {
+      config: backendConnectionConfig(config),
+    });
   },
 
   loadDatabases: async (connectionId) => {

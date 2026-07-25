@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,7 @@ import {
   Code, Eye, Users, Download, Upload,
   ClipboardPaste, RefreshCw, Zap, Trash2,
   Table2, FunctionSquare, Workflow, Layers, Loader2,
+  Folder, Search,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -45,6 +46,8 @@ export default function Sidebar() {
   const [editConfig, setEditConfig] = useState<ConnectionConfig | null>(null);
   const [dialogReadOnly, setDialogReadOnly] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [connectionFilter, setConnectionFilter] = useState('');
   const [backupTarget, setBackupTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<{ connectionId: string; database: string } | null>(null);
   const [copyDialogOpen, setCopyDialogOpen] = useState(false);
@@ -66,6 +69,29 @@ export default function Sidebar() {
     connectingIds, loadingKeys, setActiveConnection, setActiveDatabase,
   } = useConnectionStore();
   const { addTab } = useTabStore();
+  const groupedConnections = useMemo(() => {
+    const filter = connectionFilter.trim().toLocaleLowerCase();
+    const visibleConnections = filter
+      ? connections.filter((connection) => (
+        connection.name.toLocaleLowerCase().includes(filter)
+        || connection.db_type.toLocaleLowerCase().includes(filter)
+        || connection.group_name?.toLocaleLowerCase().includes(filter)
+        || connection.tags?.some((tag) => tag.toLocaleLowerCase().includes(filter))
+      ))
+      : connections;
+    const groups = new Map<string, ConnectionConfig[]>();
+    for (const connection of visibleConnections) {
+      const group = connection.group_name?.trim() || '';
+      groups.set(group, [...(groups.get(group) || []), connection]);
+    }
+    return [...groups.entries()]
+      .sort(([left], [right]) => {
+        if (!left) return 1;
+        if (!right) return -1;
+        return left.localeCompare(right);
+      })
+      .map(([name, items]) => ({ name, items }));
+  }, [connectionFilter, connections]);
 
   const toggleExpand = useCallback((key: string) => {
     setExpandedKeys((prev) => {
@@ -237,6 +263,19 @@ export default function Sidebar() {
           </Tooltip>
         </div>
 
+        {connections.length > 0 && (
+          <div className="relative border-b p-2">
+            <Search className="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="h-8 pl-8 text-xs"
+              value={connectionFilter}
+              onChange={(event) => setConnectionFilter(event.target.value)}
+              placeholder={t('sidebar.filterConnections')}
+              aria-label={t('sidebar.filterConnections')}
+            />
+          </div>
+        )}
+
         {/* Tree */}
         <ScrollArea className="flex-1">
           <div className="p-2">
@@ -253,9 +292,47 @@ export default function Sidebar() {
                   {t('sidebar.newConnection')}
                 </Button>
               </div>
+            ) : groupedConnections.length === 0 ? (
+              <div className="flex flex-col items-center gap-2 pt-16 text-muted-foreground">
+                <Search className="h-9 w-9 opacity-25" />
+                <p className="text-xs">{t('sidebar.noMatchingConnections')}</p>
+              </div>
             ) : (
               <div className="flex flex-col gap-0.5">
-                {connections.map((conn) => {
+                {groupedConnections.map((group) => {
+                  const groupKey = group.name ? `group:${group.name}` : 'group:';
+                  const isGroupCollapsed = !connectionFilter.trim()
+                    && collapsedGroups.has(groupKey);
+                  return (
+                    <div key={groupKey} className="mb-1">
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                        onClick={() => {
+                          setCollapsedGroups((previous) => {
+                            const next = new Set(previous);
+                            if (next.has(groupKey)) next.delete(groupKey);
+                            else next.add(groupKey);
+                            return next;
+                          });
+                        }}
+                      >
+                        {isGroupCollapsed ? (
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        )}
+                        <Folder className="h-3.5 w-3.5" />
+                        <span className="truncate">
+                          {group.name || t('sidebar.ungrouped')}
+                        </span>
+                        <span className="ml-auto text-[10px] font-normal">
+                          {group.items.length}
+                        </span>
+                      </button>
+                      {!isGroupCollapsed && (
+                        <div className="ml-2 border-l pl-1">
+                          {group.items.map((conn) => {
                   const node = treeData[conn.id];
                   const isConnected = node?.connected;
                   const isExpanded = expandedKeys.has(conn.id);
@@ -626,6 +703,11 @@ export default function Sidebar() {
                           </div>
                         );
                       })()}
+                            </div>
+                          );
+                        })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

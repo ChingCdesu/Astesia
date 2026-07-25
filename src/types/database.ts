@@ -10,6 +10,8 @@ export interface ConnectionConfig {
   password: string;
   database?: string;
   color?: string;
+  group_name?: string;
+  tags?: string[];
   source?: 'shared';
   has_credential?: boolean;
   revision?: number;
@@ -30,6 +32,8 @@ export interface SharedConnectionProfile {
   username: string;
   database?: string;
   color?: string;
+  group_name?: string;
+  tags: string[];
   has_credential: boolean;
   revision: number;
   mcp_enabled: boolean;

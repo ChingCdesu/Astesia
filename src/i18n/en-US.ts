@@ -5,6 +5,9 @@ export default {
   sidebar: {
     connections: 'Connections',
     newConnection: 'New Connection',
+    filterConnections: 'Filter by name, group, or tag',
+    noMatchingConnections: 'No matching connections',
+    ungrouped: 'Ungrouped',
     refresh: 'Refresh',
     disconnect: 'Disconnect',
     deleteConnection: 'Delete Connection',
@@ -47,6 +50,13 @@ export default {
   connection: {
     title: 'Connection Settings',
     name: 'Connection Name',
+    group: 'Group',
+    groupPlaceholder: 'Choose or enter a group (optional)',
+    tags: 'Tags',
+    tagsPlaceholder: 'Type a tag, then press Enter or comma',
+    tagsHint: '{{count}}/20 tags added',
+    noTags: 'No tags',
+    removeTag: 'Remove tag {{tag}}',
     type: 'Database Type',
     host: 'Host',
     port: 'Port',

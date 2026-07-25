@@ -24,7 +24,7 @@ use crate::{
 
 const APP_IDENTIFIER: &str = "com.astesia.app";
 const DATABASE_FILENAME: &str = "connections.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 // A staged credential may still be committed by another process after an
 // arbitrarily long OS prompt or suspension. Never expire it by wall-clock
 // time; only an explicit failed operation may mark it ready for cleanup.
@@ -34,6 +34,9 @@ const MAX_NAME_CHARS: usize = 512;
 const MAX_ENDPOINT_CHARS: usize = 4_096;
 const MAX_USERNAME_CHARS: usize = 1_024;
 const MAX_PASSWORD_BYTES: usize = 65_536;
+const MAX_GROUP_NAME_CHARS: usize = 128;
+const MAX_TAGS: usize = 20;
+const MAX_TAG_CHARS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SharedConnectionProfile {
@@ -45,6 +48,8 @@ pub struct SharedConnectionProfile {
     pub username: String,
     pub database: Option<String>,
     pub color: Option<String>,
+    pub group_name: Option<String>,
+    pub tags: Vec<String>,
     pub has_credential: bool,
     pub revision: i64,
     pub mcp_enabled: bool,
@@ -92,6 +97,10 @@ pub struct SaveConnectionRequest {
     pub expected_revision: Option<i64>,
     #[serde(default = "default_mcp_enabled")]
     pub mcp_enabled: bool,
+    #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 const fn default_mcp_enabled() -> bool {
@@ -612,9 +621,9 @@ impl SharedConnectionRepository {
     pub async fn list(&self) -> Result<Vec<SharedConnectionProfile>, ConnectionRepositoryError> {
         let rows = sqlx::query(
             "SELECT id, name, db_type, host, port, username, database_name, color, \
-                    credential_ref, revision, mcp_enabled \
+                    credential_ref, revision, mcp_enabled, group_name, tags_json \
              FROM shared_connections \
-             ORDER BY name COLLATE NOCASE, id",
+             ORDER BY group_name COLLATE NOCASE, name COLLATE NOCASE, id",
         )
         .fetch_all(self.pool().await?)
         .await
@@ -638,9 +647,9 @@ impl SharedConnectionRepository {
         .map_err(|error| ConnectionRepositoryError::from_sqlx(error, "读取连接快照版本"))?;
         let rows = sqlx::query(
             "SELECT id, name, db_type, host, port, username, database_name, color, \
-                    credential_ref, revision, mcp_enabled \
+                    credential_ref, revision, mcp_enabled, group_name, tags_json \
              FROM shared_connections \
-             ORDER BY name COLLATE NOCASE, id",
+             ORDER BY group_name COLLATE NOCASE, name COLLATE NOCASE, id",
         )
         .fetch_all(&mut *transaction)
         .await
@@ -669,7 +678,7 @@ impl SharedConnectionRepository {
     ) -> Result<SharedConnectionRecord, ConnectionRepositoryError> {
         let row = sqlx::query(
             "SELECT id, name, db_type, host, port, username, database_name, color, \
-                    credential_ref, revision, mcp_enabled \
+                    credential_ref, revision, mcp_enabled, group_name, tags_json \
              FROM shared_connections WHERE id = ?",
         )
         .bind(connection_id)
@@ -809,21 +818,46 @@ impl SharedConnectionRepository {
         request: SaveConnectionRequest,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         validate_config(&request.config)?;
+        let group_name = normalize_group_name(request.group_name)?;
+        let tags = normalize_tags(request.tags)?;
         let connection_id = request.config.id.clone();
         let _mutation_guard = self.acquire_mutation_guard(&connection_id)?;
         match request.expected_revision {
             Some(expected_revision) => {
-                self.update(request.config, expected_revision, request.mcp_enabled)
+                self.update(
+                    request.config,
+                    expected_revision,
+                    request.mcp_enabled,
+                    group_name,
+                    tags,
+                )
+                .await
+            }
+            None if group_name.is_none() && tags.is_empty() => {
+                self.create(request.config, request.mcp_enabled).await
+            }
+            None => {
+                self.create_with_metadata(request.config, request.mcp_enabled, group_name, tags)
                     .await
             }
-            None => self.create(request.config, request.mcp_enabled).await,
         }
     }
 
     pub async fn create(
         &self,
+        config: ConnectionConfig,
+        mcp_enabled: bool,
+    ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
+        self.create_with_metadata(config, mcp_enabled, None, Vec::new())
+            .await
+    }
+
+    async fn create_with_metadata(
+        &self,
         mut config: ConnectionConfig,
         mcp_enabled: bool,
+        group_name: Option<String>,
+        tags: Vec<String>,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         validate_config(&config)?;
         self.retry_pending_credential_cleanup_on_demand().await?;
@@ -842,7 +876,13 @@ impl SharedConnectionRepository {
         };
 
         let result = self
-            .create_with_reference(&config, credential_ref.as_deref(), mcp_enabled)
+            .create_with_reference(
+                &config,
+                credential_ref.as_deref(),
+                mcp_enabled,
+                group_name.as_deref(),
+                &tags,
+            )
             .await;
         if result.is_err() {
             if let Some(reference) = credential_ref.as_deref() {
@@ -857,6 +897,8 @@ impl SharedConnectionRepository {
         config: &ConnectionConfig,
         credential_ref: Option<&str>,
         mcp_enabled: bool,
+        group_name: Option<&str>,
+        tags: &[String],
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         let mut transaction = self
             .initialized_pool()
@@ -868,8 +910,8 @@ impl SharedConnectionRepository {
         let result = sqlx::query(
             "INSERT INTO shared_connections \
              (id, name, db_type, host, port, username, database_name, color, \
-              credential_ref, revision, mcp_enabled) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              credential_ref, revision, mcp_enabled, group_name, tags_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&config.id)
         .bind(&config.name)
@@ -882,6 +924,8 @@ impl SharedConnectionRepository {
         .bind(credential_ref)
         .bind(revision)
         .bind(mcp_enabled)
+        .bind(group_name)
+        .bind(serialize_tags(tags)?)
         .execute(&mut *transaction)
         .await;
         if let Err(error) = result {
@@ -908,6 +952,8 @@ impl SharedConnectionRepository {
             credential_ref.is_some(),
             revision,
             mcp_enabled,
+            group_name.map(str::to_string),
+            tags.to_vec(),
         ))
     }
 
@@ -916,6 +962,8 @@ impl SharedConnectionRepository {
         mut config: ConnectionConfig,
         expected_revision: i64,
         mcp_enabled: bool,
+        group_name: Option<String>,
+        tags: Vec<String>,
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         self.retry_pending_credential_cleanup_on_demand().await?;
         let current = self.get_record(&config.id).await?;
@@ -961,6 +1009,8 @@ impl SharedConnectionRepository {
                 new_credential_ref.as_deref(),
                 mcp_enabled,
                 current.credential_ref.as_deref(),
+                group_name.as_deref(),
+                &tags,
             )
             .await;
         if result.is_err() && wrote_new_credential {
@@ -983,6 +1033,8 @@ impl SharedConnectionRepository {
         credential_ref: Option<&str>,
         mcp_enabled: bool,
         old_credential_ref: Option<&str>,
+        group_name: Option<&str>,
+        tags: &[String],
     ) -> Result<SharedConnectionProfile, ConnectionRepositoryError> {
         let mut transaction = self
             .initialized_pool()
@@ -994,7 +1046,8 @@ impl SharedConnectionRepository {
         let changed = sqlx::query(
             "UPDATE shared_connections SET \
                 name = ?, db_type = ?, host = ?, port = ?, username = ?, \
-                database_name = ?, color = ?, credential_ref = ?, revision = ?, mcp_enabled = ? \
+                database_name = ?, color = ?, credential_ref = ?, revision = ?, mcp_enabled = ?, \
+                group_name = ?, tags_json = ? \
              WHERE id = ? AND revision = ?",
         )
         .bind(&config.name)
@@ -1007,6 +1060,8 @@ impl SharedConnectionRepository {
         .bind(credential_ref)
         .bind(revision)
         .bind(mcp_enabled)
+        .bind(group_name)
+        .bind(serialize_tags(tags)?)
         .bind(&config.id)
         .bind(expected_revision)
         .execute(&mut *transaction)
@@ -1046,6 +1101,8 @@ impl SharedConnectionRepository {
             credential_ref.is_some(),
             revision,
             mcp_enabled,
+            group_name.map(str::to_string),
+            tags.to_vec(),
         ))
     }
 
@@ -1623,12 +1680,16 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), ConnectionRepository
             color TEXT,
             credential_ref TEXT UNIQUE,
             revision INTEGER NOT NULL CHECK (revision >= 0),
-            mcp_enabled INTEGER NOT NULL DEFAULT 1 CHECK (mcp_enabled IN (0, 1))
+            mcp_enabled INTEGER NOT NULL DEFAULT 1 CHECK (mcp_enabled IN (0, 1)),
+            group_name TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]'
         )",
     )
     .execute(pool)
     .await
     .map_err(|error| ConnectionRepositoryError::from_sqlx(error, "初始化连接表"))?;
+    ensure_shared_connections_column(pool, "group_name", "TEXT").await?;
+    ensure_shared_connections_column(pool, "tags_json", "TEXT NOT NULL DEFAULT '[]'").await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS shared_connection_meta (
             key TEXT PRIMARY KEY NOT NULL,
@@ -1709,6 +1770,45 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<(), ConnectionRepository
     Ok(())
 }
 
+async fn ensure_shared_connections_column(
+    pool: &SqlitePool,
+    column_name: &str,
+    definition: &str,
+) -> Result<(), ConnectionRepositoryError> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('shared_connections') WHERE name = ?",
+    )
+    .bind(column_name)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| ConnectionRepositoryError::from_sqlx(error, "检查连接表版本"))?
+        > 0;
+    if exists {
+        return Ok(());
+    }
+
+    let alter_result = sqlx::query(&format!(
+        "ALTER TABLE shared_connections ADD COLUMN {column_name} {definition}"
+    ))
+    .execute(pool)
+    .await;
+    if let Err(error) = alter_result {
+        let upgraded_by_peer = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('shared_connections') WHERE name = ?",
+        )
+        .bind(column_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|check_error| {
+            ConnectionRepositoryError::from_sqlx(check_error, "确认连接表升级结果")
+        })? > 0;
+        if !upgraded_by_peer {
+            return Err(ConnectionRepositoryError::from_sqlx(error, "升级连接表"));
+        }
+    }
+    Ok(())
+}
+
 async fn next_revision(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<i64, ConnectionRepositoryError> {
@@ -1751,6 +1851,8 @@ fn profile_from_config(
     has_credential: bool,
     revision: i64,
     mcp_enabled: bool,
+    group_name: Option<String>,
+    tags: Vec<String>,
 ) -> SharedConnectionProfile {
     SharedConnectionProfile {
         id: config.id.clone(),
@@ -1761,6 +1863,8 @@ fn profile_from_config(
         username: config.username.clone(),
         database: config.database.clone(),
         color: config.color.clone(),
+        group_name,
+        tags,
         has_credential,
         revision,
         mcp_enabled,
@@ -1778,6 +1882,14 @@ fn row_to_record(row: &SqliteRow) -> Result<SharedConnectionRecord, ConnectionRe
         )
     })?;
     let credential_ref = row.try_get::<Option<String>, _>("credential_ref")?;
+    let tags_json = row.try_get::<String, _>("tags_json")?;
+    let tags = serde_json::from_str::<Vec<String>>(&tags_json).map_err(|_| {
+        ConnectionRepositoryError::new(
+            ConnectionRepositoryErrorCode::StorageCorrupt,
+            "共享连接仓库包含无效标签数据",
+            "请从备份恢复仓库，或重新保存受影响的连接。",
+        )
+    })?;
     Ok(SharedConnectionRecord {
         profile: SharedConnectionProfile {
             id: row.try_get("id")?,
@@ -1788,6 +1900,8 @@ fn row_to_record(row: &SqliteRow) -> Result<SharedConnectionRecord, ConnectionRe
             username: row.try_get("username")?,
             database: row.try_get("database_name")?,
             color: row.try_get("color")?,
+            group_name: row.try_get("group_name")?,
+            tags,
             has_credential: credential_ref.is_some(),
             revision: row.try_get("revision")?,
             mcp_enabled: row.try_get("mcp_enabled")?,
@@ -1844,6 +1958,61 @@ fn validate_config(config: &ConnectionConfig) -> Result<(), ConnectionRepository
     Ok(())
 }
 
+fn normalize_group_name(
+    group_name: Option<String>,
+) -> Result<Option<String>, ConnectionRepositoryError> {
+    let Some(group_name) = group_name else {
+        return Ok(None);
+    };
+    let group_name = group_name.trim();
+    if group_name.is_empty() {
+        return Ok(None);
+    }
+    if group_name.chars().count() > MAX_GROUP_NAME_CHARS || group_name.chars().any(char::is_control)
+    {
+        return Err(ConnectionRepositoryError::invalid(format!(
+            "分组名称不能超过 {MAX_GROUP_NAME_CHARS} 个字符，且不能包含控制字符"
+        )));
+    }
+    Ok(Some(group_name.to_string()))
+}
+
+fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, ConnectionRepositoryError> {
+    let mut normalized = Vec::with_capacity(tags.len());
+    let mut seen = HashSet::with_capacity(tags.len());
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > MAX_TAG_CHARS || tag.chars().any(char::is_control) {
+            return Err(ConnectionRepositoryError::invalid(format!(
+                "标签不能超过 {MAX_TAG_CHARS} 个字符，且不能包含控制字符"
+            )));
+        }
+        let key = tag.to_lowercase();
+        if seen.insert(key) {
+            normalized.push(tag.to_string());
+            if normalized.len() > MAX_TAGS {
+                return Err(ConnectionRepositoryError::invalid(format!(
+                    "每个连接最多可设置 {MAX_TAGS} 个标签"
+                )));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn serialize_tags(tags: &[String]) -> Result<String, ConnectionRepositoryError> {
+    serde_json::to_string(tags).map_err(|_| {
+        ConnectionRepositoryError::new(
+            ConnectionRepositoryErrorCode::StorageUnavailable,
+            "无法序列化连接标签",
+            "请检查标签内容后重试。",
+        )
+    })
+}
+
 fn validate_unique_configs(configs: &[ConnectionConfig]) -> Result<(), ConnectionRepositoryError> {
     let mut ids = HashSet::new();
     for config in configs {
@@ -1890,7 +2059,7 @@ fn credential_scope(
     profiles: &[SharedConnectionProfile],
 ) -> CredentialVerificationScope {
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    digest.update(b"astesia.credential-verification-scope.v2");
+    digest.update(b"astesia.credential-verification-scope.v3");
     let mut sorted_profiles = profiles.iter().collect::<Vec<_>>();
     sorted_profiles.sort_by(|left, right| left.id.cmp(&right.id));
     for profile in &sorted_profiles {
@@ -1902,6 +2071,11 @@ fn credential_scope(
         update_digest_field(&mut digest, profile.username.as_bytes());
         update_digest_optional_field(&mut digest, profile.database.as_deref());
         update_digest_optional_field(&mut digest, profile.color.as_deref());
+        update_digest_optional_field(&mut digest, profile.group_name.as_deref());
+        update_digest_field(&mut digest, &(profile.tags.len() as u64).to_be_bytes());
+        for tag in &profile.tags {
+            update_digest_field(&mut digest, tag.as_bytes());
+        }
         update_digest_field(&mut digest, &[u8::from(profile.has_credential)]);
         update_digest_field(&mut digest, &profile.revision.to_be_bytes());
         update_digest_field(&mut digest, &[u8::from(profile.mcp_enabled)]);
@@ -2189,6 +2363,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn groups_and_tags_round_trip_without_replacing_the_credential() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let vault = MemoryCredentialVault::shared();
+        let repository = repository(&temp_dir, vault.clone());
+        let created = repository
+            .save(SaveConnectionRequest {
+                config: config("analytics", "super-secret"),
+                expected_revision: None,
+                mcp_enabled: true,
+                group_name: Some("  Production  ".to_string()),
+                tags: vec![
+                    "Critical".to_string(),
+                    " reporting ".to_string(),
+                    "critical".to_string(),
+                ],
+            })
+            .await
+            .expect("create grouped profile");
+        assert_eq!(created.group_name.as_deref(), Some("Production"));
+        assert_eq!(created.tags, vec!["Critical", "reporting"]);
+
+        let mut updated_config = config("analytics", "");
+        updated_config.name = "Renamed analytics".to_string();
+        let updated = repository
+            .save(SaveConnectionRequest {
+                config: updated_config,
+                expected_revision: Some(created.revision),
+                mcp_enabled: true,
+                group_name: Some("Archive".to_string()),
+                tags: vec!["read-only".to_string()],
+            })
+            .await
+            .expect("update grouped profile");
+        assert_eq!(updated.group_name.as_deref(), Some("Archive"));
+        assert_eq!(updated.tags, vec!["read-only"]);
+        assert!(vault.contains_secret("super-secret"));
+        assert_eq!(
+            repository
+                .resolve_config("analytics")
+                .await
+                .expect("resolve existing credential")
+                .0
+                .password,
+            "super-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_v3_is_upgraded_with_empty_group_and_tags() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let path = temp_dir.path().join("connections.sqlite3");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("create v3 database");
+        sqlx::query(
+            "CREATE TABLE shared_connections (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                db_type TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                database_name TEXT,
+                color TEXT,
+                credential_ref TEXT UNIQUE,
+                revision INTEGER NOT NULL,
+                mcp_enabled INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create v3 connections table");
+        sqlx::query(
+            "INSERT INTO shared_connections (
+                id, name, db_type, host, port, username, revision, mcp_enabled
+            ) VALUES ('legacy', 'Legacy', 'sqlite', ':memory:', 0, '', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert v3 profile");
+        sqlx::query("PRAGMA user_version = 3")
+            .execute(&pool)
+            .await
+            .expect("mark v3 schema");
+        pool.close().await;
+
+        let repository = SharedConnectionRepository::new(path, MemoryCredentialVault::shared());
+        let profiles = repository.list().await.expect("upgrade and list");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].group_name, None);
+        assert!(profiles[0].tags.is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+                .fetch_one(
+                    repository
+                        .initialized_pool()
+                        .await
+                        .expect("initialized pool"),
+                )
+                .await
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_usage_lease_blocks_profile_save_and_delete_across_repositories() {
         let temp_dir = TempDir::new().expect("temp dir");
         let vault = MemoryCredentialVault::shared();
@@ -2213,6 +2499,8 @@ mod tests {
                 config: changed,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect_err("save must be non-blockingly rejected");
@@ -2251,6 +2539,8 @@ mod tests {
                 config: changed,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect("save after release");
@@ -2417,6 +2707,8 @@ mod tests {
                 config: changed,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect_err("old credential must not cross endpoint boundary");
@@ -2465,6 +2757,8 @@ mod tests {
                 config: first_update,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect("first update");
@@ -2477,6 +2771,8 @@ mod tests {
                 config: stale_update,
                 expected_revision: Some(created.revision),
                 mcp_enabled: true,
+                group_name: None,
+                tags: Vec::new(),
             })
             .await
             .expect_err("stale update");

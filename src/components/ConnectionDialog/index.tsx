@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -6,10 +6,11 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ConnectionConfig, DbType, DB_TYPE_LABELS, DEFAULT_PORTS } from '@/types/database';
 import { useConnectionStore } from '@/stores/connectionStore';
-import { CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { CheckCircle, XCircle, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -28,6 +29,23 @@ const readableError = (error: unknown): string => {
     .join(' ');
 };
 
+const mergeTags = (currentTags: string[], value: string): string[] => {
+  const tags = [...currentTags];
+  const keys = new Set(tags.map((tag) => tag.toLocaleLowerCase()));
+  const candidates = value
+    .split(/[,，\n]/)
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+  for (const tag of candidates) {
+    const key = tag.toLocaleLowerCase();
+    if (!keys.has(key) && tags.length < 20) {
+      tags.push(tag);
+      keys.add(key);
+    }
+  }
+  return tags;
+};
+
 export default function ConnectionDialog({
   open,
   onClose,
@@ -35,7 +53,7 @@ export default function ConnectionDialog({
   readOnly = false,
 }: Props) {
   const { t } = useTranslation();
-  const { addConnection, updateConnection, testConnection } = useConnectionStore();
+  const { connections, addConnection, updateConnection, testConnection } = useConnectionStore();
 
   const [form, setForm] = useState({
     name: '',
@@ -46,7 +64,10 @@ export default function ConnectionDialog({
     password: '',
     database: '',
     color: '#00758F',
+    group_name: '',
+    tags: [] as string[],
   });
+  const [tagInput, setTagInput] = useState('');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -54,6 +75,7 @@ export default function ConnectionDialog({
   useEffect(() => {
     if (open) {
       setTestResult(null);
+      setTagInput('');
       if (editConfig) {
         setForm({
           name: editConfig.name,
@@ -64,6 +86,8 @@ export default function ConnectionDialog({
           password: '',
           database: editConfig.database || '',
           color: editConfig.color || '#00758F',
+          group_name: editConfig.group_name || '',
+          tags: editConfig.tags || [],
         });
       } else {
         setForm({
@@ -75,6 +99,8 @@ export default function ConnectionDialog({
           password: '',
           database: '',
           color: '#00758F',
+          group_name: '',
+          tags: [],
         });
       }
     }
@@ -94,6 +120,7 @@ export default function ConnectionDialog({
 
   const closeDialog = () => {
     setForm((previous) => ({ ...previous, password: '' }));
+    setTagInput('');
     setTestResult(null);
     onClose();
   };
@@ -108,6 +135,8 @@ export default function ConnectionDialog({
         ...form,
         database: form.database || undefined,
         color: form.color || undefined,
+        group_name: form.group_name.trim() || undefined,
+        tags: form.tags,
       };
       const result = await testConnection(config);
       setTestResult(result);
@@ -120,11 +149,14 @@ export default function ConnectionDialog({
 
   const handleSave = async () => {
     if (readOnly || !form.name) return;
+    const tags = mergeTags(form.tags, tagInput);
     const config: ConnectionConfig = {
       id: editConfig?.id || crypto.randomUUID(),
       ...form,
       database: form.database || undefined,
       color: form.color || undefined,
+      group_name: form.group_name.trim() || undefined,
+      tags,
     };
     setSaving(true);
     setTestResult(null);
@@ -149,10 +181,32 @@ export default function ConnectionDialog({
 
   const isSqlite = form.db_type === 'sqlite';
   const isRedis = form.db_type === 'redis';
+  const existingGroups = useMemo(
+    () => Array.from(new Set(
+      connections
+        .map((connection) => connection.group_name?.trim())
+        .filter((group): group is string => Boolean(group))
+    )).sort((left, right) => left.localeCompare(right)),
+    [connections]
+  );
+
+  const addTags = (value: string) => {
+    if (readOnly) return;
+    setForm((previous) => ({ ...previous, tags: mergeTags(previous.tags, value) }));
+    setTagInput('');
+  };
+
+  const removeTag = (tag: string) => {
+    if (readOnly) return;
+    setForm((previous) => ({
+      ...previous,
+      tags: previous.tags.filter((item) => item !== tag),
+    }));
+  };
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && closeDialog()}>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-[540px]">
         <DialogHeader>
           <DialogTitle>
             {readOnly
@@ -181,6 +235,75 @@ export default function ConnectionDialog({
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               readOnly={readOnly}
             />
+          </div>
+
+          {/* Group */}
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label className="text-right">{t('connection.group')}</Label>
+            <div className="col-span-3">
+              <Input
+                list="connection-group-options"
+                placeholder={t('connection.groupPlaceholder')}
+                value={form.group_name}
+                onChange={(event) => setForm({ ...form, group_name: event.target.value })}
+                readOnly={readOnly}
+                maxLength={128}
+              />
+              <datalist id="connection-group-options">
+                {existingGroups.map((group) => (
+                  <option key={group} value={group} />
+                ))}
+              </datalist>
+            </div>
+          </div>
+
+          {/* Tags */}
+          <div className="grid grid-cols-4 items-start gap-4">
+            <Label className="pt-2 text-right">{t('connection.tags')}</Label>
+            <div className="col-span-3 space-y-2">
+              {!readOnly && (
+                <Input
+                  placeholder={t('connection.tagsPlaceholder')}
+                  value={tagInput}
+                  onChange={(event) => setTagInput(event.target.value)}
+                  onBlur={() => addTags(tagInput)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ',' || event.key === '，') {
+                      event.preventDefault();
+                      addTags(tagInput);
+                    }
+                  }}
+                  disabled={form.tags.length >= 20}
+                  maxLength={64}
+                />
+              )}
+              <div className="flex min-h-6 flex-wrap gap-1.5">
+                {form.tags.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">
+                    {t('connection.noTags')}
+                  </span>
+                ) : form.tags.map((tag) => (
+                  <Badge key={tag} variant="secondary" className="gap-1 pr-1">
+                    {tag}
+                    {!readOnly && (
+                      <button
+                        type="button"
+                        className="rounded-sm p-0.5 hover:bg-foreground/10"
+                        aria-label={t('connection.removeTag', { tag })}
+                        onClick={() => removeTag(tag)}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </Badge>
+                ))}
+              </div>
+              {!readOnly && (
+                <p className="text-[11px] text-muted-foreground">
+                  {t('connection.tagsHint', { count: form.tags.length })}
+                </p>
+              )}
+            </div>
           </div>
 
           {/* DB Type */}

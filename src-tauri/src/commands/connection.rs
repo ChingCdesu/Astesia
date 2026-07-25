@@ -568,6 +568,8 @@ mod tests {
             username: String::new(),
             database: None,
             color: None,
+            group_name: None,
+            tags: Vec::new(),
             has_credential: false,
             revision,
             mcp_enabled: true,
