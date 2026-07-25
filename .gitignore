@@ -23,3 +23,5 @@ src-tauri/binaries/astesia-mcp-*
 *.njsproj
 *.sln
 *.sw?
+
+tauri-update.private.pem
