@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 import BackupDialog from '../BackupDialog';
 import RestoreDialog from '../RestoreDialog';
 
@@ -489,12 +490,16 @@ export default function Sidebar() {
                                         <ContextMenuItem className="gap-2 py-2" onClick={() => openDialog('function', conn.id, db, undefined, conn.db_type)}>
                                           <FunctionSquare className="h-4 w-4" /> {t('sidebar.newFunction')}
                                         </ContextMenuItem>
-                                        <ContextMenuItem className="gap-2 py-2" onClick={() => openDialog('procedure', conn.id, db, undefined, conn.db_type)}>
-                                          <Workflow className="h-4 w-4" /> {t('sidebar.newProcedure')}
-                                        </ContextMenuItem>
-                                        <ContextMenuItem className="gap-2 py-2" onClick={() => openDialog('trigger', conn.id, db, undefined, conn.db_type)}>
-                                          <Zap className="h-4 w-4" /> {t('sidebar.newTrigger')}
-                                        </ContextMenuItem>
+                                        {conn.db_type !== 'clickhouse' && (
+                                          <>
+                                            <ContextMenuItem className="gap-2 py-2" onClick={() => openDialog('procedure', conn.id, db, undefined, conn.db_type)}>
+                                              <Workflow className="h-4 w-4" /> {t('sidebar.newProcedure')}
+                                            </ContextMenuItem>
+                                            <ContextMenuItem className="gap-2 py-2" onClick={() => openDialog('trigger', conn.id, db, undefined, conn.db_type)}>
+                                              <Zap className="h-4 w-4" /> {t('sidebar.newTrigger')}
+                                            </ContextMenuItem>
+                                          </>
+                                        )}
                                         <ContextMenuSeparator />
                                       </>
                                     )}
@@ -559,6 +564,8 @@ export default function Sidebar() {
                                           } else {
                                             const sql = conn.db_type === 'mysql'
                                               ? `DROP DATABASE \`${db}\``
+                                              : conn.db_type === 'clickhouse'
+                                                ? `DROP DATABASE ${quoteClickHouseIdentifier(db)}`
                                               : conn.db_type === 'sqlserver'
                                                 ? `DROP DATABASE [${db}]`
                                                 : `DROP DATABASE "${db}"`;

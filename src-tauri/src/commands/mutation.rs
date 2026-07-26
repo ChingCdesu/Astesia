@@ -6,7 +6,11 @@ use crate::state::AppState;
 /// Quote an identifier (column name, etc.) using the appropriate syntax for the database type.
 fn quote_identifier(name: &str, db_type: &DbType) -> String {
     match db_type {
-        DbType::MySQL => format!("`{}`", name),
+        DbType::MySQL => format!("`{}`", name.replace('`', "``")),
+        DbType::ClickHouse => {
+            let escaped = name.replace('\\', "\\\\").replace('`', "\\`");
+            format!("`{escaped}`")
+        }
         DbType::PostgreSQL => format!("\"{}\"", name),
         DbType::SQLite => format!("\"{}\"", name),
         DbType::SQLServer => format!("[{}]", name),
@@ -27,7 +31,11 @@ fn quote_table(table: &str, db_type: &DbType) -> String {
                 format!("\"{}\"", table)
             }
         }
-        DbType::MySQL => format!("`{}`", table),
+        DbType::MySQL => format!("`{}`", table.replace('`', "``")),
+        DbType::ClickHouse => {
+            let escaped = table.replace('\\', "\\\\").replace('`', "\\`");
+            format!("`{escaped}`")
+        }
         DbType::SQLServer => format!("[{}]", table),
         DbType::SQLite => format!("\"{}\"", table),
         _ => format!("\"{}\"", table),
@@ -49,15 +57,22 @@ pub async fn update_row(
     let driver = connections.get(&connection_id).ok_or("连接不存在")?;
     let db_type = driver.db_type();
 
-    let pk_val = value_to_sql(&primary_key_value);
-    let new_val = value_to_sql(&new_value);
+    let pk_val = value_to_sql(&primary_key_value, &db_type);
+    let new_val = value_to_sql(&new_value, &db_type);
     let tbl = quote_table(&table, &db_type);
     let col = quote_identifier(&column, &db_type);
     let pk_col = quote_identifier(&primary_key_column, &db_type);
-    let sql = format!(
-        "UPDATE {} SET {} = {} WHERE {} = {}",
-        tbl, col, new_val, pk_col, pk_val
-    );
+    let sql = if db_type == DbType::ClickHouse {
+        format!(
+            "ALTER TABLE {} UPDATE {} = {} WHERE {} = {} SETTINGS mutations_sync = 1",
+            tbl, col, new_val, pk_col, pk_val
+        )
+    } else {
+        format!(
+            "UPDATE {} SET {} = {} WHERE {} = {}",
+            tbl, col, new_val, pk_col, pk_val
+        )
+    };
     log::info!("Executing UPDATE SQL: {}", sql);
     let result = driver.execute_query(&database, &sql).await.map_err(|e| {
         log::error!("UPDATE failed: {}", e);
@@ -80,13 +95,27 @@ pub async fn delete_rows(
     let driver = connections.get(&connection_id).ok_or("连接不存在")?;
     let db_type = driver.db_type();
 
-    let vals: Vec<String> = primary_key_values.iter().map(value_to_sql).collect();
+    let vals: Vec<String> = primary_key_values
+        .iter()
+        .map(|value| value_to_sql(value, &db_type))
+        .collect();
     let tbl = quote_table(&table, &db_type);
     let pk_col = quote_identifier(&primary_key_column, &db_type);
-    let sql = format!(
-        "DELETE FROM {} WHERE {} IN ({})",
-        tbl, pk_col, vals.join(", ")
-    );
+    let sql = if db_type == DbType::ClickHouse {
+        format!(
+            "ALTER TABLE {} DELETE WHERE {} IN ({}) SETTINGS mutations_sync = 1",
+            tbl,
+            pk_col,
+            vals.join(", ")
+        )
+    } else {
+        format!(
+            "DELETE FROM {} WHERE {} IN ({})",
+            tbl,
+            pk_col,
+            vals.join(", ")
+        )
+    };
     log::info!("Executing DELETE SQL: {}", sql);
     let result = driver.execute_query(&database, &sql).await.map_err(|e| {
         log::error!("DELETE failed: {}", e);
@@ -110,7 +139,11 @@ pub async fn insert_row(
     let db_type = driver.db_type();
 
     let cols = columns.iter().map(|c| quote_identifier(c, &db_type)).collect::<Vec<_>>().join(", ");
-    let vals = values.iter().map(value_to_sql).collect::<Vec<_>>().join(", ");
+    let vals = values
+        .iter()
+        .map(|value| value_to_sql(value, &db_type))
+        .collect::<Vec<_>>()
+        .join(", ");
     let tbl = quote_table(&table, &db_type);
     let sql = format!("INSERT INTO {} ({}) VALUES ({})", tbl, cols, vals);
     log::info!("Executing INSERT SQL: {}", sql);
@@ -122,13 +155,22 @@ pub async fn insert_row(
     Ok(result.affected_rows)
 }
 
-fn value_to_sql(value: &Value) -> String {
+fn value_to_sql(value: &Value, db_type: &DbType) -> String {
     match value {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        _ => format!("'{}'", value.to_string().replace('\'', "''")),
+        Value::String(s) => quote_string_value(s, db_type),
+        _ => quote_string_value(&value.to_string(), db_type),
+    }
+}
+
+fn quote_string_value(value: &str, db_type: &DbType) -> String {
+    if db_type == &DbType::ClickHouse {
+        let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+        format!("'{escaped}'")
+    } else {
+        format!("'{}'", value.replace('\'', "''"))
     }
 }
 
@@ -164,4 +206,18 @@ pub async fn redis_delete_key(
     let cmd = format!("DEL {}", key);
     let result = driver.execute_query(&database, &cmd).await.map_err(|e| e.to_string())?;
     Ok(result.affected_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_clickhouse_string_and_identifier_literals() {
+        assert_eq!(
+            value_to_sql(&Value::String("it's\\ready".to_string()), &DbType::ClickHouse),
+            "'it\\'s\\\\ready'"
+        );
+        assert_eq!(quote_identifier(r"odd\`name", &DbType::ClickHouse), r"`odd\\\`name`");
+    }
 }

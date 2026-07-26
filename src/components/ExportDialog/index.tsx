@@ -17,6 +17,7 @@ import { cn } from '@/lib/utils';
 import {
   ExportFormat, CsvOptions, JsonOptions, XlsxOptions, suggestFilename, FORMAT_EXTENSIONS,
 } from '@/lib/exportData';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 import {
   Loader2, FolderOpen, ChevronLeft, ChevronRight, CheckCircle2, FileSpreadsheet,
   FileJson, FileText, Download,
@@ -60,6 +61,8 @@ function quoteIdent(name: string, dbType?: string): string {
     case 'mysql':
     case 'sqlite':
       return `\`${name.replace(/`/g, '``')}\``;
+    case 'clickhouse':
+      return quoteClickHouseIdentifier(name);
     case 'sqlserver':
       return `[${name.replace(/]/g, ']]')}]`;
     case 'postgresql':

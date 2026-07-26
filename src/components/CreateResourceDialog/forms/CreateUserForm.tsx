@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { notify } from '@/stores/notificationStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 
 interface Props {
   connectionId: string;
@@ -35,6 +36,9 @@ export default function CreateUserForm({ connectionId, database, onSuccess }: Pr
         sql = `CREATE USER '${username.trim()}'@'%' IDENTIFIED BY '${password}'`;
       } else if (dbType === 'sqlserver') {
         sql = `CREATE LOGIN [${username.trim()}] WITH PASSWORD = '${password}'`;
+      } else if (dbType === 'clickhouse') {
+        const escapedPassword = password.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        sql = `CREATE USER ${quoteClickHouseIdentifier(username.trim())} IDENTIFIED WITH sha256_password BY '${escapedPassword}'`;
       } else {
         sql = `CREATE USER "${username.trim()}" WITH PASSWORD '${password}'`;
       }

@@ -10,6 +10,7 @@ import SQLiteDashboard from './SQLiteDashboard';
 import SQLServerDashboard from './SQLServerDashboard';
 import MongoDBDashboard from './MongoDBDashboard';
 import RedisDashboard from './RedisDashboard';
+import ClickHouseDashboard from './ClickHouseDashboard';
 
 interface Props {
   connectionId: string;
@@ -75,6 +76,8 @@ export default function PerformanceDashboard({ connectionId, database }: Props) 
         return <MongoDBDashboard data={data} loading={loading} />;
       case 'redis':
         return <RedisDashboard data={data} loading={loading} />;
+      case 'clickhouse':
+        return <ClickHouseDashboard data={data} loading={loading} />;
       default:
         return <div className="p-4 text-muted-foreground">不支持的数据库类型</div>;
     }

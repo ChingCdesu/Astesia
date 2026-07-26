@@ -1,4 +1,11 @@
-export type DbType = 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver' | 'mongodb' | 'redis';
+export type DbType =
+  | 'mysql'
+  | 'postgresql'
+  | 'sqlite'
+  | 'sqlserver'
+  | 'mongodb'
+  | 'redis'
+  | 'clickhouse';
 
 export interface ConnectionConfig {
   id: string;
@@ -180,6 +187,7 @@ export const DB_TYPE_LABELS: Record<DbType, string> = {
   sqlserver: 'SQL Server',
   mongodb: 'MongoDB',
   redis: 'Redis',
+  clickhouse: 'ClickHouse',
 };
 
 export const DB_TYPE_COLORS: Record<DbType, string> = {
@@ -189,6 +197,7 @@ export const DB_TYPE_COLORS: Record<DbType, string> = {
   sqlserver: '#CC2927',
   mongodb: '#47A248',
   redis: '#DC382D',
+  clickhouse: '#FFCC01',
 };
 
 export const DEFAULT_PORTS: Record<DbType, number> = {
@@ -198,4 +207,5 @@ export const DEFAULT_PORTS: Record<DbType, number> = {
   sqlserver: 1433,
   mongodb: 27017,
   redis: 6379,
+  clickhouse: 8123,
 };

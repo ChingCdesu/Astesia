@@ -4,7 +4,7 @@ A cross-platform desktop database management tool built with **Tauri 2 + React 1
 
 ## Features
 
-- **Multi-database support** — MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis
+- **Multi-database support** — MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, Redis
 - **SQL query editor** — Monaco Editor with syntax highlighting
 - **Data browsing & editing** — Virtual-scrolling data grid with inline CRUD
 - **Schema explorer** — Lazy-loading sidebar tree (databases → schemas → tables → columns)

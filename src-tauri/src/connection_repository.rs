@@ -2122,6 +2122,7 @@ fn db_type_to_str(db_type: &DbType) -> &'static str {
         DbType::SQLServer => "sqlserver",
         DbType::MongoDB => "mongodb",
         DbType::Redis => "redis",
+        DbType::ClickHouse => "clickhouse",
     }
 }
 
@@ -2133,6 +2134,7 @@ fn db_type_from_str(value: &str) -> Result<DbType, ConnectionRepositoryError> {
         "sqlserver" => Ok(DbType::SQLServer),
         "mongodb" => Ok(DbType::MongoDB),
         "redis" => Ok(DbType::Redis),
+        "clickhouse" => Ok(DbType::ClickHouse),
         _ => Err(ConnectionRepositoryError::new(
             ConnectionRepositoryErrorCode::StorageCorrupt,
             format!("共享连接仓库包含未知数据库类型：{value}"),

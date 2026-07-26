@@ -1,4 +1,5 @@
 import type { languages } from 'monaco-editor';
+import { quoteClickHouseIdentifier } from './sqlIdentifier';
 
 // --- Common SQL keywords (all dialects) ---
 const COMMON_SQL_KEYWORDS = [
@@ -119,7 +120,33 @@ const SQLSERVER_FUNCTIONS = [
   '@@ROWCOUNT', '@@IDENTITY', '@@VERSION', '@@SERVERNAME', '@@SPID',
 ];
 
-export type SqlDialect = 'mysql' | 'postgresql' | 'sqlite' | 'sqlserver' | 'mongodb' | 'redis';
+const CLICKHOUSE_KEYWORDS = [
+  'PREWHERE', 'FORMAT', 'ENGINE', 'MERGETREE', 'REPLACINGMERGETREE', 'AGGREGATINGMERGETREE',
+  'SUMMINGMERGETREE', 'COLLAPSINGMERGETREE', 'PARTITION', 'SAMPLE', 'FINAL', 'TTL', 'CODEC',
+  'LOWCARDINALITY', 'NULLABLE', 'ARRAY', 'TUPLE', 'MAP', 'NESTED', 'MATERIALIZED', 'ALIAS',
+  'SETTINGS', 'CLUSTER', 'DICTIONARY', 'OPTIMIZE', 'SYSTEM', 'KILL', 'SHOW', 'DESCRIBE',
+  'LIMIT', 'BY', 'TOTALS', 'ARRAY JOIN',
+];
+
+const CLICKHOUSE_FUNCTIONS = [
+  'COUNT', 'COUNTIF', 'SUMIF', 'AVGIF', 'UNIQ', 'UNIQEXACT', 'GROUPARRAY', 'GROUPUNIQARRAY',
+  'ARGMIN', 'ARGMAX', 'QUANTILE', 'QUANTILEEXACT', 'TOPK', 'ANY', 'ANYLAST',
+  'TODATE', 'TODATETIME', 'TODATETIME64', 'TOSTARTOFHOUR', 'TOSTARTOFDAY', 'TOSTARTOFMONTH',
+  'DATEADD', 'DATEDIFF', 'FORMATDATETIME', 'PARSEDATETIMEBESTEFFORT', 'NOW64',
+  'ARRAYMAP', 'ARRAYFILTER', 'ARRAYJOIN', 'ARRAYEXISTS', 'ARRAYREDUCE', 'HAS', 'HASANY',
+  'TYPENAME', 'TOSTRING', 'TOINT64', 'TOUINT64', 'TOFLOAT64', 'TODECIMAL64',
+  'JSONEXTRACT', 'JSONEXTRACTSTRING', 'JSONEXTRACTINT', 'SIMPLEJSONEXTRACTSTRING',
+  'CITYHASH64', 'SIPHASH64', 'GENERATEUUIDV4', 'MULTIIF', 'ASSUMENOTNULL',
+];
+
+export type SqlDialect =
+  | 'mysql'
+  | 'postgresql'
+  | 'sqlite'
+  | 'sqlserver'
+  | 'mongodb'
+  | 'redis'
+  | 'clickhouse';
 
 export function getDialectKeywords(dialect: SqlDialect): string[] {
   switch (dialect) {
@@ -127,6 +154,7 @@ export function getDialectKeywords(dialect: SqlDialect): string[] {
     case 'postgresql': return [...COMMON_SQL_KEYWORDS, ...POSTGRES_KEYWORDS];
     case 'sqlite': return [...COMMON_SQL_KEYWORDS, ...SQLITE_KEYWORDS];
     case 'sqlserver': return [...COMMON_SQL_KEYWORDS, ...SQLSERVER_KEYWORDS];
+    case 'clickhouse': return [...COMMON_SQL_KEYWORDS, ...CLICKHOUSE_KEYWORDS];
     default: return [];
   }
 }
@@ -137,6 +165,7 @@ export function getDialectFunctions(dialect: SqlDialect): string[] {
     case 'postgresql': return [...COMMON_SQL_FUNCTIONS, ...POSTGRES_FUNCTIONS];
     case 'sqlite': return [...COMMON_SQL_FUNCTIONS, ...SQLITE_FUNCTIONS];
     case 'sqlserver': return [...COMMON_SQL_FUNCTIONS, ...SQLSERVER_FUNCTIONS];
+    case 'clickhouse': return [...COMMON_SQL_FUNCTIONS, ...CLICKHOUSE_FUNCTIONS];
     default: return [];
   }
 }
@@ -156,6 +185,8 @@ function quoteIdentifier(ident: string, dbType: string): string {
   switch (dbType) {
     case 'mysql':
       return `\`${ident.replace(/`/g, '``')}\``;
+    case 'clickhouse':
+      return quoteClickHouseIdentifier(ident);
     case 'sqlserver':
       return `[${ident.replace(/]/g, ']]')}]`;
     case 'postgresql':

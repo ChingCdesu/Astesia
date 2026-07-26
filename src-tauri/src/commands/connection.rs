@@ -548,6 +548,7 @@ pub async fn get_default_port(db_type: DbType) -> Result<u16, String> {
         DbType::SQLServer => 1433,
         DbType::MongoDB => 27017,
         DbType::Redis => 6379,
+        DbType::ClickHouse => 8123,
     };
     Ok(port)
 }

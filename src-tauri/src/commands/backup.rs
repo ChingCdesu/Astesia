@@ -18,10 +18,35 @@ pub struct BackupOptions {
 /// Quote a SQL identifier according to database type.
 fn quote_ident(name: &str, db_type: &DbType) -> String {
     match db_type {
-        DbType::MySQL | DbType::SQLite => format!("`{}`", name),
+        DbType::MySQL | DbType::SQLite => {
+            format!("`{}`", name.replace('`', "``"))
+        }
+        DbType::ClickHouse => {
+            let escaped = name.replace('\\', "\\\\").replace('`', "\\`");
+            format!("`{escaped}`")
+        }
         DbType::PostgreSQL => format!("\"{}\"", name),
         DbType::SQLServer => format!("[{}]", name),
         _ => name.to_string(),
+    }
+}
+
+fn sql_value(value: &serde_json::Value, db_type: &DbType) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(value) => if *value { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => quote_string_value(value, db_type),
+        value => quote_string_value(&value.to_string(), db_type),
+    }
+}
+
+fn quote_string_value(value: &str, db_type: &DbType) -> String {
+    if db_type == &DbType::ClickHouse {
+        let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+        format!("'{escaped}'")
+    } else {
+        format!("'{}'", value.replace('\'', "''"))
     }
 }
 
@@ -358,13 +383,10 @@ pub async fn start_backup(
                                 .map(|c| quote_ident(&c.name, &db_type))
                                 .collect();
                             for row in &result.rows {
-                                let values: Vec<String> = row.iter().map(|v| match v {
-                                    serde_json::Value::Null => "NULL".to_string(),
-                                    serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-                                    serde_json::Value::Number(n) => n.to_string(),
-                                    serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                                    _ => format!("'{}'", v.to_string().replace('\'', "''")),
-                                }).collect();
+                                let values: Vec<String> = row
+                                    .iter()
+                                    .map(|value| sql_value(value, &db_type))
+                                    .collect();
                                 sql_output.push_str(&format!(
                                     "INSERT INTO {} ({}) VALUES ({});\n",
                                     quoted_table, col_names.join(", "), values.join(", ")

@@ -196,7 +196,7 @@ Tools are grouped by purpose:
 
 Connect a connection before using database, schema, query, or row tools. Saved-query tools manage Astesia query definitions; deleting one does not itself run SQL against the database.
 
-Structured schema, table, query, insert, update, and delete tools currently target MySQL, PostgreSQL, SQLite, and SQL Server. MongoDB and Redis support connection lifecycle operations and `read_rows` through their existing Astesia drivers.
+Structured table, query, insert, update, and delete tools currently target MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse. Schema tools remain unavailable for SQLite and ClickHouse. MongoDB and Redis support connection lifecycle operations and `read_rows` through their existing Astesia drivers.
 
 `create_database_object` accepts databases, views, functions, procedures, and triggers. Database user credentials are intentionally outside this API. Credential-bearing permission SQL (for example, a password or token clause) is rejected; configure those secrets through a trusted database administration path.
 

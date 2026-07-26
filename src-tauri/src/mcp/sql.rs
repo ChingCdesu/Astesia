@@ -88,7 +88,11 @@ fn unsupported(db_type: &DbType, operation: &'static str) -> SqlBuildError {
 
 fn ensure_relational(db_type: &DbType, operation: &'static str) -> SqlBuildResult<()> {
     match db_type {
-        DbType::MySQL | DbType::PostgreSQL | DbType::SQLite | DbType::SQLServer => Ok(()),
+        DbType::MySQL
+        | DbType::PostgreSQL
+        | DbType::SQLite
+        | DbType::SQLServer
+        | DbType::ClickHouse => Ok(()),
         DbType::MongoDB | DbType::Redis => Err(unsupported(db_type, operation)),
     }
 }
@@ -96,7 +100,9 @@ fn ensure_relational(db_type: &DbType, operation: &'static str) -> SqlBuildResul
 fn ensure_schema_support(db_type: &DbType, operation: &'static str) -> SqlBuildResult<()> {
     match db_type {
         DbType::MySQL | DbType::PostgreSQL | DbType::SQLServer => Ok(()),
-        DbType::SQLite | DbType::MongoDB | DbType::Redis => Err(unsupported(db_type, operation)),
+        DbType::SQLite | DbType::MongoDB | DbType::Redis | DbType::ClickHouse => {
+            Err(unsupported(db_type, operation))
+        }
     }
 }
 
@@ -109,6 +115,10 @@ fn ensure_object_support(
         (db_type, kind),
         (DbType::MySQL | DbType::PostgreSQL | DbType::SQLServer, _)
             | (DbType::SQLite, ObjectKind::View | ObjectKind::Trigger)
+            | (
+                DbType::ClickHouse,
+                ObjectKind::View | ObjectKind::Function | ObjectKind::Database
+            )
     );
 
     if supported {
@@ -180,7 +190,13 @@ pub fn quote_identifier(db_type: &DbType, identifier: &str) -> SqlBuildResult<St
     }
 
     Ok(match db_type {
-        DbType::MySQL => format!("`{}`", identifier.replace('`', "``")),
+        DbType::MySQL => {
+            format!("`{}`", identifier.replace('`', "``"))
+        }
+        DbType::ClickHouse => {
+            let escaped = identifier.replace('\\', "\\\\").replace('`', "\\`");
+            format!("`{escaped}`")
+        }
         DbType::PostgreSQL | DbType::SQLite => {
             format!("\"{}\"", identifier.replace('"', "\"\""))
         }
@@ -194,7 +210,7 @@ pub fn quote_qualified_name(db_type: &DbType, name: &str) -> SqlBuildResult<Stri
     ensure_relational(db_type, "quote SQL qualified name")?;
     let parts = qualified_parts(name)?;
     let max_parts = match db_type {
-        DbType::MySQL | DbType::PostgreSQL | DbType::SQLite => 2,
+        DbType::MySQL | DbType::PostgreSQL | DbType::SQLite | DbType::ClickHouse => 2,
         DbType::SQLServer => 4,
         DbType::MongoDB | DbType::Redis => unreachable!("relational databases checked above"),
     };
@@ -336,6 +352,10 @@ fn sql_string_literal(db_type: &DbType, value: &str) -> SqlBuildResult<String> {
         }
         DbType::SQLite => format!("'{}'", value.replace('\'', "''")),
         DbType::SQLServer => format!("N'{}'", value.replace('\'', "''")),
+        DbType::ClickHouse => {
+            let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+            format!("'{escaped}'")
+        }
         DbType::MongoDB | DbType::Redis => {
             return Err(unsupported(db_type, "format structured SQL value"));
         }
@@ -409,14 +429,25 @@ pub fn build_update_row(
         ));
     }
 
-    Ok(format!(
-        "UPDATE {} SET {} = {} WHERE {} = {}",
-        quote_qualified_name(db_type, table)?,
-        quote_identifier(db_type, column)?,
-        sql_literal(db_type, new_value)?,
-        quote_identifier(db_type, primary_key_column)?,
-        sql_literal(db_type, primary_key_value)?
-    ))
+    if matches!(db_type, DbType::ClickHouse) {
+        Ok(format!(
+            "ALTER TABLE {} UPDATE {} = {} WHERE {} = {} SETTINGS mutations_sync = 1",
+            quote_qualified_name(db_type, table)?,
+            quote_identifier(db_type, column)?,
+            sql_literal(db_type, new_value)?,
+            quote_identifier(db_type, primary_key_column)?,
+            sql_literal(db_type, primary_key_value)?
+        ))
+    } else {
+        Ok(format!(
+            "UPDATE {} SET {} = {} WHERE {} = {}",
+            quote_qualified_name(db_type, table)?,
+            quote_identifier(db_type, column)?,
+            sql_literal(db_type, new_value)?,
+            quote_identifier(db_type, primary_key_column)?,
+            sql_literal(db_type, primary_key_value)?
+        ))
+    }
 }
 
 pub fn build_delete_rows(
@@ -441,12 +472,21 @@ pub fn build_delete_rows(
         .iter()
         .map(|value| sql_literal(db_type, value))
         .collect::<SqlBuildResult<Vec<_>>>()?;
-    Ok(format!(
-        "DELETE FROM {} WHERE {} IN ({})",
-        quote_qualified_name(db_type, table)?,
-        quote_identifier(db_type, primary_key_column)?,
-        literals.join(", ")
-    ))
+    if matches!(db_type, DbType::ClickHouse) {
+        Ok(format!(
+            "ALTER TABLE {} DELETE WHERE {} IN ({}) SETTINGS mutations_sync = 1",
+            quote_qualified_name(db_type, table)?,
+            quote_identifier(db_type, primary_key_column)?,
+            literals.join(", ")
+        ))
+    } else {
+        Ok(format!(
+            "DELETE FROM {} WHERE {} IN ({})",
+            quote_qualified_name(db_type, table)?,
+            quote_identifier(db_type, primary_key_column)?,
+            literals.join(", ")
+        ))
+    }
 }
 
 /// Validate one `CREATE` statement against an exact keyword prefix.
@@ -689,6 +729,10 @@ mod tests {
             quote_qualified_name(&DbType::SQLServer, "dbo.weird]table").unwrap(),
             "[dbo].[weird]]table]"
         );
+        assert_eq!(
+            quote_qualified_name(&DbType::ClickHouse, r"app.weird\`table").unwrap(),
+            r"`app`.`weird\\\`table`"
+        );
     }
 
     #[test]
@@ -809,6 +853,33 @@ mod tests {
             &json!("x"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn builds_clickhouse_mutations_with_clickhouse_literals() {
+        assert_eq!(
+            build_update_row(
+                &DbType::ClickHouse,
+                "analytics.events",
+                "id",
+                &json!(7),
+                "message",
+                &json!("it's\\ready"),
+            )
+            .unwrap(),
+            "ALTER TABLE `analytics`.`events` UPDATE `message` = 'it\\'s\\\\ready' WHERE `id` = 7 SETTINGS mutations_sync = 1"
+        );
+        assert_eq!(
+            build_delete_rows(
+                &DbType::ClickHouse,
+                "analytics.events",
+                "id",
+                &[json!(7), json!(9)],
+            )
+            .unwrap(),
+            "ALTER TABLE `analytics`.`events` DELETE WHERE `id` IN (7, 9) SETTINGS mutations_sync = 1"
+        );
+        assert!(build_create_schema(&DbType::ClickHouse, "analytics").is_err());
     }
 
     #[test]

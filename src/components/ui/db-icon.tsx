@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils';
 import { DbType } from '@/types/database';
-import { SiSqlite } from 'react-icons/si';
+import { SiClickhouse, SiSqlite } from 'react-icons/si';
 import { DiMysql, DiMsqlServer, DiRedis, DiPostgresql, DiMongodb } from 'react-icons/di';
 import type { IconType } from 'react-icons';
 
@@ -17,6 +17,7 @@ const iconMap: Record<DbType, { icon: IconType; color: string }> = {
   sqlserver: { icon: DiMsqlServer, color: '#CC2927' },
   mongodb: { icon: DiMongodb, color: '#47A248' },
   redis: { icon: DiRedis, color: '#DC382D' },
+  clickhouse: { icon: SiClickhouse, color: '#FFCC01' },
 };
 
 export function DbIcon({ dbType, className, size = 16 }: DbIconProps) {

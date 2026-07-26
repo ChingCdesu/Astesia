@@ -8,7 +8,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { ConnectionConfig, DbType, DB_TYPE_LABELS, DEFAULT_PORTS } from '@/types/database';
+import {
+  ConnectionConfig,
+  DbType,
+  DB_TYPE_COLORS,
+  DB_TYPE_LABELS,
+  DEFAULT_PORTS,
+} from '@/types/database';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { CheckCircle, XCircle, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -20,7 +26,15 @@ interface Props {
   readOnly?: boolean;
 }
 
-const dbTypes: DbType[] = ['mysql', 'postgresql', 'sqlite', 'sqlserver', 'mongodb', 'redis'];
+const dbTypes: DbType[] = [
+  'mysql',
+  'postgresql',
+  'sqlite',
+  'sqlserver',
+  'clickhouse',
+  'mongodb',
+  'redis',
+];
 
 const readableError = (error: unknown): string => {
   const value = error as { message?: string; remediation?: string };
@@ -85,7 +99,7 @@ export default function ConnectionDialog({
           username: editConfig.username,
           password: '',
           database: editConfig.database || '',
-          color: editConfig.color || '#00758F',
+          color: editConfig.color || DB_TYPE_COLORS[editConfig.db_type],
           group_name: editConfig.group_name || '',
           tags: editConfig.tags || [],
         });
@@ -113,7 +127,13 @@ export default function ConnectionDialog({
       db_type: dbType,
       port: DEFAULT_PORTS[dbType],
       host: dbType === 'sqlite' ? '' : prev.host || 'localhost',
-      username: dbType === 'sqlite' || dbType === 'redis' ? '' : prev.username,
+      username: dbType === 'sqlite' || dbType === 'redis'
+        ? ''
+        : dbType === 'clickhouse'
+          ? 'default'
+          : prev.username,
+      database: dbType === 'clickhouse' && !prev.database ? 'default' : prev.database,
+      color: DB_TYPE_COLORS[dbType],
       password: '',
     }));
   };
@@ -181,6 +201,7 @@ export default function ConnectionDialog({
 
   const isSqlite = form.db_type === 'sqlite';
   const isRedis = form.db_type === 'redis';
+  const isClickHouse = form.db_type === 'clickhouse';
   const existingGroups = useMemo(
     () => Array.from(new Set(
       connections
@@ -343,16 +364,23 @@ export default function ConnectionDialog({
 
           {/* Port */}
           {!isSqlite && (
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label className="text-right">{t('connection.port')}</Label>
-              <Input
-                className="col-span-3"
-                type="number"
-                value={form.port}
-                onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 0 })}
-                readOnly={readOnly}
-              />
-            </div>
+            <>
+              <div className="grid grid-cols-4 items-center gap-4">
+                <Label className="text-right">{t('connection.port')}</Label>
+                <Input
+                  className="col-span-3"
+                  type="number"
+                  value={form.port}
+                  onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 0 })}
+                  readOnly={readOnly}
+                />
+              </div>
+              {isClickHouse && (
+                <p className="-mt-3 pl-[calc(25%+1rem)] text-[11px] text-muted-foreground">
+                  {t('connection.clickhouseHttpHint')}
+                </p>
+              )}
+            </>
           )}
 
           {/* Username */}

@@ -1,6 +1,7 @@
 /**
  * DB-type-aware SQL generation helpers for table/schema operations.
  */
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 
 export function getDropTableSQL(table: string, dbType: string): string {
   switch (dbType) {
@@ -11,6 +12,8 @@ export function getDropTableSQL(table: string, dbType: string): string {
     }
     case 'mysql':
       return `DROP TABLE \`${table}\``;
+    case 'clickhouse':
+      return `DROP TABLE ${quoteClickHouseIdentifier(table)}`;
     case 'sqlserver':
       return `DROP TABLE [${table}]`;
     default:
@@ -27,6 +30,8 @@ export function getRenameTableSQL(oldName: string, newName: string, dbType: stri
     }
     case 'mysql':
       return `RENAME TABLE \`${oldName}\` TO \`${newName}\``;
+    case 'clickhouse':
+      return `RENAME TABLE ${quoteClickHouseIdentifier(oldName)} TO ${quoteClickHouseIdentifier(newName)}`;
     case 'sqlserver':
       return `EXEC sp_rename '${oldName}', '${newName}'`;
     default:
@@ -43,6 +48,8 @@ export function getDropViewSQL(viewName: string, dbType: string): string {
     }
     case 'mysql':
       return `DROP VIEW \`${viewName}\``;
+    case 'clickhouse':
+      return `DROP VIEW ${quoteClickHouseIdentifier(viewName)}`;
     case 'sqlserver':
       return `DROP VIEW [${viewName}]`;
     default:
@@ -59,6 +66,8 @@ export function getDropFunctionSQL(funcName: string, dbType: string): string {
     }
     case 'mysql':
       return `DROP FUNCTION \`${funcName}\``;
+    case 'clickhouse':
+      return `DROP FUNCTION ${quoteClickHouseIdentifier(funcName)}`;
     case 'sqlserver':
       return `DROP FUNCTION [${funcName}]`;
     default:

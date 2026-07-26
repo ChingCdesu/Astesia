@@ -15,6 +15,7 @@ import ValueViewer from '@/components/DataViewers/DataGrid/ValueViewer';
 import ExportDialog from '@/components/ExportDialog';
 import { notify } from '@/stores/notificationStore';
 import { getPrimaryShortcut, useCommandHandler } from '@/lib/commands';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
@@ -73,6 +74,8 @@ function quoteIdent(name: string, dbType?: string): string {
     case 'mysql':
     case 'sqlite':
       return `\`${name}\``;
+    case 'clickhouse':
+      return quoteClickHouseIdentifier(name);
     case 'sqlserver':
       return `[${name}]`;
     case 'postgresql':
@@ -228,9 +231,11 @@ export default function DataGrid({
 
   // Primary key detection
   const primaryKeyColumn = useMemo(() => {
-    if (!result) return null;
+    // ClickHouse primary/sorting keys are sparse indexes and are not row-unique.
+    // Treat the grid as read-only so an inline edit cannot mutate multiple rows.
+    if (!result || dbType === 'clickhouse') return null;
     return result.columns.find((c) => c.is_primary_key) ?? null;
-  }, [result]);
+  }, [dbType, result]);
 
   const hasPrimaryKey = primaryKeyColumn !== null;
 
@@ -1089,7 +1094,9 @@ export default function DataGrid({
             <div className="mx-1 h-4 w-px bg-border" />
             <Badge variant="warning" className="gap-1">
               <AlertTriangle className="h-3 w-3" />
-              无主键，不可编辑
+              {dbType === 'clickhouse'
+                ? 'ClickHouse 排序键不保证唯一，请使用 SQL 修改数据'
+                : '无主键，不可编辑'}
             </Badge>
           </>
         )}

@@ -23,7 +23,89 @@ pub async fn get_performance_metrics(
         DbType::SQLServer => get_sqlserver_metrics(driver.as_ref(), &database).await,
         DbType::MongoDB => get_mongodb_metrics(driver.as_ref(), &database).await,
         DbType::Redis => get_redis_metrics(driver.as_ref(), &database).await,
+        DbType::ClickHouse => get_clickhouse_metrics(driver.as_ref(), &database).await,
     }
+}
+
+async fn get_clickhouse_metrics(
+    driver: &dyn DatabaseDriver,
+    database: &str,
+) -> Result<serde_json::Value, String> {
+    let current = driver
+        .execute_query(
+            database,
+            "SELECT metric, value FROM system.metrics \
+             WHERE metric IN (\
+               'Query', 'Merge', 'PartMutation', 'TCPConnection', \
+               'HTTPConnection', 'MemoryTracking'\
+             )",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let events = driver
+        .execute_query(
+            database,
+            "SELECT event, value FROM system.events \
+             WHERE event IN (\
+               'Query', 'FailedQuery', 'SelectQuery', 'InsertQuery', \
+               'SelectedRows', 'InsertedRows', 'SelectedBytes', 'InsertedBytes'\
+             )",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let asynchronous = driver
+        .execute_query(
+            database,
+            "SELECT metric, value FROM system.asynchronous_metrics \
+             WHERE metric IN ('Uptime', 'NumberOfDatabases', 'NumberOfTables')",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let current = metric_rows(&current);
+    let events = metric_rows(&events);
+    let asynchronous = metric_rows(&asynchronous);
+    let metric = |values: &std::collections::HashMap<String, f64>, name: &str| {
+        values.get(name).copied().unwrap_or(0.0)
+    };
+
+    Ok(json!({
+        "dbType": "clickhouse",
+        "activeQueries": metric(&current, "Query"),
+        "activeMerges": metric(&current, "Merge"),
+        "activeMutations": metric(&current, "PartMutation"),
+        "connections": metric(&current, "TCPConnection") + metric(&current, "HTTPConnection"),
+        "memoryUsage": metric(&current, "MemoryTracking"),
+        "totalQueries": metric(&events, "Query"),
+        "failedQueries": metric(&events, "FailedQuery"),
+        "selectQueries": metric(&events, "SelectQuery"),
+        "insertQueries": metric(&events, "InsertQuery"),
+        "selectedRows": metric(&events, "SelectedRows"),
+        "insertedRows": metric(&events, "InsertedRows"),
+        "selectedBytes": metric(&events, "SelectedBytes"),
+        "insertedBytes": metric(&events, "InsertedBytes"),
+        "uptime": metric(&asynchronous, "Uptime"),
+        "databaseCount": metric(&asynchronous, "NumberOfDatabases"),
+        "tableCount": metric(&asynchronous, "NumberOfTables"),
+    }))
+}
+
+fn metric_rows(
+    result: &crate::db::QueryResult,
+) -> std::collections::HashMap<String, f64> {
+    result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = row.first()?.as_str()?.to_string();
+            let value = row.get(1).and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            })?;
+            Some((name, value))
+        })
+        .collect()
 }
 
 async fn get_mysql_metrics(

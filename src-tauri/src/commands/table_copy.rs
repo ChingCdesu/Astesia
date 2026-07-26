@@ -14,11 +14,90 @@ pub struct CopyOptions {
 /// Quote a SQL identifier according to database type
 fn quote_ident(name: &str, db_type: &DbType) -> String {
     match db_type {
-        DbType::MySQL | DbType::SQLite => format!("`{}`", name),
+        DbType::MySQL | DbType::SQLite => {
+            format!("`{}`", name.replace('`', "``"))
+        }
+        DbType::ClickHouse => {
+            let escaped = name.replace('\\', "\\\\").replace('`', "\\`");
+            format!("`{escaped}`")
+        }
         DbType::PostgreSQL => format!("\"{}\"", name),
         DbType::SQLServer => format!("[{}]", name),
         _ => name.to_string(),
     }
+}
+
+fn sql_value(value: &serde_json::Value, db_type: &DbType) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(value) => if *value { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => quote_string_value(value, db_type),
+        value => quote_string_value(&value.to_string(), db_type),
+    }
+}
+
+fn quote_string_value(value: &str, db_type: &DbType) -> String {
+    if db_type == &DbType::ClickHouse {
+        let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+        format!("'{escaped}'")
+    } else {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+}
+
+fn replace_clickhouse_create_table_name(sql: &str, new_name: &str) -> String {
+    const CREATE_TABLE: &str = "CREATE TABLE";
+    const IF_NOT_EXISTS: &str = "IF NOT EXISTS";
+
+    let upper = sql.to_ascii_uppercase();
+    let Some(marker_start) = upper.find(CREATE_TABLE) else {
+        return sql.to_string();
+    };
+    let bytes = sql.as_bytes();
+    let mut name_start = marker_start + CREATE_TABLE.len();
+    while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
+        name_start += 1;
+    }
+
+    if upper[name_start..].starts_with(IF_NOT_EXISTS) {
+        name_start += IF_NOT_EXISTS.len();
+        while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
+            name_start += 1;
+        }
+    }
+
+    let mut name_end = name_start;
+    let mut quoted_by = None;
+    let mut escaped = false;
+    while let Some(&byte) = bytes.get(name_end) {
+        if let Some(quote) = quoted_by {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                quoted_by = None;
+            }
+            name_end += 1;
+            continue;
+        }
+
+        match byte {
+            b'`' | b'"' => {
+                quoted_by = Some(byte);
+                name_end += 1;
+            }
+            b'(' => break,
+            byte if byte.is_ascii_whitespace() => break,
+            _ => name_end += 1,
+        }
+    }
+
+    if name_end == name_start {
+        return sql.to_string();
+    }
+    format!("{}{}{}", &sql[..name_start], new_name, &sql[name_end..])
 }
 
 #[tauri::command]
@@ -134,10 +213,23 @@ pub async fn copy_table(
             match create_sql {
                 Ok(sql) => {
                     // Replace table name in DDL for all quote styles
-                    let new_sql = sql
-                        .replace(&format!("`{}`", source_table), &quote_ident(&options.new_table_name, &db_type))
-                        .replace(&format!("\"{}\"", source_table), &quote_ident(&options.new_table_name, &db_type))
-                        .replace(&format!("[{}]", source_table), &quote_ident(&options.new_table_name, &db_type));
+                    let quoted_new_table = quote_ident(&options.new_table_name, &db_type);
+                    let new_sql = if db_type == DbType::ClickHouse {
+                        replace_clickhouse_create_table_name(&sql, &quoted_new_table)
+                    } else {
+                        let quoted_source_table = quote_ident(&source_table, &db_type);
+                        sql.replace(
+                            &format!(
+                                "{}.{}",
+                                quote_ident(&source_database, &db_type),
+                                quoted_source_table
+                            ),
+                            &quoted_new_table,
+                        )
+                        .replace(&quoted_source_table, &quoted_new_table)
+                        .replace(&format!("\"{}\"", source_table), &quoted_new_table)
+                        .replace(&format!("[{}]", source_table), &quoted_new_table)
+                    };
 
                     let exec_result = {
                         let conns = connections.lock().await;
@@ -225,13 +317,10 @@ pub async fn copy_table(
                         let is_last_page = result.rows.len() < page_size as usize;
 
                         for row in &result.rows {
-                            let values: Vec<String> = row.iter().map(|v| match v {
-                                serde_json::Value::Null => "NULL".to_string(),
-                                serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-                                serde_json::Value::Number(n) => n.to_string(),
-                                serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                                _ => format!("'{}'", v.to_string().replace('\'', "''")),
-                            }).collect();
+                            let values: Vec<String> = row
+                                .iter()
+                                .map(|value| sql_value(value, &db_type))
+                                .collect();
 
                             let insert_sql = format!(
                                 "INSERT INTO {} ({}) VALUES ({})",
@@ -296,4 +385,38 @@ pub async fn copy_table(
     });
 
     Ok(task_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{replace_clickhouse_create_table_name, sql_value};
+    use crate::db::DbType;
+
+    #[test]
+    fn replaces_quoted_and_unquoted_clickhouse_table_names() {
+        assert_eq!(
+            replace_clickhouse_create_table_name(
+                "CREATE TABLE analytics.events\n(\n    `id` UInt64\n)\nENGINE = MergeTree",
+                "`events_copy`",
+            ),
+            "CREATE TABLE `events_copy`\n(\n    `id` UInt64\n)\nENGINE = MergeTree"
+        );
+        assert_eq!(
+            replace_clickhouse_create_table_name(
+                "CREATE TABLE IF NOT EXISTS `analytics`.`odd\\`name` (`id` UInt64)",
+                "`copy`",
+            ),
+            "CREATE TABLE IF NOT EXISTS `copy` (`id` UInt64)"
+        );
+    }
+
+    #[test]
+    fn escapes_clickhouse_values_during_copy() {
+        assert_eq!(
+            sql_value(&Value::String("it's\\ready".to_string()), &DbType::ClickHouse),
+            "'it\\'s\\\\ready'"
+        );
+    }
 }

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { notify } from '@/stores/notificationStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 
 interface Props {
   connectionId: string;
@@ -43,6 +44,8 @@ export default function CreateFunctionForm({ connectionId, database, schema, onS
       } else if (dbType === 'mysql') {
         const keyword = isProcedure ? 'PROCEDURE' : 'FUNCTION';
         sql = `CREATE ${keyword} \`${name.trim()}\`()\nBEGIN\n${body.trim()}\nEND`;
+      } else if (dbType === 'clickhouse' && !isProcedure) {
+        sql = `CREATE FUNCTION ${quoteClickHouseIdentifier(name.trim())} AS ${body.trim()}`;
       } else {
         sql = `CREATE FUNCTION "${name.trim()}"()\nAS\nBEGIN\n${body.trim()}\nEND`;
       }
@@ -89,7 +92,11 @@ export default function CreateFunctionForm({ connectionId, database, schema, onS
           className="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="-- function body"
+          placeholder={
+            dbType === 'clickhouse'
+              ? '(x) -> x * 2'
+              : '-- function body'
+          }
         />
       </div>
       <Button onClick={handleSubmit} disabled={loading || !name.trim() || !body.trim()}>

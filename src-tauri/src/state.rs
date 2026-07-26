@@ -4,8 +4,9 @@ use tokio::sync::Mutex;
 
 use crate::connection_repository::{ConnectionRepositoryError, SharedConnectionRepository};
 use crate::db::{
-    mongo::MongoDriver, mysql::MySqlDriver, postgres::PostgresDriver, redis_db::RedisDriver,
-    sqlite::SqliteDriver, sqlserver::SqlServerDriver, ConnectionConfig, DatabaseDriver, DbType,
+    clickhouse::ClickHouseDriver, mongo::MongoDriver, mysql::MySqlDriver,
+    postgres::PostgresDriver, redis_db::RedisDriver, sqlite::SqliteDriver,
+    sqlserver::SqlServerDriver, ConnectionConfig, DatabaseDriver, DbType,
 };
 use crate::tasks::TaskManager;
 
@@ -54,5 +55,6 @@ pub fn create_driver(config: &ConnectionConfig) -> Box<dyn DatabaseDriver> {
         DbType::SQLServer => Box::new(SqlServerDriver::new(config.clone())),
         DbType::MongoDB => Box::new(MongoDriver::new(config.clone())),
         DbType::Redis => Box::new(RedisDriver::new(config.clone())),
+        DbType::ClickHouse => Box::new(ClickHouseDriver::new(config.clone())),
     }
 }

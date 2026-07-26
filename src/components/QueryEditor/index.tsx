@@ -50,7 +50,13 @@ interface Props {
 // Dialects that support an EXPLAIN-prefix that returns a result set the way
 // SELECT does. SQL Server uses different mechanisms (SHOWPLAN) so it gets a
 // dedicated branch in `buildExplainSql`.
-const EXPLAINABLE_DIALECTS: ReadonlyArray<string> = ['mysql', 'postgresql', 'sqlite', 'sqlserver'];
+const EXPLAINABLE_DIALECTS: ReadonlyArray<string> = [
+  'mysql',
+  'postgresql',
+  'sqlite',
+  'sqlserver',
+  'clickhouse',
+];
 
 function buildExplainSql(sql: string, dbType: string | undefined): string {
   const trimmed = sql.trim().replace(/;\s*$/, '');

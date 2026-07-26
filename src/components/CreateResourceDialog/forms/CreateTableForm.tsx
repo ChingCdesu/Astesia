@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Loader2, Plus, Trash2, ChevronsUpDown, Check } from 'lucide-react';
 import { notify } from '@/stores/notificationStore';
 import { cn } from '@/lib/utils';
+import { quoteClickHouseIdentifier } from '@/lib/sqlIdentifier';
 
 interface Column {
   name: string;
@@ -72,6 +73,16 @@ const COMMON_TYPES: Record<string, string[]> = {
     'XML', 'VARBINARY(MAX)', 'IMAGE',
     'GEOGRAPHY', 'GEOMETRY', 'HIERARCHYID',
   ],
+  clickhouse: [
+    'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
+    'Int8', 'Int16', 'Int32', 'Int64', 'Int128', 'Int256',
+    'Float32', 'Float64', 'Decimal(18, 4)',
+    'String', 'FixedString(16)', 'LowCardinality(String)',
+    'Bool', 'UUID', 'IPv4', 'IPv6',
+    'Date', 'Date32', 'DateTime', 'DateTime64(3)',
+    'Array(String)', 'Tuple(String, UInt64)', 'Map(String, String)',
+    "Enum8('unknown' = 0)",
+  ],
 };
 
 const DEFAULT_TYPES = [
@@ -95,6 +106,29 @@ const emptyColumn = (dbType?: string): Column => ({
   primaryKey: false,
   defaultValue: '',
 });
+
+function supportsClickHouseNullable(dataType: string): boolean {
+  return !/^(Array|Map|Tuple|Nested)\s*\(/i.test(dataType.trim());
+}
+
+function clickHouseColumnType(column: Column): string {
+  const dataType = column.type.trim();
+  if (
+    !column.nullable
+    || column.primaryKey
+    || dataType.startsWith('Nullable(')
+    || !supportsClickHouseNullable(dataType)
+  ) {
+    return dataType;
+  }
+  if (dataType.startsWith('LowCardinality(') && dataType.endsWith(')')) {
+    const inner = dataType.slice('LowCardinality('.length, -1).trim();
+    return inner.startsWith('Nullable(')
+      ? dataType
+      : `LowCardinality(Nullable(${inner}))`;
+  }
+  return `Nullable(${dataType})`;
+}
 
 export default function CreateTableForm({ connectionId, database, schema, dbType, onSuccess }: Props) {
   const { t } = useTranslation();
@@ -121,15 +155,40 @@ export default function CreateTableForm({ connectionId, database, schema, dbType
     try {
       const validColumns = columns.filter((c) => c.name.trim());
       const colDefs = validColumns.map((col) => {
-        let def = `"${col.name}" ${col.type}`;
-        if (col.primaryKey) def += ' PRIMARY KEY';
-        if (!col.nullable && !col.primaryKey) def += ' NOT NULL';
+        const columnName = dbType === 'clickhouse'
+          ? quoteClickHouseIdentifier(col.name)
+          : `"${col.name.replace(/"/g, '""')}"`;
+        const clickHouseType = dbType === 'clickhouse'
+          ? clickHouseColumnType(col)
+          : col.type;
+        let def = `${columnName} ${clickHouseType}`;
+        if (col.primaryKey && dbType !== 'clickhouse') def += ' PRIMARY KEY';
+        if (!col.nullable && !col.primaryKey && dbType !== 'clickhouse') def += ' NOT NULL';
         if (col.defaultValue) def += ` DEFAULT ${col.defaultValue}`;
         return def;
       });
 
-      const qualifiedName = schema ? `"${schema}"."${tableName.trim()}"` : `"${tableName.trim()}"`;
-      const sql = `CREATE TABLE ${qualifiedName} (\n  ${colDefs.join(',\n  ')}\n)`;
+      const escapedTableName = tableName.trim().replace(/"/g, '""');
+      const qualifiedName = dbType === 'clickhouse'
+        ? quoteClickHouseIdentifier(tableName.trim())
+        : schema
+          ? `"${schema.replace(/"/g, '""')}"."${escapedTableName}"`
+          : `"${escapedTableName}"`;
+      const primaryKeyColumns = validColumns
+        .filter((column) => column.primaryKey)
+        .map((column) => (
+          dbType === 'clickhouse'
+            ? quoteClickHouseIdentifier(column.name)
+            : `"${column.name.replace(/"/g, '""')}"`
+        ));
+      const engine = dbType === 'clickhouse'
+        ? `\nENGINE = MergeTree\nORDER BY ${
+          primaryKeyColumns.length > 0
+            ? `(${primaryKeyColumns.join(', ')})`
+            : 'tuple()'
+        }`
+        : '';
+      const sql = `CREATE TABLE ${qualifiedName} (\n  ${colDefs.join(',\n  ')}\n)${engine}`;
       await invoke('execute_query', { connectionId, database, sql });
       notify.success(t('create.success'), `CREATE TABLE ${qualifiedName}`);
       onSuccess();
@@ -162,54 +221,59 @@ export default function CreateTableForm({ connectionId, database, schema, dbType
         </div>
 
         <div className="space-y-2 max-h-60 overflow-y-auto">
-          {columns.map((col, i) => (
-            <div key={i} className="flex items-center gap-2 rounded-md border p-2">
-              <Input
-                className="flex-1 min-w-0"
-                placeholder={t('create.columnName')}
-                value={col.name}
-                onChange={(e) => updateColumn(i, 'name', e.target.value)}
-              />
-              <TypeCombobox
-                value={col.type}
-                options={types}
-                onChange={(v) => updateColumn(i, 'type', v)}
-              />
-              <label className="flex items-center gap-1 text-xs whitespace-nowrap cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5"
-                  checked={col.primaryKey}
-                  onChange={(e) => updateColumn(i, 'primaryKey', e.target.checked)}
+          {columns.map((col, i) => {
+            const nullableUnsupported = dbType === 'clickhouse'
+              && !supportsClickHouseNullable(col.type);
+            return (
+              <div key={i} className="flex items-center gap-2 rounded-md border p-2">
+                <Input
+                  className="flex-1 min-w-0"
+                  placeholder={t('create.columnName')}
+                  value={col.name}
+                  onChange={(e) => updateColumn(i, 'name', e.target.value)}
                 />
-                PK
-              </label>
-              <label className="flex items-center gap-1 text-xs whitespace-nowrap cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5"
-                  checked={col.nullable}
-                  onChange={(e) => updateColumn(i, 'nullable', e.target.checked)}
+                <TypeCombobox
+                  value={col.type}
+                  options={types}
+                  onChange={(v) => updateColumn(i, 'type', v)}
                 />
-                NULL
-              </label>
-              <Input
-                className="w-24 shrink-0"
-                placeholder={t('table.defaultValue')}
-                value={col.defaultValue}
-                onChange={(e) => updateColumn(i, 'defaultValue', e.target.value)}
-              />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 shrink-0"
-                onClick={() => removeColumn(i)}
-                disabled={columns.length <= 1}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          ))}
+                <label className="flex items-center gap-1 text-xs whitespace-nowrap cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5"
+                    checked={col.primaryKey}
+                    onChange={(e) => updateColumn(i, 'primaryKey', e.target.checked)}
+                  />
+                  PK
+                </label>
+                <label className="flex items-center gap-1 text-xs whitespace-nowrap cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5"
+                    checked={col.nullable && !nullableUnsupported}
+                    onChange={(e) => updateColumn(i, 'nullable', e.target.checked)}
+                    disabled={nullableUnsupported}
+                  />
+                  NULL
+                </label>
+                <Input
+                  className="w-24 shrink-0"
+                  placeholder={t('table.defaultValue')}
+                  value={col.defaultValue}
+                  onChange={(e) => updateColumn(i, 'defaultValue', e.target.value)}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0"
+                  onClick={() => removeColumn(i)}
+                  disabled={columns.length <= 1}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            );
+          })}
         </div>
       </div>
 

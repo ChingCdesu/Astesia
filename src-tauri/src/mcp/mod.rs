@@ -726,6 +726,7 @@ impl AstesiaMcp {
             DbType::SQLServer => "sqlserver",
             DbType::MongoDB => "mongodb",
             DbType::Redis => "redis",
+            DbType::ClickHouse => "clickhouse",
         }
     }
 
@@ -735,6 +736,7 @@ impl AstesiaMcp {
             DbType::PostgreSQL => Box::new(PostgreSqlDialect {}),
             DbType::SQLite => Box::new(SQLiteDialect {}),
             DbType::SQLServer => Box::new(MsSqlDialect {}),
+            DbType::ClickHouse => Box::new(GenericDialect),
             DbType::MongoDB | DbType::Redis => Box::new(GenericDialect),
         }
     }
@@ -835,7 +837,11 @@ impl AstesiaMcp {
         }
         if matches!(
             db_type,
-            DbType::MySQL | DbType::PostgreSQL | DbType::SQLite | DbType::SQLServer
+            DbType::MySQL
+                | DbType::PostgreSQL
+                | DbType::SQLite
+                | DbType::SQLServer
+                | DbType::ClickHouse
         ) && database.contains('\'')
         {
             return Err("SQL database 不能包含单引号".to_string());
@@ -847,6 +853,9 @@ impl AstesiaMcp {
             DbType::SQLServer if database.contains(']') => {
                 Err("SQL Server database 不能包含右方括号".to_string())
             }
+            DbType::ClickHouse if database.contains('`') => {
+                Err("ClickHouse database 不能包含反引号".to_string())
+            }
             _ => Ok(()),
         }
     }
@@ -857,7 +866,11 @@ impl AstesiaMcp {
         }
         if matches!(
             db_type,
-            DbType::MySQL | DbType::PostgreSQL | DbType::SQLite | DbType::SQLServer
+            DbType::MySQL
+                | DbType::PostgreSQL
+                | DbType::SQLite
+                | DbType::SQLServer
+                | DbType::ClickHouse
         ) && table.contains('\'')
         {
             return Err("SQL table 不能包含单引号".to_string());
@@ -869,6 +882,9 @@ impl AstesiaMcp {
             }
             DbType::SQLServer if table.contains(']') => {
                 Err("SQL Server table 不能包含右方括号".to_string())
+            }
+            DbType::ClickHouse if table.contains('`') => {
+                Err("ClickHouse table 不能包含反引号".to_string())
             }
             _ => Ok(()),
         }
