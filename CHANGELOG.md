@@ -1,3 +1,8 @@
+## v1.0.9 - 2026-07-26
+
+- fix: restore macOS credential access for ad-hoc builds (500f627)
+
+
 ## v1.0.8 - 2026-07-25
 
 - Add connection groups and tags with schema migration (2796309)
