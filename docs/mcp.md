@@ -145,11 +145,13 @@ into its own user-presence-protected item when that process first needs a
 database password. macOS then chooses Touch ID, Apple Watch, or the local
 account password according to System Settings. The legacy shared item remains
 as a migration bridge so an independently launched sidecar can import the same
-key without exposing it through WebView or MCP payloads. Authentication UI
-requires a graphical login session. Release builds should still sign the App
-and sidecar with stable identities so protected items survive upgrades. Windows
-Credential Manager normally resolves the same single master-key item without an
-interactive prompt.
+key without exposing it through WebView or MCP payloads. If an ad-hoc build
+lacks the entitlement required by the data-protection Keychain, Astesia safely
+continues using that classic Keychain item instead of blocking existing
+encrypted connections. Authentication UI requires a graphical login session.
+Release builds should still sign the App and sidecar with stable identities so
+protected items survive upgrades. Windows Credential Manager normally resolves
+the same single master-key item without an interactive prompt.
 
 Standalone stdio and the bundled verifier run in strict mode: they never read or
 delete an older per-connection system-credential item. If App migration has not

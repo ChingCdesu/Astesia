@@ -185,8 +185,17 @@ impl KeyringBackend for PlatformKeyringBackend {
                     // Each process imports it into its own user-presence item
                     // only when that process first needs a database secret.
                     let secret = master_platform_entry()?.get_secret()?;
-                    set_macos_protected_master(&secret)?;
+                    if let Err(error) = set_macos_protected_master(&secret) {
+                        if !macos_protected_keychain_missing_entitlement(&error) {
+                            return Err(error);
+                        }
+                        log_macos_classic_keychain_fallback();
+                    }
                     Ok(secret)
+                }
+                Err(error) if macos_protected_keychain_missing_entitlement(&error) => {
+                    log_macos_classic_keychain_fallback();
+                    master_platform_entry()?.get_secret()
                 }
                 Err(error) => Err(error),
             }
@@ -200,11 +209,19 @@ impl KeyringBackend for PlatformKeyringBackend {
     fn set_master(&self, secret: &[u8]) -> keyring::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // Write the cross-process migration bridge first. If creating the
-            // protected item fails, no envelope is committed and a retry can
-            // safely import this same key.
+            // Write the cross-process migration bridge first. Provisioned
+            // builds also create a user-presence item. Ad-hoc builds have no
+            // data-protection Keychain access group, so they retain the same
+            // classic Keychain protection used by earlier Astesia releases.
             master_platform_entry()?.set_secret(secret)?;
-            set_macos_protected_master(secret)
+            match set_macos_protected_master(secret) {
+                Ok(()) => Ok(()),
+                Err(error) if macos_protected_keychain_missing_entitlement(&error) => {
+                    log_macos_classic_keychain_fallback();
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -968,6 +985,25 @@ fn map_macos_keychain_error(error: security_framework::base::Error) -> keyring::
         -25_291 | -34_018 => keyring::Error::NoStorageAccess(Box::new(error)),
         _ => keyring::Error::PlatformFailure(Box::new(error)),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_protected_keychain_missing_entitlement(error: &keyring::Error) -> bool {
+    match error {
+        keyring::Error::NoStorageAccess(platform_error)
+        | keyring::Error::PlatformFailure(platform_error) => platform_error
+            .downcast_ref::<security_framework::base::Error>()
+            .is_some_and(|error| error.code() == -34_018),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn log_macos_classic_keychain_fallback() {
+    log::warn!(
+        "macOS data-protection Keychain is unavailable because the process lacks a \
+         Keychain access entitlement; using the classic Keychain master key"
+    );
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -1734,7 +1770,10 @@ mod vault_tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{macos_master_access_control, platform_failure_is_access_denied};
+    use super::{
+        macos_master_access_control, macos_protected_keychain_missing_entitlement,
+        map_macos_keychain_error, platform_failure_is_access_denied,
+    };
     use security_framework::{access_control::SecAccessControl, passwords::AccessControlOptions};
 
     #[test]
@@ -1757,5 +1796,18 @@ mod tests {
         assert!(options.contains(AccessControlOptions::OR));
         SecAccessControl::create_with_flags(options.bits())
             .expect("macOS must accept the Astesia master-key access control");
+    }
+
+    #[test]
+    fn macos_missing_entitlement_uses_classic_keychain_fallback() {
+        let missing_entitlement =
+            map_macos_keychain_error(security_framework::base::Error::from_code(-34_018));
+        assert!(macos_protected_keychain_missing_entitlement(
+            &missing_entitlement
+        ));
+
+        let unavailable =
+            map_macos_keychain_error(security_framework::base::Error::from_code(-25_291));
+        assert!(!macos_protected_keychain_missing_entitlement(&unavailable));
     }
 }
