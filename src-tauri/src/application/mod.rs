@@ -2,12 +2,15 @@ mod catalog_service;
 mod connection_service;
 pub(crate) mod connection_workspace;
 mod connections;
+#[cfg(test)]
+mod engine_smoke_tests;
 mod export_service;
 mod mutation_service;
 mod performance_service;
 mod performance_snapshot;
 mod profile_editor;
 mod query_service;
+mod query_workspace;
 mod transfer;
 
 pub use crate::connection_repository::NativeStateProbe;
@@ -29,6 +32,8 @@ pub use performance_snapshot::{
 };
 pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
 pub use query_service::QueryService;
+pub(crate) use query_workspace::QueryWorkspaceState;
+pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
 pub use transfer::{
     BackupContent, BackupOptions, CopyContent, CopyOptions, DropTableMode, TransferService,
 };

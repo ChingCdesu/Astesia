@@ -1,7 +1,18 @@
 use super::{DbType, SqlRenderError, SqlRenderResult};
 
 pub(crate) struct SqlScript {
-    statements: Vec<String>,
+    statements: Vec<SqlStatement>,
+}
+
+struct SqlStatement {
+    sql: String,
+    source_start: usize,
+}
+
+#[derive(Default)]
+struct PendingStatement {
+    sql: String,
+    source_start: Option<usize>,
 }
 
 impl SqlScript {
@@ -11,14 +22,14 @@ impl SqlScript {
         }
 
         let mut statements = Vec::new();
-        let mut statement = String::new();
+        let mut statement = PendingStatement::default();
         let mut state = ScanState::Normal;
         let mut index = 0;
         while index < source.len() {
             match &state {
                 ScanState::Normal => match source.as_bytes()[index] {
                     b'\'' => {
-                        statement.push('\'');
+                        statement.push_char('\'', index);
                         state = ScanState::SingleQuote {
                             backslash_escapes: string_uses_backslash_escapes(
                                 db_type, source, index,
@@ -27,17 +38,17 @@ impl SqlScript {
                         index += 1;
                     }
                     b'"' => {
-                        statement.push('"');
+                        statement.push_char('"', index);
                         state = ScanState::DoubleQuote;
                         index += 1;
                     }
                     b'`' => {
-                        statement.push('`');
+                        statement.push_char('`', index);
                         state = ScanState::Backtick;
                         index += 1;
                     }
                     b'[' if db_type == DbType::SQLServer => {
-                        statement.push('[');
+                        statement.push_char('[', index);
                         state = ScanState::Bracket;
                         index += 1;
                     }
@@ -58,7 +69,7 @@ impl SqlScript {
                     }
                     b'$' if db_type == DbType::PostgreSQL => {
                         if let Some(delimiter) = dollar_quote_delimiter(&source[index..]) {
-                            statement.push_str(&delimiter);
+                            statement.push_str(&delimiter, index);
                             index += delimiter.len();
                             state = ScanState::DollarQuote(delimiter);
                         } else {
@@ -78,7 +89,7 @@ impl SqlScript {
                         index = push_source_char(source, index, &mut statement);
                     } else if byte == b'\'' {
                         if source.as_bytes().get(index) == Some(&b'\'') {
-                            statement.push('\'');
+                            statement.push_char('\'', index);
                             index += 1;
                         } else {
                             state = ScanState::Normal;
@@ -90,7 +101,7 @@ impl SqlScript {
                     index = push_source_char(source, index, &mut statement);
                     if byte == b'"' {
                         if source.as_bytes().get(index) == Some(&b'"') {
-                            statement.push('"');
+                            statement.push_char('"', index);
                             index += 1;
                         } else {
                             state = ScanState::Normal;
@@ -104,7 +115,7 @@ impl SqlScript {
                         index = push_source_char(source, index, &mut statement);
                     } else if byte == b'`' {
                         if source.as_bytes().get(index) == Some(&b'`') {
-                            statement.push('`');
+                            statement.push_char('`', index);
                             index += 1;
                         } else {
                             state = ScanState::Normal;
@@ -116,7 +127,7 @@ impl SqlScript {
                     index = push_source_char(source, index, &mut statement);
                     if byte == b']' {
                         if source.as_bytes().get(index) == Some(&b']') {
-                            statement.push(']');
+                            statement.push_char(']', index);
                             index += 1;
                         } else {
                             state = ScanState::Normal;
@@ -125,7 +136,7 @@ impl SqlScript {
                 }
                 ScanState::LineComment => {
                     if matches!(source.as_bytes()[index], b'\n' | b'\r') {
-                        statement.push('\n');
+                        statement.push_char('\n', index);
                         state = ScanState::Normal;
                     }
                     index += 1;
@@ -142,7 +153,7 @@ impl SqlScript {
                 }
                 ScanState::DollarQuote(delimiter) => {
                     if source[index..].starts_with(delimiter) {
-                        statement.push_str(delimiter);
+                        statement.push_str(delimiter, index);
                         index += delimiter.len();
                         state = ScanState::Normal;
                     } else {
@@ -171,6 +182,35 @@ impl SqlScript {
 
     pub(crate) fn into_statements(self) -> Vec<String> {
         self.statements
+            .into_iter()
+            .map(|statement| statement.sql)
+            .collect()
+    }
+
+    pub(crate) fn statement_at(&self, cursor_offset: usize) -> Option<&str> {
+        self.statements
+            .iter()
+            .rev()
+            .find(|statement| statement.source_start <= cursor_offset)
+            .or_else(|| self.statements.first())
+            .map(|statement| statement.sql.as_str())
+    }
+}
+
+impl PendingStatement {
+    fn push_char(&mut self, character: char, source_offset: usize) {
+        if self.source_start.is_none() && !character.is_whitespace() {
+            self.source_start = Some(source_offset);
+        }
+        self.sql.push(character);
+    }
+
+    fn push_str(&mut self, value: &str, source_offset: usize) {
+        if self.source_start.is_none() && value.chars().any(|character| !character.is_whitespace())
+        {
+            self.source_start = Some(source_offset);
+        }
+        self.sql.push_str(value);
     }
 }
 
@@ -185,31 +225,38 @@ enum ScanState {
     DollarQuote(String),
 }
 
-fn push_source_char(source: &str, index: usize, target: &mut String) -> usize {
+fn push_source_char(source: &str, index: usize, target: &mut PendingStatement) -> usize {
     let character = source[index..]
         .chars()
         .next()
         .expect("index always points inside a UTF-8 string");
-    target.push(character);
+    target.push_char(character, index);
     index + character.len_utf8()
 }
 
-fn push_separator(statement: &mut String) {
+fn push_separator(statement: &mut PendingStatement) {
     if statement
+        .sql
         .chars()
         .last()
         .is_some_and(|character| !character.is_whitespace())
     {
-        statement.push(' ');
+        statement.sql.push(' ');
     }
 }
 
-fn push_statement(statements: &mut Vec<String>, statement: &mut String) {
-    let trimmed = statement.trim();
+fn push_statement(statements: &mut Vec<SqlStatement>, statement: &mut PendingStatement) {
+    let trimmed = statement.sql.trim();
     if !trimmed.is_empty() {
-        statements.push(trimmed.to_string());
+        statements.push(SqlStatement {
+            sql: trimmed.to_string(),
+            source_start: statement
+                .source_start
+                .expect("non-empty SQL has a source position"),
+        });
     }
-    statement.clear();
+    statement.sql.clear();
+    statement.source_start = None;
 }
 
 fn string_uses_backslash_escapes(db_type: DbType, source: &str, quote_index: usize) -> bool {
@@ -291,5 +338,21 @@ mod tests {
         );
         assert!(SqlScript::parse(DbType::PostgreSQL, "SELECT 'unterminated").is_err());
         assert!(SqlScript::parse(DbType::PostgreSQL, "SELECT 1 /* unterminated").is_err());
+    }
+
+    #[test]
+    fn selects_the_statement_at_or_before_the_cursor() {
+        let source = "-- header\nSELECT 1;\n\n/* gap */\nSELECT '二';";
+        let script = SqlScript::parse(DbType::PostgreSQL, source).unwrap();
+
+        assert_eq!(script.statement_at(0), Some("SELECT 1"));
+        assert_eq!(
+            script.statement_at(source.find("gap").unwrap()),
+            Some("SELECT 1")
+        );
+        assert_eq!(
+            script.statement_at(source.find("二").unwrap()),
+            Some("SELECT '二'")
+        );
     }
 }

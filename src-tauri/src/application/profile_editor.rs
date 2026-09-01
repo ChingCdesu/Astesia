@@ -315,4 +315,36 @@ mod tests {
         assert!(origin.removes_saved_credential(DbType::SQLite));
         assert!(!origin.removes_saved_credential(DbType::PostgreSQL));
     }
+
+    #[test]
+    fn every_supported_engine_accepts_its_native_profile_defaults() {
+        for db_type in DbType::all() {
+            let spec = db_type.profile_spec();
+            let origin = ProfileOrigin::create(format!("{db_type:?}"));
+            let draft = ProfileDraft {
+                db_type,
+                name: format!("{db_type:?}"),
+                endpoint: if spec.is_file() {
+                    ":memory:".to_string()
+                } else {
+                    spec.default_endpoint().to_string()
+                },
+                port: spec.default_port().to_string(),
+                username: spec.default_username().to_string(),
+                password: "disposable-test-password".to_string(),
+                database: spec.default_database().unwrap_or_default().to_string(),
+                group_name: "Milestone 3".to_string(),
+                tags: "native, smoke".to_string(),
+                color: String::new(),
+            };
+
+            let profile = draft
+                .validate(&origin)
+                .unwrap_or_else(|errors| panic!("{db_type:?} defaults failed: {errors:?}"));
+
+            assert_eq!(profile.config().db_type, db_type);
+            assert_eq!(profile.request.group_name.as_deref(), Some("Milestone 3"));
+            assert_eq!(profile.request.tags, ["native", "smoke"]);
+        }
+    }
 }

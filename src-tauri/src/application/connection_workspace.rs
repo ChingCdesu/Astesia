@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use super::{ConnectionWorkspaceSnapshot, LoadedDatabases};
+use super::{ConnectionWorkspaceSnapshot, LoadedDatabases, QueryTarget};
 use crate::connection_repository::ConnectionRepositoryError;
+use crate::db::TableInfo;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConnectionWorkspaceError {
@@ -78,6 +79,14 @@ pub(crate) struct DatabaseLoadRequest {
     request_generation: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectLoadRequest {
+    connection_id: String,
+    database: String,
+    session_generation: u64,
+    request_generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotApply {
     Applied,
@@ -123,6 +132,38 @@ impl DatabaseListState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ObjectListState {
+    Loading {
+        session_generation: u64,
+        request_generation: u64,
+    },
+    Ready {
+        session_generation: u64,
+        objects: Vec<TableInfo>,
+    },
+    Failed {
+        session_generation: u64,
+        error: String,
+    },
+}
+
+impl ObjectListState {
+    fn session_generation(&self) -> u64 {
+        match self {
+            Self::Loading {
+                session_generation, ..
+            }
+            | Self::Ready {
+                session_generation, ..
+            }
+            | Self::Failed {
+                session_generation, ..
+            } => *session_generation,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum SnapshotState {
     Loading,
@@ -145,8 +186,10 @@ pub(crate) struct ConnectionWorkspaceState {
     snapshot_epoch: u64,
     operation_generation: u64,
     database_request_generation: u64,
+    object_request_generation: u64,
     operations: HashMap<String, ProfileOperation>,
     databases: HashMap<String, DatabaseListState>,
+    objects: HashMap<(String, String), ObjectListState>,
 }
 
 impl Default for ConnectionWorkspaceState {
@@ -156,8 +199,10 @@ impl Default for ConnectionWorkspaceState {
             snapshot_epoch: 0,
             operation_generation: 0,
             database_request_generation: 0,
+            object_request_generation: 0,
             operations: HashMap::new(),
             databases: HashMap::new(),
+            objects: HashMap::new(),
         }
     }
 }
@@ -204,6 +249,30 @@ impl ConnectionWorkspaceState {
 
     pub(crate) fn databases(&self, connection_id: &str) -> Option<&DatabaseListState> {
         self.databases.get(connection_id)
+    }
+
+    pub(crate) fn objects(&self, target: &QueryTarget) -> Option<&ObjectListState> {
+        self.objects
+            .get(&(target.connection_id.clone(), target.database.clone()))
+    }
+
+    pub(crate) fn query_target_is_live(&self, target: &QueryTarget) -> bool {
+        let profile_matches = self.snapshot().is_some_and(|snapshot| {
+            snapshot.profiles.iter().any(|profile| {
+                profile.profile.id == target.connection_id
+                    && profile.profile.db_type == target.db_type
+                    && profile.session.generation == Some(target.session_generation)
+            })
+        });
+        let database_matches = matches!(
+            self.databases(&target.connection_id),
+            Some(DatabaseListState::Ready {
+                session_generation,
+                databases,
+            }) if *session_generation == target.session_generation
+                && databases.contains(&target.database)
+        );
+        profile_matches && database_matches
     }
 
     pub(crate) fn begin_refresh(&mut self) -> RefreshRequest {
@@ -333,6 +402,86 @@ impl ConnectionWorkspaceState {
 
     pub(crate) fn clear_database_state(&mut self, connection_id: &str) {
         self.databases.remove(connection_id);
+        self.objects
+            .retain(|(candidate, _), _| candidate != connection_id);
+    }
+
+    pub(crate) fn begin_object_load(&mut self, target: &QueryTarget) -> Option<ObjectLoadRequest> {
+        if !self.query_target_is_live(target) {
+            return None;
+        }
+        let key = (target.connection_id.clone(), target.database.clone());
+        if self
+            .objects
+            .get(&key)
+            .is_some_and(|state| state.session_generation() == target.session_generation)
+        {
+            return None;
+        }
+
+        self.object_request_generation = self.object_request_generation.wrapping_add(1);
+        let request_generation = self.object_request_generation;
+        self.objects.insert(
+            key,
+            ObjectListState::Loading {
+                session_generation: target.session_generation,
+                request_generation,
+            },
+        );
+        Some(ObjectLoadRequest {
+            connection_id: target.connection_id.clone(),
+            database: target.database.clone(),
+            session_generation: target.session_generation,
+            request_generation,
+        })
+    }
+
+    pub(crate) fn finish_object_load(
+        &mut self,
+        request: &ObjectLoadRequest,
+        result: Result<Vec<TableInfo>, String>,
+    ) -> bool {
+        let key = (request.connection_id.clone(), request.database.clone());
+        let target_is_live = self.session_generation(&request.connection_id)
+            == Some(request.session_generation)
+            && matches!(
+                self.databases(&request.connection_id),
+                Some(DatabaseListState::Ready {
+                    session_generation,
+                    databases,
+                }) if *session_generation == request.session_generation
+                    && databases.contains(&request.database)
+            );
+        if !target_is_live
+            || !matches!(
+                self.objects.get(&key),
+                Some(ObjectListState::Loading {
+                    session_generation,
+                    request_generation,
+                }) if *session_generation == request.session_generation
+                    && *request_generation == request.request_generation
+            )
+        {
+            return false;
+        }
+
+        let state = match result {
+            Ok(objects) => ObjectListState::Ready {
+                session_generation: request.session_generation,
+                objects,
+            },
+            Err(error) => ObjectListState::Failed {
+                session_generation: request.session_generation,
+                error,
+            },
+        };
+        self.objects.insert(key, state);
+        true
+    }
+
+    pub(crate) fn clear_object_state(&mut self, target: &QueryTarget) {
+        self.objects
+            .remove(&(target.connection_id.clone(), target.database.clone()));
     }
 
     fn next_snapshot_epoch(&mut self) -> u64 {
@@ -388,6 +537,20 @@ impl ConnectionWorkspaceState {
                 .profiles
                 .iter()
                 .any(|profile| profile.profile.id == *connection_id)
+        });
+        self.objects.retain(|(connection_id, database), objects| {
+            snapshot.profiles.iter().any(|profile| {
+                profile.profile.id == *connection_id
+                    && profile.session.generation == Some(objects.session_generation())
+                    && matches!(
+                        self.databases.get(connection_id),
+                        Some(DatabaseListState::Ready {
+                            session_generation,
+                            databases,
+                        }) if *session_generation == objects.session_generation()
+                            && databases.contains(database)
+                    )
+            })
         });
         self.snapshot = SnapshotState::Ready {
             snapshot,
@@ -660,5 +823,114 @@ mod tests {
             .expect("reconnect starts");
         state.finish_operation(&reconnect, Ok(connected_snapshot(2, profile, 5)));
         assert!(state.begin_database_load("primary").is_some());
+    }
+
+    #[test]
+    fn query_targets_require_the_same_live_session_and_loaded_database() {
+        let mut state = ConnectionWorkspaceState::default();
+        let refresh = state.begin_refresh();
+        state.finish_refresh(
+            refresh,
+            Ok(connected_snapshot(
+                1,
+                profile("primary", DbType::PostgreSQL),
+                7,
+            )),
+        );
+        let request = state.begin_database_load("primary").unwrap();
+        state.finish_database_load(
+            &request,
+            Ok(LoadedDatabases {
+                session_generation: 7,
+                databases: vec!["app".to_string()],
+            }),
+        );
+
+        let mut target = QueryTarget {
+            connection_id: "primary".to_string(),
+            connection_name: "Primary".to_string(),
+            database: "app".to_string(),
+            db_type: DbType::PostgreSQL,
+            session_generation: 7,
+        };
+        assert!(state.query_target_is_live(&target));
+
+        target.session_generation = 8;
+        assert!(!state.query_target_is_live(&target));
+        target.session_generation = 7;
+        target.database = "missing".to_string();
+        assert!(!state.query_target_is_live(&target));
+    }
+
+    #[test]
+    fn object_loading_is_lazy_and_rejects_stale_session_results() {
+        let mut state = ConnectionWorkspaceState::default();
+        let profile = profile("primary", DbType::PostgreSQL);
+        let refresh = state.begin_refresh();
+        state.finish_refresh(refresh, Ok(connected_snapshot(1, profile.clone(), 7)));
+        let database_request = state.begin_database_load("primary").unwrap();
+        state.finish_database_load(
+            &database_request,
+            Ok(LoadedDatabases {
+                session_generation: 7,
+                databases: vec!["app".to_string()],
+            }),
+        );
+        let target = QueryTarget {
+            connection_id: "primary".to_string(),
+            connection_name: "Primary".to_string(),
+            database: "app".to_string(),
+            db_type: DbType::PostgreSQL,
+            session_generation: 7,
+        };
+        let request = state
+            .begin_object_load(&target)
+            .expect("object load starts");
+        assert!(state.begin_object_load(&target).is_none());
+
+        let reconnect = state
+            .begin_operation("primary", ProfileOperationKind::Connecting)
+            .expect("reconnect starts");
+        state.finish_operation(&reconnect, Ok(connected_snapshot(2, profile, 8)));
+
+        assert!(!state.finish_object_load(&request, Ok(Vec::new())));
+        assert!(state.objects(&target).is_none());
+    }
+
+    #[test]
+    fn loaded_objects_are_scoped_to_database_and_session() {
+        let mut state = ConnectionWorkspaceState::default();
+        let refresh = state.begin_refresh();
+        state.finish_refresh(
+            refresh,
+            Ok(connected_snapshot(1, profile("primary", DbType::SQLite), 3)),
+        );
+        let database_request = state.begin_database_load("primary").unwrap();
+        state.finish_database_load(
+            &database_request,
+            Ok(LoadedDatabases {
+                session_generation: 3,
+                databases: vec!["main".to_string()],
+            }),
+        );
+        let target = QueryTarget {
+            connection_id: "primary".to_string(),
+            connection_name: "Primary".to_string(),
+            database: "main".to_string(),
+            db_type: DbType::SQLite,
+            session_generation: 3,
+        };
+        let request = state.begin_object_load(&target).unwrap();
+        let table = TableInfo {
+            reference: crate::db::TableRef::unqualified("users"),
+            row_count: Some(4),
+            comment: None,
+        };
+
+        assert!(state.finish_object_load(&request, Ok(vec![table])));
+        assert!(matches!(
+            state.objects(&target),
+            Some(ObjectListState::Ready { objects, .. }) if objects.len() == 1
+        ));
     }
 }

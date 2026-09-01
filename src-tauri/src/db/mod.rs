@@ -1,5 +1,7 @@
 pub mod clickhouse;
 mod engine;
+#[cfg(test)]
+mod engine_smoke_tests;
 pub mod mongo;
 pub mod mysql;
 pub mod postgres;

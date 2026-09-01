@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use redis::{AsyncCommands, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
+use std::collections::HashSet;
 use std::time::Instant;
 
 use super::{
     ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, QueryResult, TableInfo, TableRef,
 };
+
+const SCAN_BATCH_SIZE: usize = 500;
 
 pub struct RedisDriver {
     config: ConnectionConfig,
@@ -87,16 +90,33 @@ impl DatabaseDriver for RedisDriver {
 
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>> {
         let mut conn = self.selected_connection(database).await?;
-        let keys: Vec<String> = redis::cmd("KEYS").arg("*").query_async(&mut conn).await?;
-        keys.into_iter()
-            .map(|name| -> anyhow::Result<_> {
-                Ok(TableInfo {
-                    reference: TableRef::unqualified(name),
-                    row_count: None,
-                    comment: Some("key".to_string()),
-                })
+        let mut keys = HashSet::new();
+        let mut cursor = 0_u64;
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("*")
+                .arg("COUNT")
+                .arg(SCAN_BATCH_SIZE)
+                .query_async(&mut conn)
+                .await?;
+            keys.extend(batch);
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+        let mut keys = keys.into_iter().collect::<Vec<_>>();
+        keys.sort_unstable();
+        Ok(keys
+            .into_iter()
+            .map(|name| TableInfo {
+                reference: TableRef::unqualified(name),
+                row_count: None,
+                comment: Some("key".to_string()),
             })
-            .collect()
+            .collect())
     }
 
     async fn get_columns(
