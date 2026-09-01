@@ -98,6 +98,10 @@ Exit condition: all seven engines can be configured, tested, connected, disconne
 
 ### 4. Port querying as the first complete vertical slice
 
+Status: In progress since 2026-09-01. The first slice adds selection/current-statement Explain
+through Application Core and the native Query Item for all five SQL engines, including
+session-safe SQL Server `SHOWPLAN_ALL` cleanup.
+
 - Wrap Zed `Editor` in an Astesia-owned `QueryItem` containing connection context, result state, execution state, and file state.
 - Bundle SQL grammar and highlighting locally; do not initialize the Zed extension marketplace.
 - Port Astesia's dialect keywords, schema/table/column completion, identifier quoting, statement splitter, current-statement execution, selection execution, and sequential multi-statement errors.

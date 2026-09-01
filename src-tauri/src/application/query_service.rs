@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::db::{QueryResult, StatementResult, TableRef};
 
 use super::connections::ConnectionManager;
@@ -38,6 +40,23 @@ impl QueryService {
             .execute_statements(database, statements)
             .await
             .map_err(|error| format!("查询失败: {error}"))
+    }
+
+    pub async fn explain(
+        &self,
+        connection_id: &str,
+        database: &str,
+        statement: String,
+    ) -> Result<StatementResult, String> {
+        let handle = self.manager.driver(connection_id).await?;
+        let driver = handle.lock_active().await?;
+        let started = Instant::now();
+        Ok(match driver.explain(database, &statement).await {
+            Ok(result) => StatementResult::from_query_result(statement, result),
+            Err(error) => {
+                StatementResult::from_error(statement, error, started.elapsed().as_millis() as u64)
+            }
+        })
     }
 
     pub async fn table_data(

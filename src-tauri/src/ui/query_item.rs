@@ -7,15 +7,18 @@ use serde_json::Value;
 use zed_ui::prelude::*;
 
 use crate::application::{
-    Application, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionScope, QueryTarget,
-    QueryWorkspaceState,
+    Application, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionRequest,
+    QueryExecutionScope, QueryOperation, QueryTarget, QueryWorkspaceState,
 };
-use crate::db::StatementResult;
+use crate::db::{ExplainMode, StatementResult};
 
 use super::localization::text;
 use super::shell::ShellSettings;
 
-actions!(astesia_query, [ExecuteQuery, ExecuteCurrentQuery]);
+actions!(
+    astesia_query,
+    [ExecuteQuery, ExecuteCurrentQuery, ExplainQuery]
+);
 
 pub(super) fn bind_query_item_keys(cx: &mut App) {
     cx.bind_keys([
@@ -129,6 +132,10 @@ impl QueryItem {
         self.execute(QueryExecutionScope::Current, cx);
     }
 
+    fn explain(&mut self, _: &ExplainQuery, _: &mut Window, cx: &mut Context<Self>) {
+        self.execute_explain(cx);
+    }
+
     fn execute_all_click(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.execute(QueryExecutionScope::All, cx);
     }
@@ -137,12 +144,44 @@ impl QueryItem {
         self.execute(QueryExecutionScope::Current, cx);
     }
 
+    fn explain_click(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.execute_explain(cx);
+    }
+
     fn execute(&mut self, scope: QueryExecutionScope, cx: &mut Context<Self>) {
         if self.state.is_running() {
             return;
         }
 
-        let document = self.editor.update(cx, |editor, cx| {
+        let document = self.query_document(cx);
+        let request = match self.state.begin_execution(document, scope) {
+            Ok(request) => request,
+            Err(_) => {
+                cx.notify();
+                return;
+            }
+        };
+        self.run_request(request, cx);
+    }
+
+    fn execute_explain(&mut self, cx: &mut Context<Self>) {
+        if self.state.is_running() {
+            return;
+        }
+
+        let document = self.query_document(cx);
+        let request = match self.state.begin_explain(document) {
+            Ok(request) => request,
+            Err(_) => {
+                cx.notify();
+                return;
+            }
+        };
+        self.run_request(request, cx);
+    }
+
+    fn query_document(&self, cx: &mut Context<Self>) -> QueryDocument {
+        self.editor.update(cx, |editor, cx| {
             let display_snapshot = editor.display_snapshot(cx);
             let selection = editor
                 .selections
@@ -151,26 +190,31 @@ impl QueryItem {
             let start: usize = selection.start.0;
             let end: usize = selection.end.0;
             QueryDocument::new(editor.text(cx), start..end)
-        });
-        let request = match self.state.begin_execution(document, scope) {
-            Ok(request) => request,
-            Err(_) => {
-                cx.notify();
-                return;
-            }
-        };
+        })
+    }
+
+    fn run_request(&mut self, request: QueryExecutionRequest, cx: &mut Context<Self>) {
         cx.notify();
 
         let application = self.application.clone();
         let connection_id = request.target.connection_id.clone();
         let database = request.target.database.clone();
-        let statements = request.statements.clone();
+        let operation = request.operation.clone();
         let language = self.settings.read(cx).language();
         let execution = gpui_tokio::Tokio::spawn(cx, async move {
-            application
-                .queries()
-                .execute_statements(&connection_id, &database, statements)
-                .await
+            match operation {
+                QueryOperation::Statements(statements) => {
+                    application
+                        .queries()
+                        .execute_statements(&connection_id, &database, statements)
+                        .await
+                }
+                QueryOperation::Explain(statement) => application
+                    .queries()
+                    .explain(&connection_id, &database, statement)
+                    .await
+                    .map(|result| vec![result]),
+            }
         });
         cx.spawn(async move |item, cx| {
             let result = match execution.await {
@@ -426,6 +470,8 @@ impl Render for QueryItem {
         let busy = self.state.is_running();
         let target = self.state.target();
         let can_execute = target.is_some_and(|target| target.db_type.capabilities().sql);
+        let can_explain =
+            target.is_some_and(|target| target.db_type.capabilities().explain != ExplainMode::None);
         let target_label = target
             .map(|target| format!("{} / {}", target.connection_name, target.database))
             .unwrap_or_else(|| text(language, "未选择数据库", "No database selected").to_string());
@@ -450,6 +496,7 @@ impl Render for QueryItem {
             .key_context("QueryItem")
             .on_action(cx.listener(Self::execute_all))
             .on_action(cx.listener(Self::execute_current))
+            .on_action(cx.listener(Self::explain))
             .size_full()
             .overflow_hidden()
             .child(
@@ -480,6 +527,12 @@ impl Render for QueryItem {
                         .disabled(busy || !can_execute)
                         .key_binding(zed_ui::KeyBinding::for_action(&ExecuteCurrentQuery, cx))
                         .on_click(cx.listener(Self::execute_current_click)),
+                    )
+                    .child(
+                        Button::new("explain-query", text(language, "执行计划", "Explain"))
+                            .size(ButtonSize::Compact)
+                            .disabled(busy || !can_explain)
+                            .on_click(cx.listener(Self::explain_click)),
                     )
                     .child(
                         Button::new("clear-query", text(language, "清空", "Clear"))

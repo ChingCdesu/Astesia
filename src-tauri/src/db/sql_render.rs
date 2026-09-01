@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::DbType;
+use super::{DbType, ExplainMode};
 
 pub type SqlRenderResult<T> = Result<T, SqlRenderError>;
 
@@ -138,6 +138,28 @@ impl fmt::Display for TableRef {
 impl SqlDialect {
     pub(crate) const fn new(db_type: DbType) -> Self {
         Self { db_type }
+    }
+
+    pub(crate) fn build_explain_statement(self, statement: &str) -> SqlRenderResult<String> {
+        let statement = statement.trim().trim_end_matches(';').trim_end();
+        if statement.is_empty() {
+            return Err(SqlRenderError::InvalidInput(
+                "Explain requires one SQL statement".to_string(),
+            ));
+        }
+
+        match self.db_type.capabilities().explain {
+            ExplainMode::Standard => Ok(format!("EXPLAIN {statement}")),
+            ExplainMode::SqliteQueryPlan => Ok(format!("EXPLAIN QUERY PLAN {statement}")),
+            ExplainMode::SqlServerShowplanAll => Err(SqlRenderError::Unsupported {
+                db_type: self.db_type,
+                operation: "render standalone SQL Server Explain",
+            }),
+            ExplainMode::None => Err(SqlRenderError::Unsupported {
+                db_type: self.db_type,
+                operation: "Explain",
+            }),
+        }
     }
 
     pub(crate) fn quote_identifier(self, identifier: &str) -> SqlRenderResult<String> {
@@ -670,6 +692,28 @@ mod tests {
             .is_err());
         assert!(SqlDialect::new(DbType::MongoDB)
             .quote_identifier("users")
+            .is_err());
+    }
+
+    #[test]
+    fn renders_explain_with_the_engine_policy() {
+        assert_eq!(
+            SqlDialect::new(DbType::PostgreSQL)
+                .build_explain_statement(" SELECT 1; ")
+                .unwrap(),
+            "EXPLAIN SELECT 1"
+        );
+        assert_eq!(
+            SqlDialect::new(DbType::SQLite)
+                .build_explain_statement("SELECT * FROM events")
+                .unwrap(),
+            "EXPLAIN QUERY PLAN SELECT * FROM events"
+        );
+        assert!(SqlDialect::new(DbType::SQLServer)
+            .build_explain_statement("SELECT 1")
+            .is_err());
+        assert!(SqlDialect::new(DbType::Redis)
+            .build_explain_statement("GET key")
             .is_err());
     }
 

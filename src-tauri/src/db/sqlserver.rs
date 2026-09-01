@@ -336,6 +336,31 @@ impl DatabaseDriver for SqlServerDriver {
         run_mssql_query(&mut client, &full_sql).await
     }
 
+    async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        let use_database = use_database_sql(database)?;
+        client.query(use_database.as_str(), &[]).await?;
+        run_mssql_query(&mut client, "SET SHOWPLAN_ALL ON").await?;
+
+        // SHOWPLAN_ALL is session-scoped, so cleanup must run even when plan generation fails.
+        let plan = run_mssql_query(&mut client, statement).await;
+        let cleanup = run_mssql_query(&mut client, "SET SHOWPLAN_ALL OFF").await;
+        match (plan, cleanup) {
+            (Ok(plan), Ok(_)) => Ok(plan),
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                "Failed to disable SQL Server SHOWPLAN_ALL: {cleanup_error}"
+            )),
+            (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                "Explain failed: {error}; disabling SQL Server SHOWPLAN_ALL also failed: {cleanup_error}"
+            )),
+        }
+    }
+
     async fn execute_statements(
         &self,
         database: &str,

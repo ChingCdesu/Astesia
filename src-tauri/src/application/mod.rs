@@ -32,8 +32,8 @@ pub use performance_snapshot::{
 };
 pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
 pub use query_service::QueryService;
-pub(crate) use query_workspace::QueryWorkspaceState;
 pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
+pub(crate) use query_workspace::{QueryExecutionRequest, QueryOperation, QueryWorkspaceState};
 pub use transfer::{
     BackupContent, BackupOptions, CopyContent, CopyOptions, DropTableMode, TransferService,
 };
