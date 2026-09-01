@@ -1,16 +1,27 @@
 pub mod clickhouse;
+mod engine;
+pub mod mongo;
 pub mod mysql;
 pub mod postgres;
+pub mod redis_db;
+mod sql_render;
+mod sql_script;
 pub mod sqlite;
 pub mod sqlserver;
-pub mod mongo;
-pub mod redis_db;
+
+pub use engine::{
+    EngineCapabilities, EngineProfileSpec, EnumMode, ExplainMode, IndexMode, PerformanceMode,
+    RowMutationMode, TableCopyMode,
+};
+pub use sql_render::TableRef;
+pub(crate) use sql_render::{SqlDialect, SqlRenderError, SqlRenderResult};
+pub(crate) use sql_script::SqlScript;
+
+use std::{error::Error, fmt};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// Format raw bytes as a hex string with the given prefix — `\x` for
-/// PostgreSQL `bytea` (matching psql/pgAdmin), `0x` for MySQL / SQL Server binary.
 pub(crate) fn bytes_to_hex(bytes: &[u8], prefix: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(prefix.len() + bytes.len() * 2);
@@ -22,15 +33,13 @@ pub(crate) fn bytes_to_hex(bytes: &[u8], prefix: &str) -> String {
     s
 }
 
-/// Convert an `f64` to a JSON number, mapping non-finite values (NaN / ±Inf) to null.
 pub(crate) fn f64_to_json(v: f64) -> serde_json::Value {
     serde_json::Number::from_f64(v)
         .map(serde_json::Value::Number)
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Convert an `f32` to a JSON number, round-tripping through its shortest decimal
-/// representation to avoid f32→f64 noise (e.g. 1.1_f32 → 1.1, not 1.100000023841858).
+// The shortest decimal representation avoids exposing f32-to-f64 noise in JSON.
 pub(crate) fn f32_to_json(v: f32) -> serde_json::Value {
     v.to_string()
         .parse::<f64>()
@@ -53,7 +62,7 @@ pub struct ConnectionConfig {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum DbType {
     MySQL,
@@ -65,7 +74,19 @@ pub enum DbType {
     ClickHouse,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) fn create_driver(config: &ConnectionConfig) -> Box<dyn DatabaseDriver> {
+    match config.db_type {
+        DbType::MySQL => Box::new(mysql::MySqlDriver::new(config.clone())),
+        DbType::PostgreSQL => Box::new(postgres::PostgresDriver::new(config.clone())),
+        DbType::SQLite => Box::new(sqlite::SqliteDriver::new(config.clone())),
+        DbType::SQLServer => Box::new(sqlserver::SqlServerDriver::new(config.clone())),
+        DbType::MongoDB => Box::new(mongo::MongoDriver::new(config.clone())),
+        DbType::Redis => Box::new(redis_db::RedisDriver::new(config.clone())),
+        DbType::ClickHouse => Box::new(clickhouse::ClickHouseDriver::new(config.clone())),
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Vec<serde_json::Value>>,
@@ -122,8 +143,8 @@ pub struct ColumnInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
-    pub name: String,
-    pub schema: Option<String>,
+    #[serde(flatten)]
+    pub reference: TableRef,
     pub row_count: Option<i64>,
     pub comment: Option<String>,
 }
@@ -165,13 +186,22 @@ pub struct TriggerInfo {
     pub timing: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ForeignKeyInfo {
     pub name: String,
-    pub from_table: String,
+    #[serde(serialize_with = "serialize_table_ref_name")]
+    pub from_table: TableRef,
     pub from_columns: Vec<String>,
-    pub to_table: String,
+    #[serde(serialize_with = "serialize_table_ref_name")]
+    pub to_table: TableRef,
     pub to_columns: Vec<String>,
+}
+
+fn serialize_table_ref_name<S>(table: &TableRef, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(table.name())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +210,30 @@ pub struct UserInfo {
     pub host: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedFeature {
+    pub engine: DbType,
+    pub feature: &'static str,
+}
+
+impl UnsupportedFeature {
+    pub const fn new(engine: DbType, feature: &'static str) -> Self {
+        Self { engine, feature }
+    }
+}
+
+impl fmt::Display for UnsupportedFeature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} is not supported for {:?}",
+            self.feature, self.engine
+        )
+    }
+}
+
+impl Error for UnsupportedFeature {}
+
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;
@@ -187,15 +241,20 @@ pub trait DatabaseDriver: Send + Sync {
     async fn test_connection(&self) -> anyhow::Result<bool>;
     async fn get_databases(&self) -> anyhow::Result<Vec<String>>;
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>>;
-    async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>>;
-    async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>>;
+    async fn get_columns(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>>;
+    async fn get_indexes(
+        &self,
+        _database: &str,
+        _table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "indexes").into())
+    }
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult>;
-    /// Execute multiple SQL statements sequentially, returning per-statement
-    /// results. Drivers that support transactions (e.g. MySQL, PostgreSQL,
-    /// SQLite, SQL Server) override this to run all statements on a single
-    /// connection so BEGIN/COMMIT/ROLLBACK work as expected. Stops at the first
-    /// statement that errors and returns the results collected so far plus the
-    /// failing statement.
+    /// Transactional drivers override this to keep the batch on one connection.
     async fn execute_statements(
         &self,
         database: &str,
@@ -218,35 +277,100 @@ pub trait DatabaseDriver: Send + Sync {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult>;
+    async fn set_key(
+        &self,
+        _database: &str,
+        _key: &str,
+        _value: &str,
+        _ttl_seconds: Option<u64>,
+    ) -> anyhow::Result<()> {
+        Err(UnsupportedFeature::new(self.db_type(), "set key").into())
+    }
+    async fn delete_key(&self, _database: &str, _key: &str) -> anyhow::Result<u64> {
+        Err(UnsupportedFeature::new(self.db_type(), "delete key").into())
+    }
     fn db_type(&self) -> DbType;
+    async fn get_views(&self, _database: &str) -> anyhow::Result<Vec<ViewInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "views").into())
+    }
+    async fn get_functions(&self, _database: &str) -> anyhow::Result<Vec<FunctionInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "functions").into())
+    }
+    async fn get_procedures(&self, _database: &str) -> anyhow::Result<Vec<ProcedureInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "procedures").into())
+    }
+    async fn get_triggers(&self, _database: &str) -> anyhow::Result<Vec<TriggerInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "triggers").into())
+    }
+    async fn get_foreign_keys(
+        &self,
+        _database: &str,
+        _table: &TableRef,
+    ) -> anyhow::Result<Vec<ForeignKeyInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "foreign keys").into())
+    }
+    async fn get_users(&self) -> anyhow::Result<Vec<UserInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "users").into())
+    }
 
-    async fn get_views(&self, _database: &str) -> anyhow::Result<Vec<ViewInfo>> { Ok(vec![]) }
-    async fn get_functions(&self, _database: &str) -> anyhow::Result<Vec<FunctionInfo>> { Ok(vec![]) }
-    async fn get_procedures(&self, _database: &str) -> anyhow::Result<Vec<ProcedureInfo>> { Ok(vec![]) }
-    async fn get_triggers(&self, _database: &str) -> anyhow::Result<Vec<TriggerInfo>> { Ok(vec![]) }
-    async fn get_foreign_keys(&self, _database: &str, _table: &str) -> anyhow::Result<Vec<ForeignKeyInfo>> { Ok(vec![]) }
-    async fn get_users(&self) -> anyhow::Result<Vec<UserInfo>> { Ok(vec![]) }
+    async fn get_enum_values(
+        &self,
+        _database: &str,
+        _enum_type: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        Err(UnsupportedFeature::new(self.db_type(), "enum values").into())
+    }
 
-    async fn get_enum_values(&self, _database: &str, _enum_type: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+    async fn get_schemas(&self, _database: &str) -> anyhow::Result<Vec<String>> {
+        Err(UnsupportedFeature::new(self.db_type(), "schemas").into())
+    }
 
-    async fn get_schemas(&self, _database: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-
-    async fn get_create_table_sql(&self, _database: &str, _table: &str) -> anyhow::Result<String> {
-        Err(anyhow::anyhow!("Not supported for this database type"))
+    async fn get_create_table_sql(
+        &self,
+        _database: &str,
+        _table: &TableRef,
+    ) -> anyhow::Result<String> {
+        Err(UnsupportedFeature::new(self.db_type(), "create table SQL").into())
     }
 }
 
-impl Default for QueryResult {
-    fn default() -> Self {
-        Self {
-            columns: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: 0,
-        }
+#[cfg(test)]
+mod table_identity_tests {
+    use serde_json::json;
+
+    use super::{ForeignKeyInfo, TableInfo, TableRef};
+
+    #[test]
+    fn table_and_foreign_key_wire_shapes_remain_compatible() {
+        let table = TableRef::qualified("billing.v2", "account.history");
+        let table_info = TableInfo {
+            reference: table.clone(),
+            row_count: None,
+            comment: None,
+        };
+        assert_eq!(
+            serde_json::to_value(table_info).unwrap(),
+            json!({
+                "name": "account.history",
+                "schema": "billing.v2",
+                "row_count": null,
+                "comment": null,
+            })
+        );
+
+        let foreign_key = ForeignKeyInfo {
+            name: "fk_account".to_string(),
+            from_table: table,
+            from_columns: vec!["parent_id".to_string()],
+            to_table: TableRef::qualified("billing.v2", "parent.table"),
+            to_columns: vec!["id".to_string()],
+        };
+        let serialized = serde_json::to_value(foreign_key).unwrap();
+        assert_eq!(serialized["from_table"], "account.history");
+        assert_eq!(serialized["to_table"], "parent.table");
     }
 }

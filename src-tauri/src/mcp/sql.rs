@@ -1,44 +1,11 @@
-use std::error::Error;
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::db::DbType;
+use crate::db::{SqlDialect, SqlRenderError, SqlRenderResult, SqlScript, TableRef};
 
-pub type SqlBuildResult<T> = Result<T, SqlBuildError>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum SqlBuildError {
-    Unsupported {
-        db_type: DbType,
-        operation: &'static str,
-    },
-    InvalidIdentifier(String),
-    InvalidInput(String),
-    InvalidCreateSql(String),
-}
-
-impl fmt::Display for SqlBuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unsupported { db_type, operation } => {
-                write!(f, "{operation} is not supported for {db_type:?}")
-            }
-            Self::InvalidIdentifier(message)
-            | Self::InvalidInput(message)
-            | Self::InvalidCreateSql(message) => f.write_str(message),
-        }
-    }
-}
-
-impl Error for SqlBuildError {}
-
-impl From<SqlBuildError> for String {
-    fn from(error: SqlBuildError) -> Self {
-        error.to_string()
-    }
-}
+pub type SqlBuildResult<T> = SqlRenderResult<T>;
+pub type SqlBuildError = SqlRenderError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,45 +48,40 @@ impl ObjectKind {
 
 fn unsupported(db_type: &DbType, operation: &'static str) -> SqlBuildError {
     SqlBuildError::Unsupported {
-        db_type: db_type.clone(),
+        db_type: *db_type,
         operation,
     }
 }
 
 fn ensure_relational(db_type: &DbType, operation: &'static str) -> SqlBuildResult<()> {
-    match db_type {
-        DbType::MySQL
-        | DbType::PostgreSQL
-        | DbType::SQLite
-        | DbType::SQLServer
-        | DbType::ClickHouse => Ok(()),
-        DbType::MongoDB | DbType::Redis => Err(unsupported(db_type, operation)),
+    if db_type.capabilities().sql {
+        Ok(())
+    } else {
+        Err(unsupported(db_type, operation))
     }
 }
 
 fn ensure_schema_support(db_type: &DbType, operation: &'static str) -> SqlBuildResult<()> {
-    match db_type {
-        DbType::MySQL | DbType::PostgreSQL | DbType::SQLServer => Ok(()),
-        DbType::SQLite | DbType::MongoDB | DbType::Redis | DbType::ClickHouse => {
-            Err(unsupported(db_type, operation))
-        }
+    if db_type.capabilities().schema_management {
+        Ok(())
+    } else {
+        Err(unsupported(db_type, operation))
     }
 }
 
-fn ensure_object_support(
+pub(super) fn ensure_object_operation(
     db_type: &DbType,
     kind: ObjectKind,
     action: &'static str,
 ) -> SqlBuildResult<()> {
-    let supported = matches!(
-        (db_type, kind),
-        (DbType::MySQL | DbType::PostgreSQL | DbType::SQLServer, _)
-            | (DbType::SQLite, ObjectKind::View | ObjectKind::Trigger)
-            | (
-                DbType::ClickHouse,
-                ObjectKind::View | ObjectKind::Function | ObjectKind::Database
-            )
-    );
+    let capabilities = db_type.capabilities();
+    let supported = match kind {
+        ObjectKind::View => capabilities.views,
+        ObjectKind::Function => capabilities.functions,
+        ObjectKind::Procedure => capabilities.procedures,
+        ObjectKind::Trigger => capabilities.triggers,
+        ObjectKind::Database => capabilities.database_management,
+    };
 
     if supported {
         Ok(())
@@ -128,102 +90,12 @@ fn ensure_object_support(
     }
 }
 
-fn validate_identifier_part(identifier: &str) -> SqlBuildResult<()> {
-    if identifier.is_empty() {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "identifier must not be empty".to_string(),
-        ));
-    }
-    if identifier.trim() != identifier {
-        return Err(SqlBuildError::InvalidIdentifier(format!(
-            "identifier must not have leading or trailing whitespace: {identifier:?}"
-        )));
-    }
-    if identifier.chars().count() > 128 {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "identifier components must not exceed 128 characters".to_string(),
-        ));
-    }
-    if identifier.chars().any(char::is_control) {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "identifier must not contain control characters".to_string(),
-        ));
-    }
-    if identifier == "*" {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "wildcards are not valid object identifiers".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn qualified_parts(name: &str) -> SqlBuildResult<Vec<&str>> {
-    if name.is_empty() {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "qualified name must not be empty".to_string(),
-        ));
-    }
-
-    let parts: Vec<&str> = name.split('.').collect();
-    if parts.len() > 4 {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "qualified name must have at most four components".to_string(),
-        ));
-    }
-    for part in &parts {
-        validate_identifier_part(part)?;
-    }
-    Ok(parts)
-}
-
-/// Quote one identifier component and escape the dialect's closing delimiter.
-///
-/// Dotted names are intentionally rejected here. Use [`quote_qualified_name`]
-/// when a database/schema-qualified object name is expected.
 pub fn quote_identifier(db_type: &DbType, identifier: &str) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "quote SQL identifier")?;
-    validate_identifier_part(identifier)?;
-    if identifier.contains('.') {
-        return Err(SqlBuildError::InvalidIdentifier(
-            "identifier component must not contain '.', use quote_qualified_name".to_string(),
-        ));
-    }
-
-    Ok(match db_type {
-        DbType::MySQL => {
-            format!("`{}`", identifier.replace('`', "``"))
-        }
-        DbType::ClickHouse => {
-            let escaped = identifier.replace('\\', "\\\\").replace('`', "\\`");
-            format!("`{escaped}`")
-        }
-        DbType::PostgreSQL | DbType::SQLite => {
-            format!("\"{}\"", identifier.replace('"', "\"\""))
-        }
-        DbType::SQLServer => format!("[{}]", identifier.replace(']', "]]")),
-        DbType::MongoDB | DbType::Redis => unreachable!("relational databases checked above"),
-    })
+    SqlDialect::new(*db_type).quote_identifier(identifier)
 }
 
-/// Quote every component of an unquoted dotted name independently.
 pub fn quote_qualified_name(db_type: &DbType, name: &str) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "quote SQL qualified name")?;
-    let parts = qualified_parts(name)?;
-    let max_parts = match db_type {
-        DbType::MySQL | DbType::PostgreSQL | DbType::SQLite | DbType::ClickHouse => 2,
-        DbType::SQLServer => 4,
-        DbType::MongoDB | DbType::Redis => unreachable!("relational databases checked above"),
-    };
-    if parts.len() > max_parts {
-        return Err(SqlBuildError::InvalidIdentifier(format!(
-            "{db_type:?} qualified names may have at most {max_parts} components"
-        )));
-    }
-    parts
-        .into_iter()
-        .map(|part| quote_identifier(db_type, part))
-        .collect::<SqlBuildResult<Vec<_>>>()
-        .map(|parts| parts.join("."))
+    SqlDialect::new(*db_type).quote_qualified_name(name)
 }
 
 pub fn build_create_schema(db_type: &DbType, name: &str) -> SqlBuildResult<String> {
@@ -259,6 +131,7 @@ pub fn build_drop_schema(db_type: &DbType, name: &str, cascade: bool) -> SqlBuil
 pub fn build_create_table(db_type: &DbType, sql: &str) -> SqlBuildResult<String> {
     ensure_relational(db_type, "create table")?;
     validate_create_sql_prefixes(
+        db_type,
         sql,
         &[
             "CREATE TABLE",
@@ -283,7 +156,7 @@ pub fn build_create_object(
     kind: ObjectKind,
     sql: &str,
 ) -> SqlBuildResult<String> {
-    ensure_object_support(db_type, kind, "create")?;
+    ensure_object_operation(db_type, kind, "create")?;
     let prefix = match kind {
         ObjectKind::View => "CREATE VIEW",
         ObjectKind::Function => "CREATE FUNCTION",
@@ -291,12 +164,12 @@ pub fn build_create_object(
         ObjectKind::Trigger => "CREATE TRIGGER",
         ObjectKind::Database => "CREATE DATABASE",
     };
-    validate_create_sql(sql, prefix)
+    validate_create_sql(db_type, sql, prefix)
 }
 
 #[cfg(test)]
 pub fn build_drop_object(db_type: &DbType, kind: ObjectKind, name: &str) -> SqlBuildResult<String> {
-    ensure_object_support(db_type, kind, "drop")?;
+    ensure_object_operation(db_type, kind, "drop")?;
 
     if kind == ObjectKind::Database {
         return Ok(format!(
@@ -307,7 +180,7 @@ pub fn build_drop_object(db_type: &DbType, kind: ObjectKind, name: &str) -> SqlB
     }
 
     if kind == ObjectKind::Trigger && matches!(db_type, DbType::PostgreSQL) {
-        let mut parts = qualified_parts(name)?;
+        let mut parts: Vec<&str> = name.split('.').collect();
         if !(2..=3).contains(&parts.len()) {
             return Err(SqlBuildError::InvalidInput(
                 "PostgreSQL trigger drops require 'table.trigger' or 'schema.table.trigger'"
@@ -330,90 +203,25 @@ pub fn build_drop_object(db_type: &DbType, kind: ObjectKind, name: &str) -> SqlB
     ))
 }
 
-fn sql_string_literal(db_type: &DbType, value: &str) -> SqlBuildResult<String> {
-    if value.contains('\0') {
-        return Err(SqlBuildError::InvalidInput(
-            "SQL string values must not contain NUL".to_string(),
-        ));
-    }
-
-    Ok(match db_type {
-        // Doubling both backslashes and quotes is injection-safe with either
-        // MySQL's default escaping or NO_BACKSLASH_ESCAPES mode.
-        DbType::MySQL => {
-            let escaped = value.replace('\\', "\\\\").replace('\'', "''");
-            format!("'{escaped}'")
-        }
-        // E-strings make backslash handling explicit and independent from the
-        // server's standard_conforming_strings setting.
-        DbType::PostgreSQL => {
-            let escaped = value.replace('\\', "\\\\").replace('\'', "''");
-            format!("E'{escaped}'")
-        }
-        DbType::SQLite => format!("'{}'", value.replace('\'', "''")),
-        DbType::SQLServer => format!("N'{}'", value.replace('\'', "''")),
-        DbType::ClickHouse => {
-            let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("'{escaped}'")
-        }
-        DbType::MongoDB | DbType::Redis => {
-            return Err(unsupported(db_type, "format structured SQL value"));
-        }
-    })
-}
-
-pub fn sql_literal(db_type: &DbType, value: &Value) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "format structured SQL value")?;
-    match value {
-        Value::Null => Ok("NULL".to_string()),
-        Value::Bool(value) => match db_type {
-            DbType::PostgreSQL => Ok(if *value { "TRUE" } else { "FALSE" }.to_string()),
-            _ => Ok(if *value { "1" } else { "0" }.to_string()),
-        },
-        Value::Number(value) => Ok(value.to_string()),
-        Value::String(value) => sql_string_literal(db_type, value),
-        Value::Array(_) | Value::Object(_) => sql_string_literal(db_type, &value.to_string()),
-    }
-}
-
 pub fn build_insert_row(
     db_type: &DbType,
     table: &str,
     columns: &[String],
     values: &[Value],
 ) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "insert structured row")?;
-    if columns.is_empty() {
-        return Err(SqlBuildError::InvalidInput(
-            "insert requires at least one column".to_string(),
-        ));
-    }
-    if columns.len() != values.len() {
-        return Err(SqlBuildError::InvalidInput(format!(
-            "insert column/value length mismatch: {} columns, {} values",
-            columns.len(),
-            values.len()
-        )));
-    }
-
-    let quoted_columns = columns
-        .iter()
-        .map(|column| quote_identifier(db_type, column))
-        .collect::<SqlBuildResult<Vec<_>>>()?;
-    let literals = values
-        .iter()
-        .map(|value| sql_literal(db_type, value))
-        .collect::<SqlBuildResult<Vec<_>>>()?;
-
-    Ok(format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        quote_qualified_name(db_type, table)?,
-        quoted_columns.join(", "),
-        literals.join(", ")
-    ))
+    let table = TableRef::parse(*db_type, table)?;
+    build_insert_row_for_table(db_type, &table, columns, values)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub fn build_insert_row_for_table(
+    db_type: &DbType,
+    table: &TableRef,
+    columns: &[String],
+    values: &[Value],
+) -> SqlBuildResult<String> {
+    SqlDialect::new(*db_type).build_insert_row(table, columns, values)
+}
+
 pub fn build_update_row(
     db_type: &DbType,
     table: &str,
@@ -422,32 +230,32 @@ pub fn build_update_row(
     column: &str,
     new_value: &Value,
 ) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "update structured row")?;
-    if primary_key_value.is_null() {
-        return Err(SqlBuildError::InvalidInput(
-            "primary-key value must not be null".to_string(),
-        ));
-    }
+    let table = TableRef::parse(*db_type, table)?;
+    build_update_row_for_table(
+        db_type,
+        &table,
+        primary_key_column,
+        primary_key_value,
+        column,
+        new_value,
+    )
+}
 
-    if matches!(db_type, DbType::ClickHouse) {
-        Ok(format!(
-            "ALTER TABLE {} UPDATE {} = {} WHERE {} = {} SETTINGS mutations_sync = 1",
-            quote_qualified_name(db_type, table)?,
-            quote_identifier(db_type, column)?,
-            sql_literal(db_type, new_value)?,
-            quote_identifier(db_type, primary_key_column)?,
-            sql_literal(db_type, primary_key_value)?
-        ))
-    } else {
-        Ok(format!(
-            "UPDATE {} SET {} = {} WHERE {} = {}",
-            quote_qualified_name(db_type, table)?,
-            quote_identifier(db_type, column)?,
-            sql_literal(db_type, new_value)?,
-            quote_identifier(db_type, primary_key_column)?,
-            sql_literal(db_type, primary_key_value)?
-        ))
-    }
+pub fn build_update_row_for_table(
+    db_type: &DbType,
+    table: &TableRef,
+    primary_key_column: &str,
+    primary_key_value: &Value,
+    column: &str,
+    new_value: &Value,
+) -> SqlBuildResult<String> {
+    SqlDialect::new(*db_type).build_update_row(
+        table,
+        primary_key_column,
+        primary_key_value,
+        column,
+        new_value,
+    )
 }
 
 pub fn build_delete_rows(
@@ -456,45 +264,33 @@ pub fn build_delete_rows(
     primary_key_column: &str,
     primary_key_values: &[Value],
 ) -> SqlBuildResult<String> {
-    ensure_relational(db_type, "delete structured rows")?;
-    if primary_key_values.is_empty() {
-        return Err(SqlBuildError::InvalidInput(
-            "delete requires at least one primary-key value".to_string(),
-        ));
-    }
-    if primary_key_values.iter().any(Value::is_null) {
-        return Err(SqlBuildError::InvalidInput(
-            "primary-key values must not contain null".to_string(),
-        ));
-    }
+    let table = TableRef::parse(*db_type, table)?;
+    build_delete_rows_for_table(db_type, &table, primary_key_column, primary_key_values)
+}
 
-    let literals = primary_key_values
-        .iter()
-        .map(|value| sql_literal(db_type, value))
-        .collect::<SqlBuildResult<Vec<_>>>()?;
-    if matches!(db_type, DbType::ClickHouse) {
-        Ok(format!(
-            "ALTER TABLE {} DELETE WHERE {} IN ({}) SETTINGS mutations_sync = 1",
-            quote_qualified_name(db_type, table)?,
-            quote_identifier(db_type, primary_key_column)?,
-            literals.join(", ")
-        ))
-    } else {
-        Ok(format!(
-            "DELETE FROM {} WHERE {} IN ({})",
-            quote_qualified_name(db_type, table)?,
-            quote_identifier(db_type, primary_key_column)?,
-            literals.join(", ")
-        ))
-    }
+pub fn build_delete_rows_for_table(
+    db_type: &DbType,
+    table: &TableRef,
+    primary_key_column: &str,
+    primary_key_values: &[Value],
+) -> SqlBuildResult<String> {
+    SqlDialect::new(*db_type).build_delete_rows(table, primary_key_column, primary_key_values)
 }
 
 /// Validate one `CREATE` statement against an exact keyword prefix.
-pub fn validate_create_sql(sql: &str, expected_prefix: &str) -> SqlBuildResult<String> {
-    validate_create_sql_prefixes(sql, &[expected_prefix])
+pub fn validate_create_sql(
+    db_type: &DbType,
+    sql: &str,
+    expected_prefix: &str,
+) -> SqlBuildResult<String> {
+    validate_create_sql_prefixes(db_type, sql, &[expected_prefix])
 }
 
-fn validate_create_sql_prefixes(sql: &str, expected_prefixes: &[&str]) -> SqlBuildResult<String> {
+fn validate_create_sql_prefixes(
+    db_type: &DbType,
+    sql: &str,
+    expected_prefixes: &[&str],
+) -> SqlBuildResult<String> {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
         return Err(SqlBuildError::InvalidCreateSql(
@@ -506,9 +302,18 @@ fn validate_create_sql_prefixes(sql: &str, expected_prefixes: &[&str]) -> SqlBui
             "CREATE statement must not contain NUL".to_string(),
         ));
     }
+    let mut statements = SqlScript::parse(*db_type, trimmed)
+        .map_err(|error| SqlBuildError::InvalidCreateSql(error.to_string()))?
+        .into_statements();
+    if statements.len() != 1 {
+        return Err(SqlBuildError::InvalidCreateSql(
+            "only one CREATE statement is allowed".to_string(),
+        ));
+    }
+    let statement = statements.pop().expect("length checked");
     if !expected_prefixes
         .iter()
-        .any(|prefix| has_keyword_prefix(trimmed, prefix))
+        .any(|prefix| has_keyword_prefix(&statement, prefix))
     {
         return Err(SqlBuildError::InvalidCreateSql(format!(
             "expected statement prefix: {}",
@@ -516,16 +321,7 @@ fn validate_create_sql_prefixes(sql: &str, expected_prefixes: &[&str]) -> SqlBui
         )));
     }
 
-    let semicolons = top_level_semicolons(trimmed)?;
-    match semicolons.as_slice() {
-        [] => Ok(trimmed.to_string()),
-        [position] if trimmed[position + 1..].trim().is_empty() => {
-            Ok(trimmed[..*position].trim_end().to_string())
-        }
-        _ => Err(SqlBuildError::InvalidCreateSql(
-            "only one CREATE statement is allowed".to_string(),
-        )),
-    }
+    Ok(statement)
 }
 
 fn has_keyword_prefix(sql: &str, expected_prefix: &str) -> bool {
@@ -550,163 +346,6 @@ fn has_keyword_prefix(sql: &str, expected_prefix: &str) -> bool {
     rest.chars()
         .next()
         .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
-}
-
-fn top_level_semicolons(sql: &str) -> SqlBuildResult<Vec<usize>> {
-    #[derive(Debug)]
-    enum State {
-        Normal,
-        SingleQuote,
-        DoubleQuote,
-        Backtick,
-        Bracket,
-        LineComment,
-        BlockComment,
-        DollarQuote(String),
-    }
-
-    let bytes = sql.as_bytes();
-    let mut state = State::Normal;
-    let mut positions = Vec::new();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        match &state {
-            State::Normal => match bytes[index] {
-                b'\'' => {
-                    state = State::SingleQuote;
-                    index += 1;
-                }
-                b'"' => {
-                    state = State::DoubleQuote;
-                    index += 1;
-                }
-                b'`' => {
-                    state = State::Backtick;
-                    index += 1;
-                }
-                b'[' => {
-                    state = State::Bracket;
-                    index += 1;
-                }
-                b'-' if bytes.get(index + 1) == Some(&b'-') => {
-                    state = State::LineComment;
-                    index += 2;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                    state = State::BlockComment;
-                    index += 2;
-                }
-                b'$' => {
-                    if let Some(delimiter) = dollar_quote_delimiter(&sql[index..]) {
-                        index += delimiter.len();
-                        state = State::DollarQuote(delimiter);
-                    } else {
-                        index += 1;
-                    }
-                }
-                b';' => {
-                    positions.push(index);
-                    index += 1;
-                }
-                _ => index += 1,
-            },
-            State::SingleQuote => {
-                if bytes[index] == b'\'' {
-                    if bytes.get(index + 1) == Some(&b'\'') {
-                        index += 2;
-                    } else {
-                        state = State::Normal;
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-            State::DoubleQuote => {
-                if bytes[index] == b'"' {
-                    if bytes.get(index + 1) == Some(&b'"') {
-                        index += 2;
-                    } else {
-                        state = State::Normal;
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-            State::Backtick => {
-                if bytes[index] == b'`' {
-                    if bytes.get(index + 1) == Some(&b'`') {
-                        index += 2;
-                    } else {
-                        state = State::Normal;
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-            State::Bracket => {
-                if bytes[index] == b']' {
-                    if bytes.get(index + 1) == Some(&b']') {
-                        index += 2;
-                    } else {
-                        state = State::Normal;
-                        index += 1;
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-            State::LineComment => {
-                if matches!(bytes[index], b'\n' | b'\r') {
-                    state = State::Normal;
-                }
-                index += 1;
-            }
-            State::BlockComment => {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    state = State::Normal;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-            State::DollarQuote(delimiter) => {
-                if bytes[index..].starts_with(delimiter.as_bytes()) {
-                    index += delimiter.len();
-                    state = State::Normal;
-                } else {
-                    index += 1;
-                }
-            }
-        }
-    }
-
-    match state {
-        State::Normal | State::LineComment => Ok(positions),
-        _ => Err(SqlBuildError::InvalidCreateSql(
-            "CREATE statement contains an unterminated quote or comment".to_string(),
-        )),
-    }
-}
-
-fn dollar_quote_delimiter(sql: &str) -> Option<String> {
-    let suffix = sql.strip_prefix('$')?;
-    let closing = suffix.find('$')?;
-    let tag = &suffix[..closing];
-    let mut characters = tag.chars();
-    let valid_start = characters
-        .next()
-        .is_none_or(|character| character == '_' || character.is_ascii_alphabetic());
-    if valid_start
-        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
-    {
-        Some(format!("${tag}$"))
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -740,7 +379,10 @@ mod tests {
         for name in ["", ".users", "public.", "public..users", " public.users"] {
             assert!(quote_qualified_name(&DbType::PostgreSQL, name).is_err());
         }
-        assert!(quote_identifier(&DbType::PostgreSQL, "public.users").is_err());
+        assert_eq!(
+            quote_identifier(&DbType::PostgreSQL, "public.users").unwrap(),
+            "\"public.users\""
+        );
         assert!(quote_qualified_name(&DbType::MySQL, "server.app.users").is_err());
         assert!(quote_qualified_name(&DbType::PostgreSQL, "db.public.users").is_err());
     }
@@ -762,6 +404,17 @@ mod tests {
         assert!(build_drop_schema(&DbType::SQLServer, "audit", true).is_err());
         assert!(build_create_schema(&DbType::SQLite, "main").is_err());
         assert!(build_drop_table(&DbType::MongoDB, "users").is_err());
+    }
+
+    #[test]
+    fn object_operations_follow_engine_capabilities() {
+        assert!(ensure_object_operation(&DbType::SQLite, ObjectKind::View, "drop").is_ok());
+        assert!(ensure_object_operation(&DbType::SQLite, ObjectKind::Function, "drop").is_err());
+        assert!(ensure_object_operation(&DbType::ClickHouse, ObjectKind::Database, "drop").is_ok());
+        assert!(
+            ensure_object_operation(&DbType::ClickHouse, ObjectKind::Procedure, "drop").is_err()
+        );
+        assert!(ensure_object_operation(&DbType::MongoDB, ObjectKind::View, "drop").is_err());
     }
 
     #[test]
@@ -867,7 +520,7 @@ mod tests {
                 &json!("it's\\ready"),
             )
             .unwrap(),
-            "ALTER TABLE `analytics`.`events` UPDATE `message` = 'it\\'s\\\\ready' WHERE `id` = 7 SETTINGS mutations_sync = 1"
+            "ALTER TABLE `analytics.events` UPDATE `message` = 'it\\'s\\\\ready' WHERE `id` = 7 SETTINGS mutations_sync = 1"
         );
         assert_eq!(
             build_delete_rows(
@@ -877,7 +530,7 @@ mod tests {
                 &[json!(7), json!(9)],
             )
             .unwrap(),
-            "ALTER TABLE `analytics`.`events` DELETE WHERE `id` IN (7, 9) SETTINGS mutations_sync = 1"
+            "ALTER TABLE `analytics.events` DELETE WHERE `id` IN (7, 9) SETTINGS mutations_sync = 1"
         );
         assert!(build_create_schema(&DbType::ClickHouse, "analytics").is_err());
     }

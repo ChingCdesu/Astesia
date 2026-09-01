@@ -6,24 +6,31 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.97.1"
 default-run = "astesia"
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = ["tray-icon"] }
-tauri-plugin-log = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-store = "2"
+assets = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+editor = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38", features = ["font-kit", "wayland", "x11"] }
+gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+http_client = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+menu = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+paths = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+release_channel = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+settings = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+theme = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+theme_settings = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+ui_input = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+workspace = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+zed_ui = { package = "ui", git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "mysql", "postgres", "sqlite", "any", "chrono", "json", "uuid", "bigdecimal", "ipnetwork", "mac_address", "bit-vec"] }
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono"] }
@@ -37,9 +44,6 @@ fs4 = { version = "1", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 dirs = "6"
-tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 rust_xlsxwriter = "0.95"
 rmcp = { version = "=2.2.0", features = ["elicitation", "schemars", "transport-io", "transport-streamable-http-server"] }
 schemars = "=1.2.1"
@@ -47,13 +51,20 @@ sqlparser = "=0.62.0"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tauri-plugin-shell = "2"
 keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 ring = "=0.17.14"
 zeroize = "=1.8.2"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
 
-[dev-dependencies]
-tempfile = "3"
+[patch.crates-io]
+# Cargo does not inherit source patches from git dependencies; keep these aligned with the pinned Zed lockfile.
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "eb6b4fd17b9af5ecc226546bdd04185391b3e265" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }

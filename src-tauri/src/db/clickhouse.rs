@@ -7,11 +7,26 @@ use serde_json::Value;
 
 use super::{
     ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, FunctionInfo, IndexInfo, QueryResult,
-    TableInfo, UserInfo, ViewInfo,
+    SqlDialect, TableInfo, TableRef, UserInfo, ViewInfo,
 };
 
 const CLICKHOUSE_DEFAULT_USER: &str = "default";
 const CLICKHOUSE_RESULT_FORMAT: &str = "JSONCompact";
+
+fn table_data_sql(
+    database: &str,
+    table: &TableRef,
+    page: u32,
+    page_size: u32,
+) -> anyhow::Result<String> {
+    let dialect = SqlDialect::new(DbType::ClickHouse);
+    let database = dialect.quote_identifier(table.schema().unwrap_or(database))?;
+    let table = dialect.quote_identifier(table.name())?;
+    let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+    Ok(format!(
+        "SELECT * FROM {database}.{table} LIMIT {page_size} OFFSET {offset}"
+    ))
+}
 
 pub struct ClickHouseDriver {
     config: ConnectionConfig,
@@ -203,11 +218,11 @@ impl DatabaseDriver for ClickHouseDriver {
             )
             .await?;
 
-        Ok(result
+        result
             .rows
             .iter()
             .filter_map(|row| {
-                let name = row.first().and_then(value_to_string)?;
+                let name = row.first().and_then(value_to_string);
                 let row_count = row
                     .get(1)
                     .and_then(value_to_u64)
@@ -216,17 +231,24 @@ impl DatabaseDriver for ClickHouseDriver {
                     .get(2)
                     .and_then(value_to_string)
                     .filter(|value| !value.is_empty());
-                Some(TableInfo {
-                    name,
-                    schema: None,
+                name.map(|name| (name, row_count, comment))
+            })
+            .map(|(name, row_count, comment)| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::unqualified(name),
                     row_count,
                     comment,
                 })
             })
-            .collect())
+            .collect()
     }
 
-    async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
+        let table_database = table.schema().unwrap_or(database);
         let result = self
             .send_query(
                 database,
@@ -234,7 +256,7 @@ impl DatabaseDriver for ClickHouseDriver {
                  FROM system.columns \
                  WHERE database = {database:String} AND table = {table:String} \
                  ORDER BY position",
-                &[("database", database), ("table", table)],
+                &[("database", table_database), ("table", table.name())],
             )
             .await?;
 
@@ -265,7 +287,12 @@ impl DatabaseDriver for ClickHouseDriver {
             .collect())
     }
 
-    async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>> {
+    async fn get_indexes(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
+        let table_database = table.schema().unwrap_or(database);
         let result = self
             .send_query(
                 database,
@@ -275,7 +302,7 @@ impl DatabaseDriver for ClickHouseDriver {
                    AND table = {table:String} \
                    AND is_in_primary_key = 1 \
                  ORDER BY position",
-                &[("database", database), ("table", table)],
+                &[("database", table_database), ("table", table.name())],
             )
             .await?;
         let columns: Vec<String> = result
@@ -302,18 +329,11 @@ impl DatabaseDriver for ClickHouseDriver {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult> {
-        let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
-        let sql = format!(
-            "SELECT * FROM {}.{} LIMIT {} OFFSET {}",
-            quote_identifier(database),
-            quote_identifier(table),
-            page_size,
-            offset
-        );
+        let sql = table_data_sql(database, table, page, page_size)?;
         self.execute_query(database, &sql).await
     }
 
@@ -400,12 +420,16 @@ impl DatabaseDriver for ClickHouseDriver {
         Ok(parse_enum_values(enum_type))
     }
 
-    async fn get_create_table_sql(&self, database: &str, table: &str) -> anyhow::Result<String> {
-        let sql = format!(
-            "SHOW CREATE TABLE {}.{}",
-            quote_identifier(database),
-            quote_identifier(table)
-        );
+    async fn get_create_table_sql(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<String> {
+        let dialect = SqlDialect::new(DbType::ClickHouse);
+        let table_database = table.schema().unwrap_or(database);
+        let quoted_database = dialect.quote_identifier(table_database)?;
+        let quoted_table = dialect.quote_identifier(table.name())?;
+        let sql = format!("SHOW CREATE TABLE {quoted_database}.{quoted_table}");
         let result = self.send_query(database, &sql, &[]).await?;
         result
             .rows
@@ -414,11 +438,6 @@ impl DatabaseDriver for ClickHouseDriver {
             .and_then(value_to_string)
             .ok_or_else(|| anyhow::anyhow!("Table not found"))
     }
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    let escaped = identifier.replace('\\', "\\\\").replace('`', "\\`");
-    format!("`{escaped}`")
 }
 
 fn is_nullable_type(data_type: &str) -> bool {
@@ -672,8 +691,17 @@ mod tests {
     }
 
     #[test]
-    fn quotes_identifiers_and_detects_nullable_wrappers() {
-        assert_eq!(quote_identifier(r"odd\`name"), r"`odd\\\`name`");
+    fn pagination_quotes_identifiers_and_detects_nullable_wrappers() {
+        assert_eq!(
+            table_data_sql(
+                r"odd\`database",
+                &TableRef::unqualified(r"odd\`table"),
+                2,
+                25,
+            )
+            .unwrap(),
+            r"SELECT * FROM `odd\\\`database`.`odd\\\`table` LIMIT 25 OFFSET 25"
+        );
         assert!(is_nullable_type("Nullable(UInt64)"));
         assert!(is_nullable_type("LowCardinality(Nullable(String))"));
         assert!(!is_nullable_type("Array(Nullable(String))"));

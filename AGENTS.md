@@ -31,3 +31,17 @@ Recent history favors `type: concise summary`, especially `feat:`, `fix:`, and `
 ## Security & Configuration
 
 Never commit database credentials, signing keys, or real connection strings. Use disposable test accounts. Treat `src-tauri/capabilities/default.json` and security settings in `tauri.conf.json` as sensitive; explain and minimize any permission expansion.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.

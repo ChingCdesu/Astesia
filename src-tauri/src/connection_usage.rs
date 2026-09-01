@@ -94,6 +94,7 @@ impl ConnectionUsageLocks {
         std::fs::create_dir_all(self.directory.as_ref()).map_err(ConnectionUsageError::Io)?;
         OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(self.lock_path(connection_id))

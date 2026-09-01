@@ -5,7 +5,11 @@ use sqlx::types::BigDecimal;
 use sqlx::{Column, MySqlConnection, Row, TypeInfo};
 use std::time::Instant;
 
-use super::{bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{
+    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, SqlDialect,
+    StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+};
 
 /// Decode the `i`-th column of a MySQL row into a JSON value, dispatching on the
 /// (upper-cased) MySQL type name. Covers all built-in scalar types; unknown types
@@ -54,10 +58,7 @@ fn mysql_value_to_json(row: &MySqlRow, i: usize, type_name: &str) -> serde_json:
     }
 }
 
-async fn run_mysql_query(
-    conn: &mut MySqlConnection,
-    sql: &str,
-) -> anyhow::Result<QueryResult> {
+async fn run_mysql_query(conn: &mut MySqlConnection, sql: &str) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
     let trimmed = sql.trim().to_uppercase();
     if trimmed.starts_with("SELECT")
@@ -124,6 +125,26 @@ async fn run_mysql_query(
     }
 }
 
+fn use_database_sql(database: &str) -> anyhow::Result<String> {
+    let database = SqlDialect::new(DbType::MySQL).quote_identifier(database)?;
+    Ok(format!("USE {database}"))
+}
+
+fn table_data_sql(
+    database: &str,
+    table: &TableRef,
+    page: u32,
+    page_size: u32,
+) -> anyhow::Result<String> {
+    let dialect = SqlDialect::new(DbType::MySQL);
+    let database = dialect.quote_identifier(table.schema().unwrap_or(database))?;
+    let table = dialect.quote_identifier(table.name())?;
+    let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+    Ok(format!(
+        "SELECT * FROM {database}.{table} LIMIT {page_size} OFFSET {offset}"
+    ))
+}
+
 pub struct MySqlDriver {
     config: ConnectionConfig,
     pool: Option<MySqlPool>,
@@ -151,7 +172,9 @@ impl MySqlDriver {
     }
 
     fn pool(&self) -> anyhow::Result<&MySqlPool> {
-        self.pool.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))
+        self.pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))
     }
 }
 
@@ -185,9 +208,7 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_databases(&self) -> anyhow::Result<Vec<String>> {
         let pool = self.pool()?;
-        let rows: Vec<MySqlRow> = sqlx::query("SHOW DATABASES")
-            .fetch_all(pool)
-            .await?;
+        let rows: Vec<MySqlRow> = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
         let databases = rows
             .iter()
             .filter_map(|row| {
@@ -205,61 +226,72 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
-            "SELECT TABLE_NAME, TABLE_ROWS, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{}'",
-            database
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT TABLE_NAME, TABLE_ROWS, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?",
+        )
+        .bind(database)
+        .fetch_all(pool)
+        .await?;
         let tables = rows
             .iter()
-            .map(|row| {
-                TableInfo {
-                    name: row.get::<String, _>("TABLE_NAME"),
-                    schema: Some(database.to_string()),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::qualified(database, row.get::<String, _>("TABLE_NAME")),
                     row_count: row.try_get::<i64, _>("TABLE_ROWS").ok(),
                     comment: row.try_get::<String, _>("TABLE_COMMENT").ok(),
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(tables)
     }
 
-    async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
+        let rows: Vec<MySqlRow> = sqlx::query(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT \
              FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-            database, table
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+        )
+        .bind(table.schema().unwrap_or(database))
+        .bind(table.name())
+        .fetch_all(pool)
+        .await?;
         let columns = rows
             .iter()
-            .map(|row| {
-                ColumnInfo {
-                    name: row.get::<String, _>("COLUMN_NAME"),
-                    data_type: row.get::<String, _>("DATA_TYPE"),
-                    nullable: row.get::<String, _>("IS_NULLABLE") == "YES",
-                    is_primary_key: row.get::<String, _>("COLUMN_KEY") == "PRI",
-                    default_value: row.try_get::<String, _>("COLUMN_DEFAULT").ok(),
-                    comment: row.try_get::<String, _>("COLUMN_COMMENT").ok(),
-                }
+            .map(|row| ColumnInfo {
+                name: row.get::<String, _>("COLUMN_NAME"),
+                data_type: row.get::<String, _>("DATA_TYPE"),
+                nullable: row.get::<String, _>("IS_NULLABLE") == "YES",
+                is_primary_key: row.get::<String, _>("COLUMN_KEY") == "PRI",
+                default_value: row.try_get::<String, _>("COLUMN_DEFAULT").ok(),
+                comment: row.try_get::<String, _>("COLUMN_COMMENT").ok(),
             })
             .collect();
         Ok(columns)
     }
 
-    async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>> {
+    async fn get_indexes(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
+        let rows: Vec<MySqlRow> = sqlx::query(
             "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
              FROM information_schema.STATISTICS \
-             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
-            database, table
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
-        let mut indexes: std::collections::HashMap<String, IndexInfo> = std::collections::HashMap::new();
+        )
+        .bind(table.schema().unwrap_or(database))
+        .bind(table.name())
+        .fetch_all(pool)
+        .await?;
+        let mut indexes: std::collections::HashMap<String, IndexInfo> =
+            std::collections::HashMap::new();
         for row in &rows {
             let name: String = row.get("INDEX_NAME");
             let column: String = row.get("COLUMN_NAME");
@@ -278,10 +310,10 @@ impl DatabaseDriver for MySqlDriver {
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        sqlx::query(&format!("USE `{}`", database.replace('`', "``")))
+        sqlx::query(&use_database_sql(database)?)
             .execute(&mut *conn)
             .await?;
-        run_mysql_query(&mut *conn, sql).await
+        run_mysql_query(&mut conn, sql).await
     }
 
     async fn execute_statements(
@@ -291,13 +323,13 @@ impl DatabaseDriver for MySqlDriver {
     ) -> anyhow::Result<Vec<StatementResult>> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        sqlx::query(&format!("USE `{}`", database.replace('`', "``")))
+        sqlx::query(&use_database_sql(database)?)
             .execute(&mut *conn)
             .await?;
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();
-            match run_mysql_query(&mut *conn, &sql).await {
+            match run_mysql_query(&mut conn, &sql).await {
                 Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
                 Err(e) => {
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -312,25 +344,22 @@ impl DatabaseDriver for MySqlDriver {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult> {
-        let offset = (page - 1) * page_size;
-        let sql = format!(
-            "SELECT * FROM `{}`.`{}` LIMIT {} OFFSET {}",
-            database, table, page_size, offset
-        );
+        let sql = table_data_sql(database, table, page, page_size)?;
         self.execute_query(database, &sql).await
     }
 
     async fn get_views(&self, database: &str) -> anyhow::Result<Vec<ViewInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
-            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = '{}'",
-            database
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?",
+        )
+        .bind(database)
+        .fetch_all(pool)
+        .await?;
         let views = rows
             .iter()
             .map(|row| ViewInfo {
@@ -343,11 +372,12 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_functions(&self, database: &str) -> anyhow::Result<Vec<FunctionInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
-            "SELECT ROUTINE_NAME, DTD_IDENTIFIER, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{}' AND ROUTINE_TYPE = 'FUNCTION'",
-            database
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT ROUTINE_NAME, DTD_IDENTIFIER, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE = 'FUNCTION'",
+        )
+        .bind(database)
+        .fetch_all(pool)
+        .await?;
         let functions = rows
             .iter()
             .map(|row| FunctionInfo {
@@ -362,11 +392,12 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_procedures(&self, database: &str) -> anyhow::Result<Vec<ProcedureInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
-            "SELECT ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{}' AND ROUTINE_TYPE = 'PROCEDURE'",
-            database
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_TYPE = 'PROCEDURE'",
+        )
+        .bind(database)
+        .fetch_all(pool)
+        .await?;
         let procedures = rows
             .iter()
             .map(|row| ProcedureInfo {
@@ -380,11 +411,12 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_triggers(&self, database: &str) -> anyhow::Result<Vec<TriggerInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
-            "SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_TIMING FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '{}'",
-            database
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_TIMING FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?",
+        )
+        .bind(database)
+        .fetch_all(pool)
+        .await?;
         let triggers = rows
             .iter()
             .map(|row| TriggerInfo {
@@ -397,29 +429,40 @@ impl DatabaseDriver for MySqlDriver {
         Ok(triggers)
     }
 
-    async fn get_foreign_keys(&self, database: &str, table: &str) -> anyhow::Result<Vec<ForeignKeyInfo>> {
+    async fn get_foreign_keys(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ForeignKeyInfo>> {
         let pool = self.pool()?;
-        let sql = format!(
+        let rows: Vec<MySqlRow> = sqlx::query(
             "SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
              FROM information_schema.KEY_COLUMN_USAGE \
-             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' AND REFERENCED_TABLE_NAME IS NOT NULL \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL \
              ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
-            database, table
-        );
-        let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
-        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> = std::collections::HashMap::new();
+        )
+        .bind(table.schema().unwrap_or(database))
+        .bind(table.name())
+        .fetch_all(pool)
+        .await?;
+        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
+            std::collections::HashMap::new();
         for row in &rows {
             let name: String = row.get("CONSTRAINT_NAME");
             let from_col: String = row.get("COLUMN_NAME");
             let to_table: String = row.get("REFERENCED_TABLE_NAME");
             let to_col: String = row.get("REFERENCED_COLUMN_NAME");
-            let entry = fk_map.entry(name.clone()).or_insert_with(|| ForeignKeyInfo {
-                name: name.clone(),
-                from_table: table.to_string(),
-                from_columns: vec![],
-                to_table: to_table.clone(),
-                to_columns: vec![],
-            });
+            let to_table =
+                TableRef::qualified(table.schema().unwrap_or(database), to_table.clone());
+            let entry = fk_map
+                .entry(name.clone())
+                .or_insert_with(|| ForeignKeyInfo {
+                    name: name.clone(),
+                    from_table: table.clone(),
+                    from_columns: vec![],
+                    to_table,
+                    to_columns: vec![],
+                });
             entry.from_columns.push(from_col);
             entry.to_columns.push(to_col);
         }
@@ -441,9 +484,18 @@ impl DatabaseDriver for MySqlDriver {
         Ok(users)
     }
 
-    async fn get_create_table_sql(&self, database: &str, table: &str) -> anyhow::Result<String> {
+    async fn get_create_table_sql(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<String> {
         let pool = self.pool()?;
-        let sql = format!("SHOW CREATE TABLE `{}`.`{}`", database, table);
+        let dialect = SqlDialect::new(DbType::MySQL);
+        let sql = format!(
+            "SHOW CREATE TABLE {}.{}",
+            dialect.quote_identifier(table.schema().unwrap_or(database))?,
+            dialect.quote_identifier(table.name())?
+        );
         let rows: Vec<MySqlRow> = sqlx::query(&sql).fetch_all(pool).await?;
         if let Some(row) = rows.first() {
             Ok(row.try_get::<String, _>(1).unwrap_or_default())
@@ -454,5 +506,23 @@ impl DatabaseDriver for MySqlDriver {
 
     fn db_type(&self) -> DbType {
         DbType::MySQL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{table_data_sql, use_database_sql};
+    use crate::db::TableRef;
+
+    #[test]
+    fn pagination_and_database_selection_quote_mysql_delimiters() {
+        assert_eq!(
+            table_data_sql("odd`database", &TableRef::unqualified("odd`table"), 2, 25,).unwrap(),
+            "SELECT * FROM `odd``database`.`odd``table` LIMIT 25 OFFSET 25"
+        );
+        assert_eq!(
+            use_database_sql("odd`database").unwrap(),
+            "USE `odd``database`"
+        );
     }
 }

@@ -1,9 +1,15 @@
 use async_trait::async_trait;
-use mongodb::{Client as MongoClient, options::{ClientOptions, Credential, ServerAddress}};
 use futures::TryStreamExt;
+use mongodb::{
+    options::{ClientOptions, Credential, ServerAddress},
+    Client as MongoClient,
+};
 use std::time::Instant;
 
-use super::{bytes_to_hex, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult, TableInfo};
+use super::{
+    bytes_to_hex, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult,
+    TableInfo, TableRef,
+};
 
 pub struct MongoDriver {
     config: ConnectionConfig,
@@ -12,7 +18,10 @@ pub struct MongoDriver {
 
 impl MongoDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config, client: None }
+        Self {
+            config,
+            client: None,
+        }
     }
 
     /// Build typed client options so credentials with special characters
@@ -40,7 +49,9 @@ impl MongoDriver {
     }
 
     fn client(&self) -> anyhow::Result<&MongoClient> {
-        self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))
+        self.client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))
     }
 
     fn bson_to_json(val: &mongodb::bson::Bson) -> serde_json::Value {
@@ -58,7 +69,9 @@ impl MongoDriver {
             Bson::Decimal128(v) => J::String(v.to_string()),
             Bson::ObjectId(v) => J::String(v.to_hex()),
             // ISO 8601 (e.g. 2024-01-02T03:04:05.678Z); fall back to Debug-ish on overflow.
-            Bson::DateTime(v) => J::String(v.try_to_rfc3339_string().unwrap_or_else(|_| v.to_string())),
+            Bson::DateTime(v) => {
+                J::String(v.try_to_rfc3339_string().unwrap_or_else(|_| v.to_string()))
+            }
             Bson::Timestamp(t) => J::String(format!("Timestamp({}, {})", t.time, t.increment)),
             Bson::Binary(b) => J::String(bytes_to_hex(&b.bytes, "0x")),
             Bson::RegularExpression(r) => J::String(format!("/{}/{}", r.pattern, r.options)),
@@ -109,21 +122,26 @@ impl DatabaseDriver for MongoDriver {
         let client = self.client()?;
         let db = client.database(database);
         let collections = db.list_collection_names().await?;
-        Ok(collections
+        collections
             .into_iter()
-            .map(|name| TableInfo {
-                name,
-                schema: None,
-                row_count: None,
-                comment: Some("collection".to_string()),
+            .map(|name| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::unqualified(name),
+                    row_count: None,
+                    comment: Some("collection".to_string()),
+                })
             })
-            .collect())
+            .collect()
     }
 
-    async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
         let client = self.client()?;
         let db = client.database(database);
-        let collection = db.collection::<mongodb::bson::Document>(table);
+        let collection = db.collection::<mongodb::bson::Document>(table.name());
         let doc = collection.find_one(mongodb::bson::doc! {}).await?;
         match doc {
             Some(doc) => {
@@ -156,10 +174,14 @@ impl DatabaseDriver for MongoDriver {
         }
     }
 
-    async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>> {
+    async fn get_indexes(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
         let client = self.client()?;
         let db = client.database(database);
-        let collection = db.collection::<mongodb::bson::Document>(table);
+        let collection = db.collection::<mongodb::bson::Document>(table.name());
         let mut cursor = collection.list_indexes().await?;
         let mut indexes = Vec::new();
         while let Some(index) = cursor.try_next().await? {
@@ -193,14 +215,15 @@ impl DatabaseDriver for MongoDriver {
                         .strip_prefix("find(")
                         .and_then(|s| s.strip_suffix(')'))
                         .unwrap_or("{}");
-                    let filter: mongodb::bson::Document = if filter_str.is_empty() || filter_str == "{}" {
-                        mongodb::bson::doc! {}
-                    } else {
-                        serde_json::from_str::<serde_json::Value>(filter_str)
-                            .ok()
-                            .and_then(|v| mongodb::bson::to_document(&v).ok())
-                            .unwrap_or(mongodb::bson::doc! {})
-                    };
+                    let filter: mongodb::bson::Document =
+                        if filter_str.is_empty() || filter_str == "{}" {
+                            mongodb::bson::doc! {}
+                        } else {
+                            serde_json::from_str::<serde_json::Value>(filter_str)
+                                .ok()
+                                .and_then(|v| mongodb::bson::to_document(&v).ok())
+                                .unwrap_or_default()
+                        };
                     let mut cursor = collection.find(filter).await?;
                     let mut docs = Vec::new();
                     while let Some(doc) = cursor.try_next().await? {
@@ -228,13 +251,13 @@ impl DatabaseDriver for MongoDriver {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult> {
         let client = self.client()?;
         let db = client.database(database);
-        let collection = db.collection::<mongodb::bson::Document>(table);
+        let collection = db.collection::<mongodb::bson::Document>(table.name());
         let start = Instant::now();
 
         let skip = ((page - 1) * page_size) as u64;
@@ -243,7 +266,10 @@ impl DatabaseDriver for MongoDriver {
             .skip(skip)
             .limit(limit)
             .build();
-        let mut cursor = collection.find(mongodb::bson::doc! {}).with_options(options).await?;
+        let mut cursor = collection
+            .find(mongodb::bson::doc! {})
+            .with_options(options)
+            .await?;
         let mut docs = Vec::new();
         while let Some(doc) = cursor.try_next().await? {
             docs.push(doc);
@@ -258,7 +284,11 @@ impl DatabaseDriver for MongoDriver {
 }
 
 impl MongoDriver {
-    fn docs_to_result(&self, docs: Vec<mongodb::bson::Document>, elapsed: u64) -> anyhow::Result<QueryResult> {
+    fn docs_to_result(
+        &self,
+        docs: Vec<mongodb::bson::Document>,
+        elapsed: u64,
+    ) -> anyhow::Result<QueryResult> {
         if docs.is_empty() {
             return Ok(QueryResult {
                 execution_time_ms: elapsed,

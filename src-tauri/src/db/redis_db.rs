@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use redis::{AsyncCommands, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
 use std::time::Instant;
 
-use super::{ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult, TableInfo};
+use super::{
+    ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, QueryResult, TableInfo, TableRef,
+};
 
 pub struct RedisDriver {
     config: ConnectionConfig,
@@ -42,6 +44,17 @@ impl RedisDriver {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not connected"))
     }
+
+    async fn selected_connection(
+        &self,
+        database: &str,
+    ) -> anyhow::Result<redis::aio::MultiplexedConnection> {
+        let mut connection = self.conn()?.clone();
+        select_database_command(database)?
+            .query_async::<()>(&mut connection)
+            .await?;
+        Ok(connection)
+    }
 }
 
 #[async_trait]
@@ -73,32 +86,24 @@ impl DatabaseDriver for RedisDriver {
     }
 
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>> {
-        let mut conn = self.conn()?.clone();
-        // Switch to the specified database
-        let db_num: u8 = database
-            .strip_prefix("db")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let _: () = redis::cmd("SELECT")
-            .arg(db_num)
-            .query_async(&mut conn)
-            .await?;
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("*")
-            .query_async(&mut conn)
-            .await?;
-        Ok(keys
-            .into_iter()
-            .map(|name| TableInfo {
-                name,
-                schema: None,
-                row_count: None,
-                comment: Some("key".to_string()),
+        let mut conn = self.selected_connection(database).await?;
+        let keys: Vec<String> = redis::cmd("KEYS").arg("*").query_async(&mut conn).await?;
+        keys.into_iter()
+            .map(|name| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::unqualified(name),
+                    row_count: None,
+                    comment: Some("key".to_string()),
+                })
             })
-            .collect())
+            .collect()
     }
 
-    async fn get_columns(&self, _database: &str, _table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        _database: &str,
+        _table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
         Ok(vec![
             ColumnInfo {
                 name: "key".to_string(),
@@ -135,23 +140,11 @@ impl DatabaseDriver for RedisDriver {
         ])
     }
 
-    async fn get_indexes(&self, _database: &str, _table: &str) -> anyhow::Result<Vec<IndexInfo>> {
-        Ok(vec![])
-    }
-
     async fn execute_query(&self, database: &str, command: &str) -> anyhow::Result<QueryResult> {
-        let mut conn = self.conn()?.clone();
-        let db_num: u8 = database
-            .strip_prefix("db")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let _: () = redis::cmd("SELECT")
-            .arg(db_num)
-            .query_async(&mut conn)
-            .await?;
+        let mut conn = self.selected_connection(database).await?;
 
         let start = Instant::now();
-        let parts: Vec<&str> = command.trim().split_whitespace().collect();
+        let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
             return Ok(QueryResult::default());
         }
@@ -182,27 +175,39 @@ impl DatabaseDriver for RedisDriver {
         })
     }
 
-    async fn get_table_data(
+    async fn set_key(
         &self,
         database: &str,
         key: &str,
+        value: &str,
+        ttl_seconds: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.selected_connection(database).await?;
+        set_key_command(key, value, ttl_seconds)
+            .query_async::<()>(&mut connection)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_key(&self, database: &str, key: &str) -> anyhow::Result<u64> {
+        let mut connection = self.selected_connection(database).await?;
+        let deleted = delete_key_command(key)
+            .query_async::<u64>(&mut connection)
+            .await?;
+        Ok(deleted)
+    }
+
+    async fn get_table_data(
+        &self,
+        database: &str,
+        key: &TableRef,
         _page: u32,
         _page_size: u32,
     ) -> anyhow::Result<QueryResult> {
-        let mut conn = self.conn()?.clone();
-        let db_num: u8 = database
-            .strip_prefix("db")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let _: () = redis::cmd("SELECT")
-            .arg(db_num)
-            .query_async(&mut conn)
-            .await?;
+        let mut conn = self.selected_connection(database).await?;
+        let key = key.name();
 
-        let key_type: String = redis::cmd("TYPE")
-            .arg(key)
-            .query_async(&mut conn)
-            .await?;
+        let key_type: String = redis::cmd("TYPE").arg(key).query_async(&mut conn).await?;
         let ttl: i64 = conn.ttl(key).await?;
 
         let start = Instant::now();
@@ -228,12 +233,13 @@ impl DatabaseDriver for RedisDriver {
                 serde_json::Value::Object(map)
             }
             "zset" => {
-                let vals: Vec<(String, f64)> = conn.zrangebyscore_withscores(key, "-inf", "+inf").await?;
+                let vals: Vec<(String, f64)> =
+                    conn.zrangebyscore_withscores(key, "-inf", "+inf").await?;
                 serde_json::Value::Array(
                     vals.into_iter()
-                        .map(|(member, score)| {
-                            serde_json::json!({"member": member, "score": score})
-                        })
+                        .map(
+                            |(member, score)| serde_json::json!({"member": member, "score": score}),
+                        )
                         .collect(),
                 )
             }
@@ -242,10 +248,38 @@ impl DatabaseDriver for RedisDriver {
         let elapsed = start.elapsed().as_millis() as u64;
 
         let columns = vec![
-            ColumnInfo { name: "key".to_string(), data_type: "String".to_string(), nullable: false, is_primary_key: true, default_value: None, comment: None },
-            ColumnInfo { name: "value".to_string(), data_type: key_type.clone(), nullable: true, is_primary_key: false, default_value: None, comment: None },
-            ColumnInfo { name: "type".to_string(), data_type: "String".to_string(), nullable: false, is_primary_key: false, default_value: None, comment: None },
-            ColumnInfo { name: "ttl".to_string(), data_type: "Integer".to_string(), nullable: true, is_primary_key: false, default_value: None, comment: None },
+            ColumnInfo {
+                name: "key".to_string(),
+                data_type: "String".to_string(),
+                nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "value".to_string(),
+                data_type: key_type.clone(),
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "type".to_string(),
+                data_type: "String".to_string(),
+                nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            },
+            ColumnInfo {
+                name: "ttl".to_string(),
+                data_type: "Integer".to_string(),
+                nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            },
         ];
 
         let rows = vec![vec![
@@ -268,6 +302,45 @@ impl DatabaseDriver for RedisDriver {
     }
 }
 
+fn parse_database_selector(database: &str) -> anyhow::Result<u8> {
+    let number = database.strip_prefix("db").ok_or_else(|| {
+        anyhow::anyhow!("Invalid Redis database selector {database:?}; expected db<N>")
+    })?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        anyhow::bail!("Invalid Redis database selector {database:?}; expected db<N>");
+    }
+    let database_number = number.parse::<u8>().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid Redis database selector {database:?}; database number must be between 0 and 255"
+        )
+    })?;
+    if database != format!("db{database_number}") {
+        anyhow::bail!("Invalid Redis database selector {database:?}; expected db<N>");
+    }
+    Ok(database_number)
+}
+
+fn select_database_command(database: &str) -> anyhow::Result<redis::Cmd> {
+    let mut command = redis::cmd("SELECT");
+    command.arg(parse_database_selector(database)?);
+    Ok(command)
+}
+
+fn set_key_command(key: &str, value: &str, ttl_seconds: Option<u64>) -> redis::Cmd {
+    let mut command = redis::cmd("SET");
+    command.arg(key).arg(value);
+    if let Some(ttl_seconds) = ttl_seconds {
+        command.arg("EX").arg(ttl_seconds);
+    }
+    command
+}
+
+fn delete_key_command(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("DEL");
+    command.arg(key);
+    command
+}
+
 fn redis_value_to_json(value: &redis::Value) -> serde_json::Value {
     match value {
         redis::Value::Nil => serde_json::Value::Null,
@@ -281,5 +354,66 @@ fn redis_value_to_json(value: &redis::Value) -> serde_json::Value {
         redis::Value::SimpleString(s) => serde_json::Value::String(s.clone()),
         redis::Value::Okay => serde_json::Value::String("OK".to_string()),
         _ => serde_json::Value::String(format!("{:?}", value)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        delete_key_command, parse_database_selector, select_database_command, set_key_command,
+    };
+
+    #[test]
+    fn accepts_exact_redis_database_selectors() {
+        for (selector, database_number) in [("db0", 0), ("db15", 15), ("db255", 255)] {
+            assert_eq!(
+                parse_database_selector(selector).expect("valid selector"),
+                database_number
+            );
+            assert_eq!(
+                select_database_command(selector)
+                    .expect("valid SELECT")
+                    .get_packed_command(),
+                format!(
+                    "*2\r\n$6\r\nSELECT\r\n${}\r\n{}\r\n",
+                    selector.len() - 2,
+                    database_number
+                )
+                .into_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_noncanonical_redis_database_selectors() {
+        for selector in [
+            "", "0", "db", "DB0", "db-1", "db+1", "db 1", "db1x", " db1", "db1 ", "db01", "db256",
+        ] {
+            assert!(
+                parse_database_selector(selector).is_err(),
+                "accepted {selector:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_set_preserves_whitespace_in_keys_and_values() {
+        assert_eq!(
+            set_key_command("key with spaces", "value with spaces", Some(30))
+                .get_packed_command(),
+            b"*5\r\n$3\r\nSET\r\n$15\r\nkey with spaces\r\n$17\r\nvalue with spaces\r\n$2\r\nEX\r\n$2\r\n30\r\n".to_vec()
+        );
+        assert_eq!(
+            set_key_command("key with spaces", "value with spaces", None).get_packed_command(),
+            b"*3\r\n$3\r\nSET\r\n$15\r\nkey with spaces\r\n$17\r\nvalue with spaces\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn typed_delete_preserves_the_key_as_one_argument() {
+        assert_eq!(
+            delete_key_command("key with spaces").get_packed_command(),
+            b"*2\r\n$3\r\nDEL\r\n$15\r\nkey with spaces\r\n".to_vec()
+        );
     }
 }
