@@ -100,7 +100,10 @@ Exit condition: all seven engines can be configured, tested, connected, disconne
 
 Status: In progress since 2026-09-01. The first slice adds selection/current-statement Explain
 through Application Core and the native Query Item for all five SQL engines, including
-session-safe SQL Server `SHOWPLAN_ALL` cleanup.
+session-safe SQL Server `SHOWPLAN_ALL` cleanup. The second slice adds rectangular cell and row
+selection, platform shortcuts, deterministic TSV quoting, and optional headers to the native result
+grid. The third slice adds native open/save dialogs, query file identity and dirty tracking,
+filename-aware tabs, and discard confirmation before Open or tab close can replace unsaved text.
 
 - Wrap Zed `Editor` in an Astesia-owned `QueryItem` containing connection context, result state, execution state, and file state.
 - Bundle SQL grammar and highlighting locally; do not initialize the Zed extension marketplace.

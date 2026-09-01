@@ -9,6 +9,8 @@ mod mutation_service;
 mod performance_service;
 mod performance_snapshot;
 mod profile_editor;
+mod query_file;
+mod query_result_selection;
 mod query_service;
 mod query_workspace;
 mod transfer;
@@ -31,6 +33,7 @@ pub use performance_snapshot::{
     SqlServerMetrics, SqliteMetrics,
 };
 pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
+pub(crate) use query_file::{QueryFileCompletion, QueryFileError, QueryFileRequest};
 pub use query_service::QueryService;
 pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
 pub(crate) use query_workspace::{QueryExecutionRequest, QueryOperation, QueryWorkspaceState};

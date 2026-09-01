@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use editor::Editor;
-use gpui::{actions, rgb, App, ClickEvent, Entity, Focusable as _, Subscription};
+use gpui::{
+    actions, rgb, App, ClickEvent, Entity, Focusable as _, PromptButton, PromptLevel, Subscription,
+};
 use workspace::ModalLayer;
 use zed_ui::{prelude::*, Tooltip};
 
@@ -19,7 +21,7 @@ use super::{
         ConnectionSessionStatus,
     },
     localization::{text, theme_label},
-    query_item::QueryItem,
+    query_item::{QueryDocumentStateChanged, QueryItem},
     shell::{
         notify_preference_error, refresh_active_theme, NotificationCenter, NotificationTone,
         ShellSettings,
@@ -251,6 +253,7 @@ pub(super) struct AstesiaWorkspace {
 struct QueryTab {
     id: QueryTabId,
     item: Entity<QueryItem>,
+    _document_subscription: Subscription,
 }
 
 impl AstesiaWorkspace {
@@ -267,9 +270,14 @@ impl AstesiaWorkspace {
         let tabs = QueryTabsModel::new();
         let query_item =
             cx.new(|cx| QueryItem::new(application.clone(), editor, settings.clone(), cx));
+        let query_item_subscription = cx
+            .subscribe(&query_item, |_, _, _: &QueryDocumentStateChanged, cx| {
+                cx.notify()
+            });
         let query_tabs = vec![QueryTab {
             id: tabs.active(),
             item: query_item,
+            _document_subscription: query_item_subscription,
         }];
         let profiles_subscription = cx.subscribe_in(
             &connection_profiles,
@@ -416,13 +424,19 @@ impl AstesiaWorkspace {
         let target = self.connection_profiles.read(cx).query_target().cloned();
         let item = cx
             .new(|cx| QueryItem::new(self.application.clone(), editor, self.settings.clone(), cx));
+        let document_subscription =
+            cx.subscribe(&item, |_, _, _: &QueryDocumentStateChanged, cx| cx.notify());
         if let Some(target) = target {
             item.update(cx, |item, cx| item.set_target(Some(target), window, cx));
         } else {
             item.update(cx, |item, cx| item.focus(window, cx));
         }
         let id = self.tabs.add();
-        self.query_tabs.push(QueryTab { id, item });
+        self.query_tabs.push(QueryTab {
+            id,
+            item,
+            _document_subscription: document_subscription,
+        });
         cx.notify();
     }
 
@@ -433,6 +447,69 @@ impl AstesiaWorkspace {
     }
 
     fn close_tab(&mut self, id: QueryTabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.tabs().len() == 1 {
+            return;
+        }
+        let Some(tab) = self.query_tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        if tab.item.read(cx).has_unsaved_changes() {
+            self.confirm_discard_and_close(id, window, cx);
+            return;
+        }
+        self.close_tab_now(id, window, cx);
+    }
+
+    fn confirm_discard_and_close(
+        &mut self,
+        id: QueryTabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_prompt() {
+            return;
+        }
+        let Some(tab) = self.query_tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        let language = self.settings.read(cx).language();
+        let name = tab
+            .item
+            .read(cx)
+            .file_display_name()
+            .unwrap_or_else(|| text(language, "未命名查询", "Untitled Query").to_string());
+        let message = format!(
+            "{} “{name}”?",
+            text(language, "放弃更改并关闭", "Discard changes and close")
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(text(
+                language,
+                "未保存的更改将会丢失。",
+                "Unsaved changes will be lost.",
+            )),
+            &[
+                PromptButton::ok(text(language, "放弃并关闭", "Discard and Close")),
+                PromptButton::cancel(text(language, "取消", "Cancel")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |workspace, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.close_tab_now(id, window, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn close_tab_now(&mut self, id: QueryTabId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.close(id) {
             return;
         }
@@ -701,16 +778,24 @@ impl Render for AstesiaWorkspace {
                                         |(index, id)| {
                                             let id = *id;
                                             let is_active = id == active_tab;
+                                            let tab = self
+                                                .query_tabs
+                                                .iter()
+                                                .find(|tab| tab.id == id)
+                                                .expect("query tab model and views must agree");
+                                            let item = tab.item.read(cx);
+                                            let fallback = format!(
+                                                "{} {}",
+                                                text(language, "查询", "Query"),
+                                                index + 1
+                                            );
+                                            let label = item.document_label(&fallback);
                                             h_flex()
                                                 .id(format!("query-tab-{index}"))
                                                 .role(gpui::Role::Button)
                                                 .tab_index(0)
                                                 .key_context("QueryTabRow")
-                                                .aria_label(format!(
-                                                    "{} {}",
-                                                    text(language, "查询", "Query"),
-                                                    index + 1
-                                                ))
+                                                .aria_label(label.clone())
                                                 .aria_toggled(if is_active {
                                                     gpui::Toggled::True
                                                 } else {
@@ -742,11 +827,7 @@ impl Render for AstesiaWorkspace {
                                                     },
                                                 ))
                                                 .child(
-                                                    Label::new(format!(
-                                                        "{} {}",
-                                                        text(language, "查询", "Query"),
-                                                        index + 1
-                                                    ))
+                                                    Label::new(label)
                                                     .size(LabelSize::Small)
                                                     .weight(gpui::FontWeight::MEDIUM)
                                                     .flex_1(),

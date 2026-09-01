@@ -1,14 +1,18 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use editor::Editor;
-use gpui::{actions, App, ClickEvent, Entity, Focusable, FontWeight, Subscription};
+use editor::{Editor, EditorEvent};
+use gpui::{
+    actions, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable, FontWeight,
+    PathPromptOptions, PromptButton, PromptLevel, Subscription,
+};
 use multi_buffer::MultiBufferOffset;
 use serde_json::Value;
 use zed_ui::prelude::*;
 
 use crate::application::{
     Application, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionRequest,
-    QueryExecutionScope, QueryOperation, QueryTarget, QueryWorkspaceState,
+    QueryExecutionScope, QueryFileCompletion, QueryFileError, QueryFileRequest, QueryOperation,
+    QueryTarget, QueryWorkspaceState,
 };
 use crate::db::{ExplainMode, StatementResult};
 
@@ -17,8 +21,19 @@ use super::shell::ShellSettings;
 
 actions!(
     astesia_query,
-    [ExecuteQuery, ExecuteCurrentQuery, ExplainQuery]
+    [
+        ExecuteQuery,
+        ExecuteCurrentQuery,
+        ExplainQuery,
+        OpenQueryFile,
+        SaveQueryFile,
+        CopyQueryResults,
+        SelectAllQueryResults,
+        ClearQueryResultSelection
+    ]
 );
+
+pub(super) struct QueryDocumentStateChanged;
 
 pub(super) fn bind_query_item_keys(cx: &mut App) {
     cx.bind_keys([
@@ -34,14 +49,26 @@ pub(super) fn bind_query_item_keys(cx: &mut App) {
             ExecuteCurrentQuery,
             Some("QueryItem > Editor"),
         ),
+        gpui::KeyBinding::new("cmd-o", OpenQueryFile, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("ctrl-o", OpenQueryFile, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-s", SaveQueryFile, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("ctrl-s", SaveQueryFile, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-c", CopyQueryResults, Some("QueryResultGrid")),
+        gpui::KeyBinding::new("ctrl-c", CopyQueryResults, Some("QueryResultGrid")),
+        gpui::KeyBinding::new("cmd-a", SelectAllQueryResults, Some("QueryResultGrid")),
+        gpui::KeyBinding::new("ctrl-a", SelectAllQueryResults, Some("QueryResultGrid")),
+        gpui::KeyBinding::new("escape", ClearQueryResultSelection, Some("QueryResultGrid")),
     ]);
 }
 
 pub(super) struct QueryItem {
     application: Arc<Application>,
     editor: Entity<Editor>,
+    result_focus: FocusHandle,
     state: QueryWorkspaceState,
+    file_prompt_active: bool,
     settings: Entity<ShellSettings>,
+    _editor_subscription: Subscription,
     _settings_observation: Subscription,
 }
 
@@ -52,12 +79,28 @@ impl QueryItem {
         settings: Entity<ShellSettings>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let initial_text = editor.read(cx).text(cx);
+        let editor_subscription = cx.subscribe(&editor, |item, editor, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Edited { .. }) {
+                let was_dirty = item.state.is_file_dirty();
+                let text = editor.read(cx).text(cx);
+                if item.state.update_document_text(text) {
+                    if was_dirty != item.state.is_file_dirty() {
+                        cx.emit(QueryDocumentStateChanged);
+                    }
+                    cx.notify();
+                }
+            }
+        });
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             application,
             editor,
-            state: QueryWorkspaceState::default(),
+            result_focus: cx.focus_handle(),
+            state: QueryWorkspaceState::new(initial_text),
+            file_prompt_active: false,
             settings,
+            _editor_subscription: editor_subscription,
             _settings_observation: settings_observation,
         }
     }
@@ -79,6 +122,25 @@ impl QueryItem {
 
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.editor.read(cx).focus_handle(cx), cx);
+    }
+
+    pub(super) fn file_display_name(&self) -> Option<String> {
+        self.state.file_display_name()
+    }
+
+    pub(super) fn has_unsaved_changes(&self) -> bool {
+        self.state.is_file_dirty()
+    }
+
+    pub(super) fn document_label(&self, fallback: &str) -> String {
+        let label = self
+            .file_display_name()
+            .unwrap_or_else(|| fallback.to_string());
+        if self.has_unsaved_changes() {
+            format!("{label} •")
+        } else {
+            label
+        }
     }
 
     pub(super) fn invalidate_target(&mut self, target: &QueryTarget, cx: &mut Context<Self>) {
@@ -122,6 +184,237 @@ impl QueryItem {
         if self.state.set_target(None) {
             cx.notify();
         }
+    }
+
+    fn open_query_file_action(
+        &mut self,
+        _: &OpenQueryFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_to_open_query_file(window, cx);
+    }
+
+    fn open_query_file_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_to_open_query_file(window, cx);
+    }
+
+    fn prompt_to_open_query_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation_busy() {
+            return;
+        }
+        if !self.state.is_file_dirty() {
+            self.show_open_query_file_picker(window, cx);
+            return;
+        }
+
+        self.file_prompt_active = true;
+        cx.notify();
+        let language = self.settings.read(cx).language();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            text(
+                language,
+                "打开其他查询并放弃未保存的更改？",
+                "Open another query and discard unsaved changes?",
+            ),
+            Some(text(
+                language,
+                "当前查询的未保存更改将会丢失。",
+                "Unsaved changes in the current query will be lost.",
+            )),
+            &[
+                PromptButton::ok(text(language, "放弃并打开", "Discard and Open")),
+                PromptButton::cancel(text(language, "取消", "Cancel")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |item, cx| {
+            let should_open = answer.await.ok() == Some(0);
+            item.update_in(cx, |item, window, cx| {
+                item.file_prompt_active = false;
+                if should_open {
+                    item.show_open_query_file_picker(window, cx);
+                } else {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_open_query_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation_busy() {
+            return;
+        }
+        self.file_prompt_active = true;
+        cx.notify();
+        let language = self.settings.read(cx).language();
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(text(language, "打开 SQL 查询", "Open SQL Query").into()),
+        });
+        cx.spawn_in(window, async move |item, cx| {
+            let response = prompt.await;
+            item.update_in(cx, |item, window, cx| {
+                item.file_prompt_active = false;
+                let paths = match response {
+                    Ok(Ok(paths)) => paths,
+                    Ok(Err(error)) => {
+                        item.set_file_prompt_error("query_file_open_prompt_failed", error, cx);
+                        return;
+                    }
+                    Err(error) => {
+                        item.set_file_prompt_error("query_file_open_prompt_failed", error, cx);
+                        return;
+                    }
+                };
+                let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                    cx.notify();
+                    return;
+                };
+                item.start_open_query_file(path, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn save_query_file_action(
+        &mut self,
+        _: &SaveQueryFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_query_file(window, cx);
+    }
+
+    fn save_query_file_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_query_file(window, cx);
+    }
+
+    fn save_query_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation_busy() {
+            return;
+        }
+        if let Some(path) = self.state.file_path().map(PathBuf::from) {
+            self.start_save_query_file(path, window, cx);
+            return;
+        }
+
+        self.file_prompt_active = true;
+        cx.notify();
+        let prompt = cx.prompt_for_new_path(&PathBuf::default(), Some("query.sql"));
+        cx.spawn_in(window, async move |item, cx| {
+            let response = prompt.await;
+            item.update_in(cx, |item, window, cx| {
+                item.file_prompt_active = false;
+                let path = match response {
+                    Ok(Ok(path)) => path,
+                    Ok(Err(error)) => {
+                        item.set_file_prompt_error("query_file_save_prompt_failed", error, cx);
+                        return;
+                    }
+                    Err(error) => {
+                        item.set_file_prompt_error("query_file_save_prompt_failed", error, cx);
+                        return;
+                    }
+                };
+                let Some(path) = path else {
+                    cx.notify();
+                    return;
+                };
+                item.start_save_query_file(path, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_open_query_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(request) = self.state.begin_open_file(path) {
+            self.run_file_request(request, window, cx);
+        }
+    }
+
+    fn start_save_query_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(request) = self.state.begin_save_file(path) {
+            self.run_file_request(request, window, cx);
+        }
+    }
+
+    fn run_file_request(
+        &mut self,
+        request: QueryFileRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.notify();
+        let execution_request = request.clone();
+        let task = gpui_tokio::Tokio::spawn(cx, async move { execution_request.execute().await });
+        cx.spawn_in(window, async move |item, cx| {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(error) => Err(QueryFileError::task(error)),
+            };
+            item.update_in(cx, |item, window, cx| {
+                let completion = item.state.finish_file_operation(&request, result);
+                let document_state_changed = completion.is_some();
+                match completion {
+                    Some(QueryFileCompletion::Opened(text)) => {
+                        item.state.clear_results();
+                        item.editor
+                            .update(cx, |editor, cx| editor.set_text(text, window, cx));
+                        window.focus(&item.editor.read(cx).focus_handle(cx), cx);
+                    }
+                    Some(QueryFileCompletion::Saved) | None => {}
+                }
+                if document_state_changed {
+                    cx.emit(QueryDocumentStateChanged);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_file_prompt_error(
+        &mut self,
+        code: &'static str,
+        error: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .set_file_error(QueryFileError::prompt(code, error));
+        cx.notify();
+    }
+
+    fn file_operation_busy(&self) -> bool {
+        self.file_prompt_active || self.state.is_file_busy()
     }
 
     fn execute_all(&mut self, _: &ExecuteQuery, _: &mut Window, cx: &mut Context<Self>) {
@@ -258,6 +551,112 @@ impl QueryItem {
         }
     }
 
+    fn select_result_cell(
+        &mut self,
+        row: usize,
+        column: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.result_focus, cx);
+        if self
+            .state
+            .select_result_cell(row, column, event.modifiers().shift)
+        {
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+
+    fn select_result_row(
+        &mut self,
+        row: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.result_focus, cx);
+        let modifiers = event.modifiers();
+        if self
+            .state
+            .select_result_row(row, modifiers.shift, modifiers.secondary())
+        {
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+
+    fn copy_query_results(&mut self, _: &CopyQueryResults, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_result_selection(false, cx);
+    }
+
+    fn copy_query_results_click(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_result_selection(false, cx);
+    }
+
+    fn copy_query_results_with_headers_click(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_result_selection(true, cx);
+    }
+
+    fn copy_result_selection(&self, include_headers: bool, cx: &mut Context<Self>) {
+        if let Some(tsv) = self.state.result_selection_tsv(include_headers) {
+            cx.write_to_clipboard(ClipboardItem::new_string(tsv));
+        }
+    }
+
+    fn select_all_query_results(
+        &mut self,
+        _: &SelectAllQueryResults,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.select_all_result_rows() {
+            cx.notify();
+        }
+    }
+
+    fn select_all_query_results_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.result_focus, cx);
+        if self.state.select_all_result_rows() {
+            cx.notify();
+        }
+    }
+
+    fn clear_query_result_selection(
+        &mut self,
+        _: &ClearQueryResultSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_result_selection(cx);
+    }
+
+    fn clear_query_result_selection_click(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_result_selection(cx);
+    }
+
+    fn clear_result_selection(&mut self, cx: &mut Context<Self>) {
+        if self.state.clear_result_selection() {
+            cx.notify();
+        }
+    }
+
     fn render_result_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let language = self.settings.read(cx).language();
         (self.state.results().len() > 1).then(|| {
@@ -377,13 +776,27 @@ impl QueryItem {
 
     fn render_grid(&self, result: &StatementResult, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let grid_width = px(180.0 * result.columns.len() as f32);
+        let grid_width = px(48.0 + 180.0 * result.columns.len() as f32);
         let header = h_flex()
             .w_full()
             .flex_none()
             .border_b_1()
             .border_color(colors.border)
             .bg(colors.panel_background)
+            .child(
+                div()
+                    .w(px(48.0))
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .border_r_1()
+                    .border_color(colors.border)
+                    .child(
+                        Label::new("#")
+                            .size(LabelSize::XSmall)
+                            .weight(FontWeight::SEMIBOLD),
+                    ),
+            )
             .children(result.columns.iter().map(|column| {
                 div()
                     .w(px(180.0))
@@ -410,6 +823,7 @@ impl QueryItem {
                 visible_range
                     .filter_map(|row_index| {
                         let row = result.rows.get(row_index)?;
+                        let row_selected = item.state.is_result_row_selected(row_index);
                         Some(
                             h_flex()
                                 .w_full()
@@ -419,15 +833,47 @@ impl QueryItem {
                                 .when(row_index % 2 == 1, |element| {
                                     element.bg(colors.element_background)
                                 })
+                                .when(row_selected, |element| {
+                                    element.bg(colors.ghost_element_selected)
+                                })
+                                .hover(|element| element.bg(colors.ghost_element_hover))
+                                .child(
+                                    div()
+                                        .id(format!("query-result-row-{row_index}"))
+                                        .w(px(48.0))
+                                        .flex_none()
+                                        .px_2()
+                                        .py_1()
+                                        .border_r_1()
+                                        .border_color(colors.border)
+                                        .cursor_pointer()
+                                        .child(
+                                            Label::new((row_index + 1).to_string())
+                                                .size(LabelSize::XSmall),
+                                        )
+                                        .on_click(cx.listener(move |item, event, window, cx| {
+                                            item.select_result_row(row_index, event, window, cx);
+                                        })),
+                                )
                                 .children(result.columns.iter().enumerate().map(
                                     |(column_index, _)| {
+                                        let selected = item
+                                            .state
+                                            .is_result_cell_selected(row_index, column_index);
                                         div()
+                                            .id(format!(
+                                                "query-result-cell-{row_index}-{column_index}"
+                                            ))
                                             .w(px(180.0))
                                             .flex_none()
                                             .px_2()
                                             .py_1()
                                             .border_r_1()
                                             .border_color(colors.border)
+                                            .cursor_pointer()
+                                            .when(selected, |element| {
+                                                element.bg(colors.ghost_element_selected)
+                                            })
                                             .child(
                                                 Label::new(
                                                     row.get(column_index)
@@ -437,6 +883,17 @@ impl QueryItem {
                                                 .size(LabelSize::XSmall)
                                                 .truncate(),
                                             )
+                                            .on_click(cx.listener(
+                                                move |item, event, window, cx| {
+                                                    item.select_result_cell(
+                                                        row_index,
+                                                        column_index,
+                                                        event,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
                                     },
                                 )),
                         )
@@ -449,6 +906,11 @@ impl QueryItem {
 
         div()
             .id("query-result-grid")
+            .track_focus(&self.result_focus)
+            .key_context("QueryResultGrid")
+            .on_action(cx.listener(Self::copy_query_results))
+            .on_action(cx.listener(Self::select_all_query_results))
+            .on_action(cx.listener(Self::clear_query_result_selection))
             .size_full()
             .overflow_x_scroll()
             .child(
@@ -463,11 +925,23 @@ impl QueryItem {
     }
 }
 
+impl gpui::EventEmitter<QueryDocumentStateChanged> for QueryItem {}
+
 impl Render for QueryItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let busy = self.state.is_running();
+        let file_busy = self.file_operation_busy();
+        let file_label = self.document_label(text(language, "未命名查询", "Untitled Query"));
+        let file_error = self.state.file_error().map(|error| {
+            format!(
+                "{}: {} ({})",
+                text(language, "查询文件操作失败", "Query file operation failed"),
+                error.message,
+                error.code
+            )
+        });
         let target = self.state.target();
         let can_execute = target.is_some_and(|target| target.db_type.capabilities().sql);
         let can_explain =
@@ -491,12 +965,19 @@ impl Render for QueryItem {
                 )
             }
         });
+        let can_select_result_rows = self
+            .state
+            .active_result()
+            .is_some_and(|result| !result.columns.is_empty() && !result.rows.is_empty());
+        let has_result_selection = self.state.has_result_selection();
 
         v_flex()
             .key_context("QueryItem")
             .on_action(cx.listener(Self::execute_all))
             .on_action(cx.listener(Self::execute_current))
             .on_action(cx.listener(Self::explain))
+            .on_action(cx.listener(Self::open_query_file_action))
+            .on_action(cx.listener(Self::save_query_file_action))
             .size_full()
             .overflow_hidden()
             .child(
@@ -509,6 +990,21 @@ impl Render for QueryItem {
                     .border_b_1()
                     .border_color(colors.border)
                     .bg(colors.panel_background)
+                    .child(
+                        Button::new("open-query-file", text(language, "打开", "Open"))
+                            .size(ButtonSize::Compact)
+                            .disabled(file_busy)
+                            .key_binding(zed_ui::KeyBinding::for_action(&OpenQueryFile, cx))
+                            .on_click(cx.listener(Self::open_query_file_click)),
+                    )
+                    .child(
+                        Button::new("save-query-file", text(language, "保存", "Save"))
+                            .size(ButtonSize::Compact)
+                            .disabled(file_busy)
+                            .key_binding(zed_ui::KeyBinding::for_action(&SaveQueryFile, cx))
+                            .on_click(cx.listener(Self::save_query_file_click)),
+                    )
+                    .child(Label::new(file_label).size(LabelSize::XSmall).truncate())
                     .child(
                         Button::new("execute-query", text(language, "执行", "Run"))
                             .size(ButtonSize::Compact)
@@ -544,6 +1040,21 @@ impl Render for QueryItem {
                     .child(div().flex_1())
                     .child(Label::new(target_label).size(LabelSize::XSmall).truncate()),
             )
+            .children(file_error.map(|error| {
+                h_flex()
+                    .min_h(px(28.0))
+                    .flex_none()
+                    .items_center()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.panel_background)
+                    .child(
+                        Label::new(error)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error),
+                    )
+            }))
             .child(
                 div()
                     .h(px(280.0))
@@ -557,6 +1068,7 @@ impl Render for QueryItem {
                     .h(px(30.0))
                     .flex_none()
                     .items_center()
+                    .gap_1()
                     .px_3()
                     .border_t_1()
                     .border_b_1()
@@ -570,7 +1082,40 @@ impl Render for QueryItem {
                     .child(div().flex_1())
                     .children(
                         result_summary.map(|summary| Label::new(summary).size(LabelSize::XSmall)),
-                    ),
+                    )
+                    .when(can_select_result_rows, |bar| {
+                        bar.child(
+                            Button::new(
+                                "select-all-query-results",
+                                text(language, "全选", "Select All"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(Self::select_all_query_results_click)),
+                        )
+                    })
+                    .when(has_result_selection, |bar| {
+                        bar.child(
+                            Button::new("copy-query-results", text(language, "复制", "Copy"))
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(Self::copy_query_results_click)),
+                        )
+                        .child(
+                            Button::new(
+                                "copy-query-results-with-headers",
+                                text(language, "复制含表头", "Copy with Headers"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(Self::copy_query_results_with_headers_click)),
+                        )
+                        .child(
+                            Button::new(
+                                "clear-query-result-selection",
+                                text(language, "取消选择", "Clear Selection"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(Self::clear_query_result_selection_click)),
+                        )
+                    }),
             )
             .children(self.render_result_tabs(cx))
             .child(div().flex_1().min_h_0().child(self.render_results(cx)))
