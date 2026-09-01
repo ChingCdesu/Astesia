@@ -1,20 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Weak,
-};
+use std::sync::Arc;
 
 use serde::Serialize;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::connection_repository::{ConnectionRepositoryError, SharedConnectionRepository};
+use crate::connection_runtime::{
+    ConnectionGeneration, ConnectionRuntime, ConnectionSnapshot,
+    DriverHandle as RuntimeDriverHandle, ExclusiveConnectError, ExclusiveConnectOutcome,
+};
 use crate::connection_usage::ConnectionUsageLease;
-use crate::db::{ConnectionConfig, DatabaseDriver};
-use crate::state::create_driver;
+use crate::db::{create_driver, ConnectionConfig};
 
-pub(super) type DriverHandle = Arc<Mutex<Box<dyn DatabaseDriver>>>;
-pub(super) type ConnectionGeneration = u64;
-const MAX_RETAINED_LIFECYCLE_LOCKS: usize = 4_096;
+pub(super) type DriverHandle = RuntimeDriverHandle;
 
 #[derive(Debug, Clone)]
 pub(super) enum CatalogError {
@@ -64,14 +62,6 @@ pub(super) struct ConnectionProfile {
     pub revision: i64,
 }
 
-#[derive(Clone)]
-struct ConnectedDriver {
-    handle: DriverHandle,
-    _usage_lease: Arc<ConnectionUsageLease>,
-    profile_revision: i64,
-    generation: ConnectionGeneration,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ConnectOutcome {
     pub opened_now: bool,
@@ -110,33 +100,24 @@ pub(super) struct SavedQuery {
 
 #[derive(Clone)]
 pub(super) struct Catalog {
-    drivers: Arc<RwLock<HashMap<String, ConnectedDriver>>>,
+    runtime: ConnectionRuntime<ConnectionUsageLease>,
     queries: Arc<RwLock<HashMap<String, SavedQuery>>>,
     update_approvals: Arc<RwLock<HashSet<(String, String)>>>,
-    lifecycle_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    next_generation: Arc<AtomicU64>,
     repository: SharedConnectionRepository,
 }
 
 impl Catalog {
     pub fn with_repository(repository: SharedConnectionRepository) -> Self {
         Self {
-            drivers: Arc::default(),
+            runtime: ConnectionRuntime::new(),
             queries: Arc::default(),
             update_approvals: Arc::default(),
-            lifecycle_locks: Arc::default(),
-            next_generation: Arc::new(AtomicU64::new(1)),
             repository,
         }
     }
 
     fn allocate_generation(&self) -> ConnectionGeneration {
-        loop {
-            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-            if generation != 0 {
-                return generation;
-            }
-        }
+        self.runtime.allocate_generation()
     }
 
     async fn resolved_config(
@@ -191,20 +172,7 @@ impl Catalog {
     }
 
     pub async fn lock_connection_lifecycle(&self, connection_id: &str) -> OwnedMutexGuard<()> {
-        let lifecycle = {
-            let mut lifecycles = self.lifecycle_locks.lock().await;
-            if lifecycles.len() >= MAX_RETAINED_LIFECYCLE_LOCKS {
-                lifecycles.retain(|_, lifecycle| lifecycle.strong_count() > 0);
-            }
-            if let Some(lifecycle) = lifecycles.get(connection_id).and_then(Weak::upgrade) {
-                lifecycle
-            } else {
-                let lifecycle = Arc::new(Mutex::new(()));
-                lifecycles.insert(connection_id.to_string(), Arc::downgrade(&lifecycle));
-                lifecycle
-            }
-        };
-        lifecycle.lock_owned().await
+        self.runtime.lock_connection_lifecycle(connection_id).await
     }
 
     pub async fn profiles(&self) -> Result<Vec<ConnectionProfile>, CatalogError> {
@@ -230,23 +198,17 @@ impl Catalog {
     }
 
     pub async fn connected_generation(&self, connection_id: &str) -> Option<ConnectionGeneration> {
-        self.drivers
-            .read()
-            .await
-            .get(connection_id)
-            .map(|connected| connected.generation)
+        self.runtime.connected_generation(connection_id).await
     }
 
     async fn current_connection(
         &self,
         connection_id: &str,
-    ) -> Result<ConnectedDriver, CatalogError> {
+    ) -> Result<ConnectionSnapshot<ConnectionUsageLease>, CatalogError> {
         let connected = self
-            .drivers
-            .read()
+            .runtime
+            .connection(connection_id)
             .await
-            .get(connection_id)
-            .cloned()
             .ok_or_else(|| {
                 CatalogError::Message(format!(
                     "连接 {connection_id} 尚未访问，请先调用 connect_connection"
@@ -254,7 +216,7 @@ impl Catalog {
             })?;
 
         match self.profile(connection_id).await {
-            Ok(profile) if profile.revision == connected.profile_revision => Ok(connected),
+            Ok(profile) if profile.revision == connected.profile_revision() => Ok(connected),
             profile_result => {
                 let reason = match profile_result {
                     Ok(_) => "连接配置已被其他 Astesia 进程修改".to_string(),
@@ -306,7 +268,7 @@ impl Catalog {
             let connected = self.current_connection(connection_id).await?;
             return Ok(ConnectOutcome {
                 opened_now: false,
-                generation: connected.generation,
+                generation: connected.generation(),
             });
         }
         let generation = self.allocate_generation();
@@ -334,17 +296,17 @@ impl Catalog {
                 "连接 generation 必须大于 0".to_string(),
             ));
         }
-        let usage_lease = Arc::new(self.repository.acquire_mcp_usage(connection_id)?);
+        let usage_lease = self.repository.acquire_mcp_usage(connection_id)?;
         if self.connected_generation(connection_id).await.is_some() {
             let connected = self.current_connection(connection_id).await?;
             if expected_profile_revision
-                .is_some_and(|expected| expected != connected.profile_revision)
+                .is_some_and(|expected| expected != connected.profile_revision())
             {
                 return Err(CatalogError::Message(format!(
                     "连接 {connection_id} 的 App 授权 revision 与现有驱动不一致，拒绝复用（错误码：driver_stale）"
                 )));
             }
-            if connected.generation == generation {
+            if connected.generation() == generation {
                 return Ok(ConnectOutcome {
                     opened_now: false,
                     generation,
@@ -352,7 +314,7 @@ impl Catalog {
             }
             return Err(CatalogError::Message(format!(
                 "连接 {connection_id} 已被 generation {} 占用，不能切换到 generation {generation}",
-                connected.generation
+                connected.generation()
             )));
         }
 
@@ -367,55 +329,48 @@ impl Catalog {
         }
         let connected_revision = profile.revision;
         let config = self.resolved_config(&profile).await?;
-        let mut driver = create_driver(&config);
-        driver
-            .connect()
-            .await
-            .map_err(|error| format!("连接失败: {error}"))?;
-
-        let latest = match self.profile(connection_id).await {
-            Ok(profile) if profile.revision == connected_revision => profile,
-            Ok(_) => {
-                let _ = driver.disconnect().await;
-                return Err(CatalogError::Message(format!(
-                    "连接 {connection_id} 在建立过程中已被修改，请重新连接（错误码：driver_stale）"
-                )));
-            }
-            Err(error) => {
-                let _ = driver.disconnect().await;
-                return Err(CatalogError::Message(format!(
-                    "连接 {connection_id} 在建立过程中不可用：{error}（错误码：driver_stale）"
-                )));
-            }
-        };
-        let mut drivers = self.drivers.write().await;
-        if let Some(existing) = drivers.get(connection_id) {
-            let existing_generation = existing.generation;
-            drop(drivers);
-            let _ = driver.disconnect().await;
-            if existing_generation == generation {
-                return Ok(ConnectOutcome {
-                    opened_now: false,
-                    generation,
-                });
-            }
-            return Err(CatalogError::Message(format!(
-                "连接 {connection_id} 已被 generation {existing_generation} 占用"
-            )));
-        }
-        drivers.insert(
-            connection_id.to_string(),
-            ConnectedDriver {
-                handle: Arc::new(Mutex::new(driver)),
-                _usage_lease: usage_lease,
-                profile_revision: latest.revision,
+        let verification_catalog = self.clone();
+        let verification_id = connection_id.to_string();
+        let outcome = self
+            .runtime
+            .connect_exclusive(
+                connection_id.to_string(),
                 generation,
-            },
-        );
-        Ok(ConnectOutcome {
-            opened_now: true,
-            generation,
-        })
+                config,
+                connected_revision,
+                usage_lease,
+                move || async move {
+                    verification_catalog
+                        .profile(&verification_id)
+                        .await
+                        .map(|profile| profile.revision)
+                },
+            )
+            .await;
+        match outcome {
+            Ok(ExclusiveConnectOutcome::Opened) => Ok(ConnectOutcome {
+                opened_now: true,
+                generation,
+            }),
+            Ok(ExclusiveConnectOutcome::Existing) => Ok(ConnectOutcome {
+                opened_now: false,
+                generation,
+            }),
+            Err(ExclusiveConnectError::Connect(error)) => {
+                Err(CatalogError::Message(format!("连接失败: {error}")))
+            }
+            Err(ExclusiveConnectError::RevisionChanged) => Err(CatalogError::Message(format!(
+                "连接 {connection_id} 在建立过程中已被修改，请重新连接（错误码：driver_stale）"
+            ))),
+            Err(ExclusiveConnectError::Verification(error)) => Err(CatalogError::Message(format!(
+                "连接 {connection_id} 在建立过程中不可用：{error}（错误码：driver_stale）"
+            ))),
+            Err(ExclusiveConnectError::Occupied(existing_generation)) => {
+                Err(CatalogError::Message(format!(
+                    "连接 {connection_id} 已被 generation {existing_generation} 占用"
+                )))
+            }
+        }
     }
 
     async fn clear_update_approvals(&self, connection_id: &str) {
@@ -425,39 +380,14 @@ impl Catalog {
             .retain(|(approved_connection, _)| approved_connection != connection_id);
     }
 
-    async fn close_driver(
-        &self,
-        connection_id: &str,
-        driver: ConnectedDriver,
-    ) -> Result<bool, CatalogError> {
-        self.clear_update_approvals(connection_id).await;
-        driver
-            .handle
-            .lock()
-            .await
-            .disconnect()
-            .await
-            .map_err(|error| CatalogError::Message(format!("断开连接失败: {error}")))?;
-        Ok(true)
-    }
-
     pub async fn disconnect(&self, connection_id: &str) -> DisconnectOutcome {
-        let driver = self.drivers.write().await.remove(connection_id);
-        match driver {
-            Some(driver) => {
-                let generation = driver.generation;
-                DisconnectOutcome {
-                    generation: Some(generation),
-                    result: self.close_driver(connection_id, driver).await,
-                }
-            }
-            None => {
-                self.clear_update_approvals(connection_id).await;
-                DisconnectOutcome {
-                    generation: None,
-                    result: Ok(false),
-                }
-            }
+        self.clear_update_approvals(connection_id).await;
+        let outcome = self.runtime.disconnect(connection_id).await;
+        DisconnectOutcome {
+            generation: outcome.generation,
+            result: outcome
+                .result
+                .map_err(|error| CatalogError::Message(format!("断开连接失败: {error}"))),
         }
     }
 
@@ -466,23 +396,21 @@ impl Catalog {
         connection_id: &str,
         generation: ConnectionGeneration,
     ) -> Result<bool, CatalogError> {
-        let driver = {
-            let mut drivers = self.drivers.write().await;
-            let matches = drivers
-                .get(connection_id)
-                .is_some_and(|driver| driver.generation == generation);
-            matches.then(|| drivers.remove(connection_id)).flatten()
-        };
-        match driver {
-            Some(driver) => self.close_driver(connection_id, driver).await,
-            None => Ok(false),
+        let result = self
+            .runtime
+            .disconnect_if_generation(connection_id, generation)
+            .await
+            .map_err(|error| CatalogError::Message(format!("断开连接失败: {error}")))?;
+        if result {
+            self.clear_update_approvals(connection_id).await;
         }
+        Ok(result)
     }
 
     pub async fn driver(&self, connection_id: &str) -> Result<DriverHandle, CatalogError> {
         self.current_connection(connection_id)
             .await
-            .map(|connected| connected.handle)
+            .map(|connected| connected.handle())
     }
 
     pub async fn insert_query(&self, query: SavedQuery) -> Result<(), CatalogError> {

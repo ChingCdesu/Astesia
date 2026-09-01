@@ -13,28 +13,15 @@ pnpm mcp:build
 ```
 
 This builds a release executable and stages it at
-`src-tauri/binaries/astesia-mcp-<target-triple>` (`.exe` on Windows), which is
-the naming convention Tauri uses for external binaries. `pnpm tauri:dev`
-prepares the debug sidecar automatically; `pnpm tauri:build` prepares and
-bundles the release sidecar in the installer.
+`src-tauri/binaries/astesia-mcp-<target-triple>` (`.exe` on Windows). Run
+`pnpm mcp:prepare:debug` to stage a debug build.
 
-## Use the Desktop MCP Helper
+## Desktop Integration Status
 
-Select **MCP** in the app status bar to open the helper. It shows sidecar
-availability, process state, PID, endpoint, version, and recent startup errors.
-Choose a local port from `1024` to `65535` (default `43677`), then use
-**Start**, **Stop**, or **Restart**. The app stops its child process when the app
-exits, and the sidecar also shuts itself down if its parent process terminates
-unexpectedly.
-
-The service binds only to `127.0.0.1` and requires a randomly generated Bearer
-token. Use **Copy Configuration** to copy the endpoint and authorization header
-for your AI client. The token is stored locally by Astesia, passed to the
-sidecar through its environment, and never placed in the process arguments or
-URL. Client configuration formats vary; adapt the copied object to the format
-required by your client. The helper hides the token by default and can rotate it;
-rotation restarts a running service. The endpoint is intended for native local
-MCP clients and does not enable browser CORS.
+The GPUI shell does not currently expose desktop controls for the bundled HTTP
+sidecar. Standalone stdio remains available. The desktop runtime accepts a
+platform `SidecarHost` and shares the Application's single synchronization
+registry when a host is supplied.
 
 Streamable HTTP and stdio both open the desktop app's shared connection
 repository. On connection tests and connection requests, the MCP server resolves
@@ -102,24 +89,17 @@ force-disconnect command to a stdio session or receive its real-time driver
 state. Its OS lease remains visible to the desktop backend, so profile saves
 and deletes are still rejected while stdio uses the connection. If the user
 requests an App-side disconnect while stdio still holds the lease, Astesia
-disconnects the drivers it can reach and returns a structured partial result
-that instructs the user to call `disconnect_connection` in the MCP client or
-close the stdio process. Saved MCP queries and update-confirmation preferences
-remain scoped to one MCP session.
+disconnects the drivers it can reach and returns a `DisconnectReport` whose
+external usage is `StillInUse`. The UI instructs the user to call
+`disconnect_connection` in the MCP client or close the stdio process. Saved MCP
+queries and update-confirmation preferences remain scoped to one MCP session.
 
-On the first App start after upgrading, Astesia blocks access until legacy
-WebView connection data has been migrated. It explains the change before
-starting, creates one random master key in the system credential store, and
-encrypts each password independently in a shared local vault with AES-256-GCM.
-The authenticated data binds every ciphertext to its connection ID, database
-type, endpoint, account, and database. The bundled `astesia-mcp` then proves it
-can open the exact enabled-credential set at the same repository revision. The
-App deletes the old `localStorage` value only after repository migration,
-legacy-item cleanup, and sidecar verification all succeed. The same verification
-runs only during an explicit migration. Later App starts load connection
-metadata without opening the credential vault; App and MCP credential access
-still fail closed when the user first performs an operation that needs a
-password.
+The GPUI rebuild does not import WebView `localStorage`. Before constructing the
+Application, it probes the native shared repository and leaves corrupt or
+unreadable state untouched. Existing native repository and vault data remain
+available; profiles that existed only in WebView storage must be recreated.
+Metadata loads without opening the credential vault, and App and MCP credential
+access fail closed when an operation first needs a password.
 
 On Linux, a Secret Service provider and session D-Bus must be available (for
 example GNOME Keyring, KWallet, or KeePassXC Secret Service). If the system
@@ -176,9 +156,8 @@ session. A connection test is reported as HTTP occupancy too; the control
 command cancels it and waits for its test future and shared lease to be dropped.
 Each HTTP session otherwise closes its driver and acknowledges the result before
 the App checks the cross-process lease again. If stdio or another external MCP
-process still holds a lease, the operation returns a structured partial result
-with `partial=true`, `error_code="external_mcp_in_use"`, and
-`external_mcp_in_use=true`. Its remediation tells the user to call
+process still holds a lease, the operation returns a `DisconnectReport` whose
+external usage is `StillInUse`. Its remediation tells the user to call
 `disconnect_connection` in that MCP client or close the stdio process.
 
 Ending an HTTP session or stopping the helper releases its synchronized

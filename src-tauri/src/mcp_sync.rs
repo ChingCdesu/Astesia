@@ -12,6 +12,8 @@ use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::mcp_auth::has_safe_token_syntax;
+
 pub const SYNC_ENDPOINT_ENV: &str = "ASTESIA_MCP_SYNC_ENDPOINT";
 pub const SYNC_TOKEN_ENV: &str = "ASTESIA_MCP_SYNC_TOKEN";
 pub const SYNC_SERVICE_ID_ENV: &str = "ASTESIA_MCP_SERVICE_ID";
@@ -20,8 +22,6 @@ pub const SYNC_PATH: &str = "/v1/sync";
 pub const PROTOCOL_VERSION: u16 = 2;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(65);
-const MIN_TOKEN_BYTES: usize = 32;
-const MAX_TOKEN_BYTES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_CONTROL_ERROR_BYTES: usize = 4_096;
 
@@ -449,11 +449,7 @@ fn validate_endpoint(raw: &str) -> Result<Url, McpSyncError> {
 }
 
 fn validate_token(token: &str) -> Result<(), McpSyncError> {
-    let valid_length = (MIN_TOKEN_BYTES..=MAX_TOKEN_BYTES).contains(&token.len());
-    let valid_characters = token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'));
-    if valid_length && valid_characters {
+    if has_safe_token_syntax(token) {
         Ok(())
     } else {
         Err(McpSyncError::InvalidConfig(format!(

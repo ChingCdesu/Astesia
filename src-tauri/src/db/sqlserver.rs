@@ -6,7 +6,11 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-use super::{bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, UserInfo, ViewInfo};
+use super::{
+    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, SqlDialect,
+    StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+};
 
 /// Decode a SQL Server cell into a JSON value by matching on the tiberius
 /// `ColumnData` variant — covering every TDS type. Date/time variants are
@@ -36,9 +40,9 @@ fn mssql_cell_to_json(
         ColumnData::Guid(o) => (*o).map_or(J::Null, |g| J::String(g.to_string())),
         ColumnData::Numeric(o) => (*o).map_or(J::Null, |n| J::String(n.to_string())),
         ColumnData::Xml(o) => o.as_ref().map_or(J::Null, |x| J::String(x.to_string())),
-        ColumnData::Binary(o) => {
-            o.as_ref().map_or(J::Null, |b| J::String(bytes_to_hex(&b[..], "0x")))
-        }
+        ColumnData::Binary(o) => o
+            .as_ref()
+            .map_or(J::Null, |b| J::String(bytes_to_hex(&b[..], "0x"))),
         ColumnData::Date(_) => via!(NaiveDate, |v: NaiveDate| J::String(v.to_string())),
         ColumnData::Time(_) => via!(NaiveTime, |v: NaiveTime| J::String(v.to_string())),
         ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
@@ -97,6 +101,23 @@ async fn run_mssql_query(
     })
 }
 
+fn use_database_sql(database: &str) -> anyhow::Result<String> {
+    let database = SqlDialect::new(DbType::SQLServer).quote_identifier(database)?;
+    Ok(format!("USE {database}"))
+}
+
+fn in_database_sql(database: &str, sql: &str) -> anyhow::Result<String> {
+    Ok(format!("{}; {sql}", use_database_sql(database)?))
+}
+
+fn table_data_sql(table: &TableRef, page: u32, page_size: u32) -> anyhow::Result<String> {
+    let table = SqlDialect::new(DbType::SQLServer).quote_table_ref(table)?;
+    let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+    Ok(format!(
+        "SELECT * FROM {table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY"
+    ))
+}
+
 pub struct SqlServerDriver {
     config: ConnectionConfig,
     client: Option<Mutex<Client<tokio_util::compat::Compat<TcpStream>>>>,
@@ -104,14 +125,20 @@ pub struct SqlServerDriver {
 
 impl SqlServerDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config, client: None }
+        Self {
+            config,
+            client: None,
+        }
     }
 
     fn tiberius_config(&self) -> anyhow::Result<Config> {
         let mut config = Config::new();
         config.host(&self.config.host);
         config.port(self.config.port);
-        config.authentication(AuthMethod::sql_server(&self.config.username, &self.config.password));
+        config.authentication(AuthMethod::sql_server(
+            &self.config.username,
+            &self.config.password,
+        ));
         config.trust_cert();
         Ok(config)
     }
@@ -145,84 +172,147 @@ impl DatabaseDriver for SqlServerDriver {
     }
 
     async fn get_databases(&self) -> anyhow::Result<Vec<String>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let stream = client.query("SELECT name FROM sys.databases ORDER BY name", &[]).await?;
+        let stream = client
+            .query("SELECT name FROM sys.databases ORDER BY name", &[])
+            .await?;
         let rows = stream.into_first_result().await?;
         let databases: Vec<String> = rows
             .iter()
-            .filter_map(|row| row.try_get::<&str, _>(0).ok().flatten().map(|s| s.to_string()))
+            .filter_map(|row| {
+                row.try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string())
+            })
             .collect();
         Ok(databases)
     }
 
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT TABLE_NAME, TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
-            database
-        );
+        let sql = in_database_sql(
+            database,
+            "SELECT TABLE_NAME, TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+        )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
-        let tables: Vec<TableInfo> = rows
+        let tables = rows
             .iter()
-            .map(|row| TableInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
-                schema: row.try_get::<&str, _>(1).ok().flatten().map(|s| s.to_string()),
-                row_count: None,
-                comment: None,
+            .map(|row| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::from_parts(
+                        row.try_get::<&str, _>(1).ok().flatten().map(str::to_string),
+                        row.try_get::<&str, _>(0)
+                            .ok()
+                            .flatten()
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    row_count: None,
+                    comment: None,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(tables)
     }
 
-    async fn get_columns(&self, database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+    async fn get_columns(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
+        let (schema, table_name) = table.schema_and_table("dbo");
+        let sql = in_database_sql(
+            database,
+            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
              CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END as IS_PK \
              FROM INFORMATION_SCHEMA.COLUMNS c \
-             LEFT JOIN (SELECT ku.TABLE_NAME, ku.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc \
+             LEFT JOIN (SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc \
              JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME \
-             WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY') pk ON c.TABLE_NAME = pk.TABLE_NAME AND c.COLUMN_NAME = pk.COLUMN_NAME \
-             WHERE c.TABLE_NAME = '{}' ORDER BY c.ORDINAL_POSITION",
-            database, table
-        );
-        let stream = client.query(sql.as_str(), &[]).await?;
+             WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY') pk ON c.TABLE_SCHEMA = pk.TABLE_SCHEMA AND c.TABLE_NAME = pk.TABLE_NAME AND c.COLUMN_NAME = pk.COLUMN_NAME \
+             WHERE c.TABLE_NAME = @P1 AND c.TABLE_SCHEMA = @P2 ORDER BY c.ORDINAL_POSITION",
+        )?;
+        let stream = client.query(sql.as_str(), &[&table_name, &schema]).await?;
         let rows = stream.into_first_result().await?;
         let columns: Vec<ColumnInfo> = rows
             .iter()
             .map(|row| ColumnInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
-                data_type: row.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string(),
+                name: row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
+                data_type: row
+                    .try_get::<&str, _>(1)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
                 nullable: row.try_get::<&str, _>(2).ok().flatten().unwrap_or("YES") == "YES",
                 is_primary_key: row.try_get::<i32, _>(4).ok().flatten().unwrap_or(0) == 1,
-                default_value: row.try_get::<&str, _>(3).ok().flatten().map(|s| s.to_string()),
+                default_value: row
+                    .try_get::<&str, _>(3)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string()),
                 comment: None,
             })
             .collect();
         Ok(columns)
     }
 
-    async fn get_indexes(&self, database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+    async fn get_indexes(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT i.name AS index_name, COL_NAME(ic.object_id, ic.column_id) AS column_name, \
+        let (schema, table_name) = table.schema_and_table("dbo");
+        let sql = in_database_sql(
+            database,
+            "SELECT i.name AS index_name, COL_NAME(ic.object_id, ic.column_id) AS column_name, \
              i.is_unique, i.is_primary_key \
              FROM sys.indexes i \
              JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id \
-             WHERE OBJECT_NAME(i.object_id) = '{}' ORDER BY i.name, ic.key_ordinal",
-            database, table
-        );
-        let stream = client.query(sql.as_str(), &[]).await?;
+             WHERE OBJECT_NAME(i.object_id) = @P1 AND OBJECT_SCHEMA_NAME(i.object_id) = @P2 \
+             ORDER BY i.name, ic.key_ordinal",
+        )?;
+        let stream = client.query(sql.as_str(), &[&table_name, &schema]).await?;
         let rows = stream.into_first_result().await?;
-        let mut indexes: std::collections::HashMap<String, IndexInfo> = std::collections::HashMap::new();
+        let mut indexes: std::collections::HashMap<String, IndexInfo> =
+            std::collections::HashMap::new();
         for row in &rows {
-            let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string();
-            let column = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string();
+            let name = row
+                .try_get::<&str, _>(0)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let column = row
+                .try_get::<&str, _>(1)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
             let is_unique = row.try_get::<bool, _>(2).ok().flatten().unwrap_or(false);
             let is_primary = row.try_get::<bool, _>(3).ok().flatten().unwrap_or(false);
             let entry = indexes.entry(name.clone()).or_insert_with(|| IndexInfo {
@@ -237,9 +327,12 @@ impl DatabaseDriver for SqlServerDriver {
     }
 
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let full_sql = format!("USE [{}]; {}", database, sql);
+        let full_sql = in_database_sql(database, sql)?;
         run_mssql_query(&mut client, &full_sql).await
     }
 
@@ -248,10 +341,13 @@ impl DatabaseDriver for SqlServerDriver {
         database: &str,
         statements: Vec<String>,
     ) -> anyhow::Result<Vec<StatementResult>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        // Switch database once on the locked client
-        let _ = client.query(format!("USE [{}]", database).as_str(), &[]).await;
+        let use_database = use_database_sql(database)?;
+        client.query(use_database.as_str(), &[]).await?;
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();
@@ -270,134 +366,232 @@ impl DatabaseDriver for SqlServerDriver {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult> {
-        let offset = (page - 1) * page_size;
-        let sql = format!(
-            "SELECT * FROM [{}] ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-            table, offset, page_size
-        );
+        let sql = table_data_sql(table, page, page_size)?;
         self.execute_query(database, &sql).await
     }
 
     async fn get_views(&self, database: &str) -> anyhow::Result<Vec<ViewInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.views",
-            database
-        );
+        let sql = in_database_sql(
+            database,
+            "SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.views",
+        )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let views: Vec<ViewInfo> = rows
             .iter()
             .map(|row| ViewInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
-                definition: row.try_get::<&str, _>(1).ok().flatten().map(|s| s.to_string()),
+                name: row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
+                definition: row
+                    .try_get::<&str, _>(1)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string()),
             })
             .collect();
         Ok(views)
     }
 
     async fn get_functions(&self, database: &str) -> anyhow::Result<Vec<FunctionInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT name, OBJECT_DEFINITION(object_id) AS definition, type_desc FROM sys.objects WHERE type IN ('FN', 'IF', 'TF')",
-            database
-        );
+        let sql = in_database_sql(
+            database,
+            "SELECT name, OBJECT_DEFINITION(object_id) AS definition, type_desc FROM sys.objects WHERE type IN ('FN', 'IF', 'TF')",
+        )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let functions: Vec<FunctionInfo> = rows
             .iter()
             .map(|row| FunctionInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
+                name: row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
                 language: Some("T-SQL".to_string()),
-                return_type: row.try_get::<&str, _>(2).ok().flatten().map(|s| s.to_string()),
-                definition: row.try_get::<&str, _>(1).ok().flatten().map(|s| s.to_string()),
+                return_type: row
+                    .try_get::<&str, _>(2)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string()),
+                definition: row
+                    .try_get::<&str, _>(1)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string()),
             })
             .collect();
         Ok(functions)
     }
 
     async fn get_procedures(&self, database: &str) -> anyhow::Result<Vec<ProcedureInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.procedures",
-            database
-        );
+        let sql = in_database_sql(
+            database,
+            "SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.procedures",
+        )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let procedures: Vec<ProcedureInfo> = rows
             .iter()
             .map(|row| ProcedureInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
+                name: row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
                 language: Some("T-SQL".to_string()),
-                definition: row.try_get::<&str, _>(1).ok().flatten().map(|s| s.to_string()),
+                definition: row
+                    .try_get::<&str, _>(1)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.to_string()),
             })
             .collect();
         Ok(procedures)
     }
 
     async fn get_triggers(&self, database: &str) -> anyhow::Result<Vec<TriggerInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT t.name, te.type_desc, OBJECT_NAME(t.parent_id) AS table_name \
+        let sql = in_database_sql(
+            database,
+            "SELECT t.name, te.type_desc, OBJECT_NAME(t.parent_id) AS table_name \
              FROM sys.triggers t \
              JOIN sys.trigger_events te ON t.object_id = te.object_id",
-            database
-        );
+        )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let triggers: Vec<TriggerInfo> = rows
             .iter()
             .map(|row| {
-                let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string();
-                let event = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string();
-                let table = row.try_get::<&str, _>(2).ok().flatten().unwrap_or("").to_string();
+                let name = row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string();
+                let event = row
+                    .try_get::<&str, _>(1)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string();
+                let table = row
+                    .try_get::<&str, _>(2)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string();
                 TriggerInfo {
                     name,
                     event: event.clone(),
                     table,
-                    timing: if event.contains("AFTER") { "AFTER".to_string() } else { "INSTEAD OF".to_string() },
+                    timing: if event.contains("AFTER") {
+                        "AFTER".to_string()
+                    } else {
+                        "INSTEAD OF".to_string()
+                    },
                 }
             })
             .collect();
         Ok(triggers)
     }
 
-    async fn get_foreign_keys(&self, database: &str, table: &str) -> anyhow::Result<Vec<ForeignKeyInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+    async fn get_foreign_keys(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ForeignKeyInfo>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT fk.name AS constraint_name, \
+        let (schema, table_name) = table.schema_and_table("dbo");
+        let sql = in_database_sql(
+            database,
+            "SELECT fk.name AS constraint_name, \
              COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS from_column, \
+             OBJECT_SCHEMA_NAME(fkc.referenced_object_id) AS to_schema, \
              OBJECT_NAME(fkc.referenced_object_id) AS to_table, \
              COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS to_column \
              FROM sys.foreign_keys fk \
              JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
-             WHERE OBJECT_NAME(fk.parent_object_id) = '{}'",
-            database, table
-        );
-        let stream = client.query(sql.as_str(), &[]).await?;
+             WHERE OBJECT_NAME(fk.parent_object_id) = @P1 \
+             AND OBJECT_SCHEMA_NAME(fk.parent_object_id) = @P2",
+        )?;
+        let stream = client.query(sql.as_str(), &[&table_name, &schema]).await?;
         let rows = stream.into_first_result().await?;
-        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> = std::collections::HashMap::new();
+        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
+            std::collections::HashMap::new();
         for row in &rows {
-            let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string();
-            let from_col = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string();
-            let to_table = row.try_get::<&str, _>(2).ok().flatten().unwrap_or("").to_string();
-            let to_col = row.try_get::<&str, _>(3).ok().flatten().unwrap_or("").to_string();
-            let entry = fk_map.entry(name.clone()).or_insert_with(|| ForeignKeyInfo {
-                name: name.clone(),
-                from_table: table.to_string(),
-                from_columns: vec![],
-                to_table: to_table.clone(),
-                to_columns: vec![],
-            });
+            let name = row
+                .try_get::<&str, _>(0)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let from_col = row
+                .try_get::<&str, _>(1)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let to_table = row
+                .try_get::<&str, _>(3)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let to_schema = row
+                .try_get::<&str, _>(2)
+                .ok()
+                .flatten()
+                .unwrap_or("dbo")
+                .to_string();
+            let to_col = row
+                .try_get::<&str, _>(4)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let to_table = TableRef::qualified(to_schema, to_table);
+            let entry = fk_map
+                .entry(name.clone())
+                .or_insert_with(|| ForeignKeyInfo {
+                    name: name.clone(),
+                    from_table: table.clone(),
+                    from_columns: vec![],
+                    to_table,
+                    to_columns: vec![],
+                });
             entry.from_columns.push(from_col);
             entry.to_columns.push(to_col);
         }
@@ -405,40 +599,69 @@ impl DatabaseDriver for SqlServerDriver {
     }
 
     async fn get_users(&self) -> anyhow::Result<Vec<UserInfo>> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let stream = client.query(
-            "SELECT name FROM sys.database_principals WHERE type IN ('S','U')",
-            &[],
-        ).await?;
+        let stream = client
+            .query(
+                "SELECT name FROM sys.database_principals WHERE type IN ('S','U')",
+                &[],
+            )
+            .await?;
         let rows = stream.into_first_result().await?;
         let users: Vec<UserInfo> = rows
             .iter()
             .map(|row| UserInfo {
-                name: row.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
+                name: row
+                    .try_get::<&str, _>(0)
+                    .ok()
+                    .flatten()
+                    .unwrap_or("")
+                    .to_string(),
                 host: None,
             })
             .collect();
         Ok(users)
     }
 
-    async fn get_create_table_sql(&self, database: &str, table: &str) -> anyhow::Result<String> {
-        let mutex = self.client.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+    async fn get_create_table_sql(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<String> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let sql = format!(
-            "USE [{}]; SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-            database, table
-        );
-        let stream = client.query(sql.as_str(), &[]).await?;
+        let (schema, table_name) = table.schema_and_table("dbo");
+        let sql = in_database_sql(
+            database,
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, CHARACTER_MAXIMUM_LENGTH \
+             FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @P1 AND TABLE_SCHEMA = @P2 \
+             ORDER BY ORDINAL_POSITION",
+        )?;
+        let stream = client.query(sql.as_str(), &[&table_name, &schema]).await?;
         let rows = stream.into_first_result().await?;
-        let mut ddl = format!("CREATE TABLE [{}] (\n", table);
-        let col_defs: Vec<String> = rows.iter().map(|row| {
-            let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("");
-            let dtype = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("");
-            let nullable = row.try_get::<&str, _>(2).ok().flatten().unwrap_or("YES");
-            let null_str = if nullable == "NO" { " NOT NULL" } else { "" };
-            format!("  [{}] {}{}", name, dtype, null_str)
-        }).collect();
+        let dialect = SqlDialect::new(DbType::SQLServer);
+        let mut ddl = format!("CREATE TABLE {} (\n", dialect.quote_table_ref(table)?);
+        let col_defs: Vec<String> = rows
+            .iter()
+            .map(|row| -> anyhow::Result<String> {
+                let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("");
+                let dtype = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("");
+                let nullable = row.try_get::<&str, _>(2).ok().flatten().unwrap_or("YES");
+                let null_str = if nullable == "NO" { " NOT NULL" } else { "" };
+                Ok(format!(
+                    "  {} {}{}",
+                    dialect.quote_identifier(name)?,
+                    dtype,
+                    null_str
+                ))
+            })
+            .collect::<Result<_, _>>()?;
         ddl.push_str(&col_defs.join(",\n"));
         ddl.push_str("\n);");
         Ok(ddl)
@@ -446,5 +669,32 @@ impl DatabaseDriver for SqlServerDriver {
 
     fn db_type(&self) -> DbType {
         DbType::SQLServer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{in_database_sql, table_data_sql, use_database_sql};
+    use crate::db::TableRef;
+
+    #[test]
+    fn pagination_and_database_selection_quote_sqlserver_delimiters() {
+        assert_eq!(
+            table_data_sql(
+                &TableRef::qualified("odd]schema", "odd]table's"),
+                2,
+                25,
+            )
+            .unwrap(),
+            "SELECT * FROM [odd]]schema].[odd]]table's] ORDER BY (SELECT NULL) OFFSET 25 ROWS FETCH NEXT 25 ROWS ONLY"
+        );
+        assert_eq!(
+            use_database_sql("odd]database").unwrap(),
+            "USE [odd]]database]"
+        );
+        assert_eq!(
+            in_database_sql("odd]database", "SELECT 1").unwrap(),
+            "USE [odd]]database]; SELECT 1"
+        );
     }
 }

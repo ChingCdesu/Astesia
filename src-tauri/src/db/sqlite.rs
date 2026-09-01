@@ -3,7 +3,11 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::time::Instant;
 
-use super::{bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, StatementResult, TableInfo, TriggerInfo, ViewInfo};
+use super::{
+    bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
+    ForeignKeyInfo, IndexInfo, QueryResult, SqlDialect, StatementResult, TableInfo, TableRef,
+    TriggerInfo, ViewInfo,
+};
 
 /// Decode the `i`-th column of a SQLite row into a JSON value, dispatching on the
 /// value's actual storage class. SQLite is dynamically typed — a column's declared
@@ -30,7 +34,10 @@ fn sqlite_value_to_json(row: &SqliteRow, i: usize) -> serde_json::Value {
             .unwrap_or(J::Null),
         // TEXT and any fallback: decode as text — dates, decimals, JSON, etc. are
         // all stored as TEXT in SQLite and should display verbatim.
-        _ => row.try_get::<String, _>(i).map(J::String).unwrap_or(J::Null),
+        _ => row
+            .try_get::<String, _>(i)
+            .map(J::String)
+            .unwrap_or(J::Null),
     }
 }
 
@@ -93,6 +100,14 @@ async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Res
     }
 }
 
+fn table_data_sql(table: &TableRef, page: u32, page_size: u32) -> anyhow::Result<String> {
+    let table = SqlDialect::new(DbType::SQLite).quote_table_ref(table)?;
+    let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+    Ok(format!(
+        "SELECT * FROM {table} LIMIT {page_size} OFFSET {offset}"
+    ))
+}
+
 pub struct SqliteDriver {
     config: ConnectionConfig,
     pool: Option<SqlitePool>,
@@ -108,7 +123,9 @@ impl SqliteDriver {
     }
 
     fn pool(&self) -> anyhow::Result<&SqlitePool> {
-        self.pool.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))
+        self.pool
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))
     }
 }
 
@@ -153,20 +170,30 @@ impl DatabaseDriver for SqliteDriver {
         .await?;
         let tables = rows
             .iter()
-            .map(|row| TableInfo {
-                name: row.get::<String, _>("name"),
-                schema: None,
-                row_count: None,
-                comment: None,
+            .map(|row| -> anyhow::Result<_> {
+                Ok(TableInfo {
+                    reference: TableRef::unqualified(row.get::<String, _>("name")),
+                    row_count: None,
+                    comment: None,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(tables)
     }
 
-    async fn get_columns(&self, _database: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        _database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ColumnInfo>> {
         let pool = self.pool()?;
-        let sql = format!("PRAGMA table_info('{}')", table);
-        let rows: Vec<SqliteRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<SqliteRow> = sqlx::query(
+            "SELECT name, type, \"notnull\", dflt_value, pk \
+             FROM pragma_table_info(?) ORDER BY cid",
+        )
+        .bind(table.name())
+        .fetch_all(pool)
+        .await?;
         let columns = rows
             .iter()
             .map(|row| ColumnInfo {
@@ -181,17 +208,28 @@ impl DatabaseDriver for SqliteDriver {
         Ok(columns)
     }
 
-    async fn get_indexes(&self, _database: &str, table: &str) -> anyhow::Result<Vec<IndexInfo>> {
+    async fn get_indexes(
+        &self,
+        _database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<IndexInfo>> {
         let pool = self.pool()?;
-        let sql = format!("PRAGMA index_list('{}')", table);
-        let rows: Vec<SqliteRow> = sqlx::query(&sql).fetch_all(pool).await?;
+        let rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_index_list(?)")
+            .bind(table.name())
+            .fetch_all(pool)
+            .await?;
         let mut indexes = Vec::new();
         for row in &rows {
             let name: String = row.get("name");
             let unique: i32 = row.get("unique");
-            let info_sql = format!("PRAGMA index_info('{}')", name);
-            let info_rows: Vec<SqliteRow> = sqlx::query(&info_sql).fetch_all(pool).await?;
-            let columns: Vec<String> = info_rows.iter().map(|r| r.get::<String, _>("name")).collect();
+            let info_rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_index_info(?)")
+                .bind(&name)
+                .fetch_all(pool)
+                .await?;
+            let columns: Vec<String> = info_rows
+                .iter()
+                .map(|r| r.get::<String, _>("name"))
+                .collect();
             indexes.push(IndexInfo {
                 name,
                 columns,
@@ -205,7 +243,7 @@ impl DatabaseDriver for SqliteDriver {
     async fn execute_query(&self, _database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        run_sqlite_query(&mut *conn, sql).await
+        run_sqlite_query(&mut conn, sql).await
     }
 
     async fn execute_statements(
@@ -218,7 +256,7 @@ impl DatabaseDriver for SqliteDriver {
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();
-            match run_sqlite_query(&mut *conn, &sql).await {
+            match run_sqlite_query(&mut conn, &sql).await {
                 Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
                 Err(e) => {
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -233,25 +271,20 @@ impl DatabaseDriver for SqliteDriver {
     async fn get_table_data(
         &self,
         database: &str,
-        table: &str,
+        table: &TableRef,
         page: u32,
         page_size: u32,
     ) -> anyhow::Result<QueryResult> {
-        let offset = (page - 1) * page_size;
-        let sql = format!(
-            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}",
-            table, page_size, offset
-        );
+        let sql = table_data_sql(table, page, page_size)?;
         self.execute_query(database, &sql).await
     }
 
     async fn get_views(&self, _database: &str) -> anyhow::Result<Vec<ViewInfo>> {
         let pool = self.pool()?;
-        let rows: Vec<SqliteRow> = sqlx::query(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'view'"
-        )
-        .fetch_all(pool)
-        .await?;
+        let rows: Vec<SqliteRow> =
+            sqlx::query("SELECT name, sql FROM sqlite_master WHERE type = 'view'")
+                .fetch_all(pool)
+                .await?;
         let views = rows
             .iter()
             .map(|row| ViewInfo {
@@ -264,11 +297,10 @@ impl DatabaseDriver for SqliteDriver {
 
     async fn get_triggers(&self, _database: &str) -> anyhow::Result<Vec<TriggerInfo>> {
         let pool = self.pool()?;
-        let rows: Vec<SqliteRow> = sqlx::query(
-            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'"
-        )
-        .fetch_all(pool)
-        .await?;
+        let rows: Vec<SqliteRow> =
+            sqlx::query("SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'")
+                .fetch_all(pool)
+                .await?;
         let triggers = rows
             .iter()
             .map(|row| {
@@ -305,21 +337,29 @@ impl DatabaseDriver for SqliteDriver {
         Ok(triggers)
     }
 
-    async fn get_foreign_keys(&self, _database: &str, table: &str) -> anyhow::Result<Vec<ForeignKeyInfo>> {
+    async fn get_foreign_keys(
+        &self,
+        _database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ForeignKeyInfo>> {
         let pool = self.pool()?;
-        let sql = format!("PRAGMA foreign_key_list('{}')", table);
-        let rows: Vec<SqliteRow> = sqlx::query(&sql).fetch_all(pool).await?;
-        let mut fk_map: std::collections::HashMap<i32, ForeignKeyInfo> = std::collections::HashMap::new();
+        let rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_foreign_key_list(?)")
+            .bind(table.name())
+            .fetch_all(pool)
+            .await?;
+        let mut fk_map: std::collections::HashMap<i32, ForeignKeyInfo> =
+            std::collections::HashMap::new();
         for row in &rows {
             let id: i32 = row.get("id");
             let ref_table: String = row.get("table");
             let from_col: String = row.get("from");
             let to_col: String = row.get("to");
+            let ref_table = TableRef::from_parts(table.schema().map(str::to_string), ref_table);
             let entry = fk_map.entry(id).or_insert_with(|| ForeignKeyInfo {
                 name: format!("fk_{}_{}", table, id),
-                from_table: table.to_string(),
+                from_table: table.clone(),
                 from_columns: vec![],
-                to_table: ref_table.clone(),
+                to_table: ref_table,
                 to_columns: vec![],
             });
             entry.from_columns.push(from_col);
@@ -328,15 +368,78 @@ impl DatabaseDriver for SqliteDriver {
         Ok(fk_map.into_values().collect())
     }
 
-    async fn get_create_table_sql(&self, _database: &str, table: &str) -> anyhow::Result<String> {
+    async fn get_create_table_sql(
+        &self,
+        _database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<String> {
         let pool = self.pool()?;
-        let sql = format!("SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'", table);
-        let rows: Vec<SqliteRow> = sqlx::query(&sql).fetch_all(pool).await?;
-        rows.first().and_then(|r| r.try_get::<String, _>("sql").ok())
+        let rows: Vec<SqliteRow> =
+            sqlx::query("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(table.name())
+                .fetch_all(pool)
+                .await?;
+        rows.first()
+            .and_then(|r| r.try_get::<String, _>("sql").ok())
             .ok_or_else(|| anyhow::anyhow!("Table not found"))
     }
 
     fn db_type(&self) -> DbType {
         DbType::SQLite
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ConnectionConfig {
+        ConnectionConfig {
+            id: "sqlite-special-identifiers".to_string(),
+            name: "SQLite special identifiers".to_string(),
+            db_type: DbType::SQLite,
+            host: ":memory:".to_string(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            color: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn columns_and_pagination_accept_delimiter_bearing_table_names() {
+        let mut driver = SqliteDriver::new(config());
+        driver.connect().await.unwrap();
+        let table = TableRef::unqualified("odd\"table's");
+        driver
+            .execute_query(
+                "main",
+                "CREATE TABLE \"odd\"\"table's\" (\"display\"\"name\" TEXT UNIQUE)",
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_query(
+                "main",
+                "INSERT INTO \"odd\"\"table's\" (\"display\"\"name\") VALUES ('ready')",
+            )
+            .await
+            .unwrap();
+
+        let columns = driver.get_columns("main", &table).await.unwrap();
+        assert_eq!(columns[0].name, "display\"name");
+        assert_eq!(driver.get_indexes("main", &table).await.unwrap().len(), 1);
+        assert!(driver
+            .get_create_table_sql("main", &table)
+            .await
+            .unwrap()
+            .starts_with("CREATE TABLE"));
+        let rows = driver.get_table_data("main", &table, 1, 10).await.unwrap();
+        assert_eq!(rows.rows[0][0], serde_json::json!("ready"));
+        assert_eq!(
+            table_data_sql(&table, 2, 10).unwrap(),
+            "SELECT * FROM \"odd\"\"table's\" LIMIT 10 OFFSET 10"
+        );
     }
 }
