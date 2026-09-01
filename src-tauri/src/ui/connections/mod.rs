@@ -3,7 +3,7 @@ mod view;
 
 use std::sync::Arc;
 
-use gpui::{App, ClickEvent, EventEmitter, PromptButton, PromptLevel};
+use gpui::{App, ClickEvent, Entity, EventEmitter, PromptButton, PromptLevel, Subscription, Task};
 use zed_ui::prelude::*;
 
 use crate::application::connection_workspace::{
@@ -11,13 +11,16 @@ use crate::application::connection_workspace::{
     ProfileOperationRequest, SnapshotApply,
 };
 use crate::application::{
-    Application, ConnectionOutcome, ConnectionProfileSnapshot, ProfileOperationCommand,
-    ProfileOperationCompletion, ProfileOperationOutcome,
+    Application, ConnectionOutcome, ConnectionProfileSnapshot, ConnectionWorkspaceSnapshot,
+    ProfileOperationCommand, ProfileOperationCompletion, ProfileOperationOutcome, QueryTarget,
 };
 use crate::connection_repository::SharedConnectionProfile;
+use crate::platform::UiEvent;
 
 use self::presentation::repository_error_message;
 use super::engine_presentation::engine_label;
+use super::localization::text;
+use super::shell::ShellSettings;
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(272.0);
 
@@ -25,6 +28,8 @@ pub(super) fn bind_connection_profiles_keys(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("enter", menu::Confirm, Some("ConnectionProfileRow")),
         gpui::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileRow")),
+        gpui::KeyBinding::new("enter", menu::Confirm, Some("QueryTargetRow")),
+        gpui::KeyBinding::new("space", menu::Confirm, Some("QueryTargetRow")),
     ]);
 }
 
@@ -32,13 +37,24 @@ pub(super) struct ConnectionProfilesPanel {
     application: Arc<Application>,
     state: ConnectionWorkspaceState,
     selected_profile_id: Option<String>,
+    selected_query_target: Option<QueryTarget>,
     notice: Option<PanelNotice>,
+    settings: Entity<ShellSettings>,
+    _settings_observation: Subscription,
+    _application_events: Task<()>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum ConnectionProfilesEvent {
     CreateRequested,
     EditRequested(Arc<SharedConnectionProfile>),
+    QueryTargetSelected(QueryTarget),
+    QueryTargetInvalidated(QueryTarget),
+    QuerySessionInvalidated {
+        connection_id: String,
+        session_generation: u64,
+    },
+    QuerySessionsChanged(Arc<ConnectionWorkspaceSnapshot>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,41 +75,15 @@ pub(super) enum ConnectionSessionStatus {
     Deleting,
 }
 
-impl ConnectionSessionStatus {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Loading => "连接状态加载中",
-            Self::NoSelection => "未选择连接",
-            Self::Disconnected => "未连接",
-            Self::Connecting => "连接中",
-            Self::Connected => "已连接",
-            Self::Disconnecting => "断开中",
-            Self::Deleting => "删除中",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConnectionActivityStatus {
     Loading,
     Refreshing,
     LoadingDatabases,
+    LoadingObjects,
     Working,
     NeedsRefresh,
     Ready,
-}
-
-impl ConnectionActivityStatus {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Loading => "正在加载",
-            Self::Refreshing => "正在刷新",
-            Self::LoadingDatabases => "正在加载数据库",
-            Self::Working => "正在处理",
-            Self::NeedsRefresh => "需要刷新",
-            Self::Ready => "就绪",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,12 +102,35 @@ struct PanelNotice {
 impl EventEmitter<ConnectionProfilesEvent> for ConnectionProfilesPanel {}
 
 impl ConnectionProfilesPanel {
-    pub(super) fn new(application: Arc<Application>, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        application: Arc<Application>,
+        settings: Entity<ShellSettings>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
+        let mut application_events = application.subscribe_events();
+        let application_event_task = cx.spawn(async move |panel, cx| loop {
+            let refresh = match application_events.recv().await {
+                Ok(UiEvent::McpConnectionsChanged(_)) => true,
+                Ok(UiEvent::TaskProgress { .. } | UiEvent::TaskCompleted { .. }) => false,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            if refresh {
+                panel
+                    .update(cx, |panel, cx| panel.refresh_profiles(cx))
+                    .ok();
+            }
+        });
         let mut panel = Self {
             application,
             state: ConnectionWorkspaceState::default(),
             selected_profile_id: None,
+            selected_query_target: None,
             notice: None,
+            settings,
+            _settings_observation: settings_observation,
+            _application_events: application_event_task,
         };
         panel.refresh_profiles(cx);
         panel
@@ -128,8 +141,17 @@ impl ConnectionProfilesPanel {
         self.refresh_profiles(cx);
     }
 
-    pub(super) fn status(&self) -> ConnectionProfilesStatus {
-        derive_status(&self.state, self.selected_profile_id.as_deref())
+    pub(super) fn status(&self, cx: &App) -> ConnectionProfilesStatus {
+        derive_status(
+            &self.state,
+            self.selected_profile_id.as_deref(),
+            self.selected_query_target.as_ref(),
+            self.settings.read(cx).language(),
+        )
+    }
+
+    pub(super) fn query_target(&self) -> Option<&QueryTarget> {
+        self.selected_query_target.as_ref()
     }
 
     fn selected_profile(&self) -> Option<&ConnectionProfileSnapshot> {
@@ -147,6 +169,72 @@ impl ConnectionProfilesPanel {
 
     fn reconcile_selection(&mut self) {
         reconcile_selected_profile(&mut self.selected_profile_id, self.state.snapshot());
+    }
+
+    fn reconcile_query_target(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.selected_query_target.as_ref() else {
+            return;
+        };
+        if !self.state.query_target_is_live(target) {
+            self.clear_query_target(cx);
+        }
+    }
+
+    fn select_database(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        if self.selected_query_target.as_ref() != Some(&target) {
+            self.selected_query_target = Some(target.clone());
+            cx.emit(ConnectionProfilesEvent::QueryTargetSelected(target.clone()));
+        }
+        self.load_objects(target, cx);
+        cx.notify();
+    }
+
+    fn invalidate_query_session(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let selected_session_generation = self
+            .selected_query_target
+            .as_ref()
+            .filter(|target| target.connection_id == connection_id)
+            .map(|target| target.session_generation);
+        let current_session_generation = self
+            .state
+            .snapshot()
+            .and_then(|snapshot| {
+                snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.profile.id == connection_id)
+            })
+            .and_then(|profile| profile.session.generation);
+        if let Some(session_generation) = current_session_generation.or(selected_session_generation)
+        {
+            cx.emit(ConnectionProfilesEvent::QuerySessionInvalidated {
+                connection_id: connection_id.to_string(),
+                session_generation,
+            });
+        }
+        if self
+            .selected_query_target
+            .as_ref()
+            .is_some_and(|target| target.connection_id == connection_id)
+        {
+            self.selected_query_target = None;
+            cx.notify();
+        }
+    }
+
+    fn clear_query_target(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.selected_query_target.take() {
+            cx.emit(ConnectionProfilesEvent::QueryTargetInvalidated(target));
+            cx.notify();
+        }
+    }
+
+    fn emit_query_sessions(&self, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.state.snapshot() {
+            cx.emit(ConnectionProfilesEvent::QuerySessionsChanged(Arc::new(
+                snapshot.clone(),
+            )));
+        }
     }
 
     fn set_notice(&mut self, tone: NoticeTone, message: impl Into<String>) {
@@ -180,6 +268,8 @@ impl ConnectionProfilesPanel {
                     let applied = panel.state.finish_refresh(request, result);
                     if applied == SnapshotApply::Applied {
                         panel.reconcile_selection();
+                        panel.reconcile_query_target(cx);
+                        panel.emit_query_sessions(cx);
                     }
                     if applied != SnapshotApply::Superseded {
                         cx.notify();
@@ -284,6 +374,7 @@ impl ConnectionProfilesPanel {
             return;
         };
         self.state.clear_database_state(&connection_id);
+        self.invalidate_query_session(&connection_id, cx);
         self.notice = None;
         cx.notify();
         self.run_profile_operation(
@@ -301,16 +392,23 @@ impl ConnectionProfilesPanel {
     ) {
         let connection_id = command.connection_id().to_string();
         let operation_name = command.operation_name();
+        let language = self.settings.read(cx).language();
         let unexpected_message = match &command {
-            ProfileOperationCommand::Connect { .. } => {
-                "连接后台任务意外结束；请刷新后确认当前连接状态。"
-            }
-            ProfileOperationCommand::Disconnect { .. } => {
-                "断开后台任务意外结束；请刷新后确认当前连接状态。"
-            }
-            ProfileOperationCommand::Delete { .. } => {
-                "删除后台任务意外结束；请刷新后确认连接配置是否仍存在。"
-            }
+            ProfileOperationCommand::Connect { .. } => text(
+                language,
+                "连接后台任务意外结束；请刷新后确认当前连接状态。",
+                "The connect task ended unexpectedly. Refresh to confirm the current state.",
+            ),
+            ProfileOperationCommand::Disconnect { .. } => text(
+                language,
+                "断开后台任务意外结束；请刷新后确认当前连接状态。",
+                "The disconnect task ended unexpectedly. Refresh to confirm the current state.",
+            ),
+            ProfileOperationCommand::Delete { .. } => text(
+                language,
+                "删除后台任务意外结束；请刷新后确认连接配置是否仍存在。",
+                "The delete task ended unexpectedly. Refresh to confirm whether the profile still exists.",
+            ),
         };
         let application = self.application.clone();
         let operation = gpui_tokio::Tokio::spawn(cx, async move {
@@ -354,32 +452,42 @@ impl ConnectionProfilesPanel {
             request,
             completion.snapshot.map_err(ConnectionWorkspaceError::from),
         );
+        let language = self.settings.read(cx).language();
         match apply {
             OperationApply::Discarded => return,
             OperationApply::Snapshot(SnapshotApply::Applied) => {
                 self.reconcile_selection();
-                if self.apply_operation_outcome(completion.outcome) {
+                self.reconcile_query_target(cx);
+                self.emit_query_sessions(cx);
+                if self.apply_operation_outcome(completion.outcome, language) {
                     self.load_databases(connection_id.to_string(), cx);
                 }
             }
             OperationApply::Snapshot(SnapshotApply::Failed) => {
                 self.set_notice(
                     NoticeTone::Error,
-                    operation_snapshot_failure_message(&completion.outcome),
+                    operation_snapshot_failure_message(&completion.outcome, language),
                 );
             }
             OperationApply::Snapshot(SnapshotApply::Superseded) => {
-                self.apply_superseded_outcome(completion.outcome);
+                self.apply_superseded_outcome(completion.outcome, language);
                 self.refresh_profiles(cx);
             }
         }
         cx.notify();
     }
 
-    fn apply_operation_outcome(&mut self, outcome: ProfileOperationOutcome) -> bool {
+    fn apply_operation_outcome(
+        &mut self,
+        outcome: ProfileOperationOutcome,
+        language: crate::platform::UiLanguage,
+    ) -> bool {
         match outcome {
             ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Succeeded)) => {
-                self.set_notice(NoticeTone::Info, "连接成功");
+                self.set_notice(
+                    NoticeTone::Info,
+                    text(language, "连接成功", "Connected successfully"),
+                );
                 true
             }
             ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Rejected(message)))
@@ -398,9 +506,13 @@ impl ConnectionProfilesPanel {
             }
             ProfileOperationOutcome::Deleted(Ok(deleted)) => {
                 let message = if deleted.credential_cleanup_pending {
-                    "连接配置已删除；系统凭据将在稍后完成清理"
+                    text(
+                        language,
+                        "连接配置已删除；系统凭据将在稍后完成清理",
+                        "Connection profile deleted; system credentials will be cleaned up later",
+                    )
                 } else {
-                    "连接配置已删除"
+                    text(language, "连接配置已删除", "Connection profile deleted")
                 };
                 self.set_notice(NoticeTone::Info, message);
                 false
@@ -412,17 +524,36 @@ impl ConnectionProfilesPanel {
         }
     }
 
-    fn apply_superseded_outcome(&mut self, outcome: ProfileOperationOutcome) {
+    fn apply_superseded_outcome(
+        &mut self,
+        outcome: ProfileOperationOutcome,
+        language: crate::platform::UiLanguage,
+    ) {
         match outcome {
-            ProfileOperationOutcome::Connected(_) => {
-                self.set_notice(NoticeTone::Warning, "连接结果已返回，正在重新同步最新状态…")
-            }
-            ProfileOperationOutcome::Disconnected(_) => {
-                self.set_notice(NoticeTone::Warning, "断开结果已返回，正在重新同步最新状态…")
-            }
-            ProfileOperationOutcome::Deleted(Ok(_)) => {
-                self.set_notice(NoticeTone::Warning, "连接配置已删除，正在重新同步最新列表…")
-            }
+            ProfileOperationOutcome::Connected(_) => self.set_notice(
+                NoticeTone::Warning,
+                text(
+                    language,
+                    "连接结果已返回，正在重新同步最新状态…",
+                    "The connect result arrived; resyncing the latest state…",
+                ),
+            ),
+            ProfileOperationOutcome::Disconnected(_) => self.set_notice(
+                NoticeTone::Warning,
+                text(
+                    language,
+                    "断开结果已返回，正在重新同步最新状态…",
+                    "The disconnect result arrived; resyncing the latest state…",
+                ),
+            ),
+            ProfileOperationOutcome::Deleted(Ok(_)) => self.set_notice(
+                NoticeTone::Warning,
+                text(
+                    language,
+                    "连接配置已删除，正在重新同步最新列表…",
+                    "The connection profile was deleted; resyncing the latest list…",
+                ),
+            ),
             ProfileOperationOutcome::Deleted(Err(error)) => {
                 self.set_notice(NoticeTone::Error, repository_error_message(&error))
             }
@@ -436,6 +567,7 @@ impl ConnectionProfilesPanel {
         cx.notify();
 
         let application = self.application.clone();
+        let language = self.settings.read(cx).language();
         let connection_id_for_task = connection_id.clone();
         let load = gpui_tokio::Tokio::spawn(cx, async move {
             application
@@ -446,11 +578,19 @@ impl ConnectionProfilesPanel {
         cx.spawn(async move |panel, cx| {
             let result = match load.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("数据库列表后台任务意外结束：{error}")),
+                Err(error) => Err(format!(
+                    "{}: {error}",
+                    text(
+                        language,
+                        "数据库列表后台任务意外结束",
+                        "The database-list task ended unexpectedly",
+                    )
+                )),
             };
             panel
                 .update(cx, |panel, cx| {
                     if panel.state.finish_database_load(&request, result) {
+                        panel.reconcile_query_target(cx);
                         cx.notify();
                     }
                 })
@@ -468,6 +608,56 @@ impl ConnectionProfilesPanel {
     ) {
         self.state.clear_database_state(&connection_id);
         self.load_databases(connection_id, cx);
+    }
+
+    fn load_objects(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        let Some(request) = self.state.begin_object_load(&target) else {
+            return;
+        };
+        cx.notify();
+
+        let application = self.application.clone();
+        let language = self.settings.read(cx).language();
+        let connection_id = target.connection_id.clone();
+        let database = target.database.clone();
+        let load = gpui_tokio::Tokio::spawn(cx, async move {
+            application
+                .catalog()
+                .tables(&connection_id, &database)
+                .await
+        });
+        cx.spawn(async move |panel, cx| {
+            let result = match load.await {
+                Ok(result) => result,
+                Err(error) => Err(format!(
+                    "{}: {error}",
+                    text(
+                        language,
+                        "数据库对象后台任务意外结束",
+                        "The database-object task ended unexpectedly",
+                    )
+                )),
+            };
+            panel
+                .update(cx, |panel, cx| {
+                    if panel.state.finish_object_load(&request, result) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn retry_objects(
+        &mut self,
+        target: QueryTarget,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.clear_object_state(&target);
+        self.load_objects(target, cx);
     }
 
     fn confirm_delete_selected(
@@ -492,12 +682,24 @@ impl ConnectionProfilesPanel {
         }
         let connection_id = selected.profile.id.clone();
         let expected_revision = selected.profile.revision;
-        let message = format!("删除连接配置“{}”？", selected.profile.name);
+        let language = self.settings.read(cx).language();
+        let message = format!(
+            "{} “{}”?",
+            text(language, "删除连接配置", "Delete connection profile"),
+            selected.profile.name
+        );
         let answer = window.prompt(
             PromptLevel::Warning,
             &message,
-            Some("保存的凭据也会被删除。此操作无法撤销。"),
-            &[PromptButton::ok("删除"), PromptButton::cancel("取消")],
+            Some(text(
+                language,
+                "保存的凭据也会被删除。此操作无法撤销。",
+                "Stored credentials will also be deleted. This cannot be undone.",
+            )),
+            &[
+                PromptButton::ok(text(language, "删除", "Delete")),
+                PromptButton::cancel(text(language, "取消", "Cancel")),
+            ],
             cx,
         );
         cx.spawn(async move |panel, cx| {
@@ -528,6 +730,7 @@ impl ConnectionProfilesPanel {
         else {
             return;
         };
+        self.invalidate_query_session(&connection_id, cx);
         self.notice = None;
         cx.notify();
         self.run_profile_operation(
@@ -541,26 +744,39 @@ impl ConnectionProfilesPanel {
     }
 }
 
-fn operation_snapshot_failure_message(outcome: &ProfileOperationOutcome) -> &'static str {
+fn operation_snapshot_failure_message(
+    outcome: &ProfileOperationOutcome,
+    language: crate::platform::UiLanguage,
+) -> &'static str {
     match outcome {
-        ProfileOperationOutcome::Connected(_) => {
-            "连接结果已返回，但无法刷新连接状态；请刷新后再继续。"
-        }
-        ProfileOperationOutcome::Disconnected(_) => {
-            "断开结果已返回，但无法刷新连接状态；请刷新后再继续。"
-        }
-        ProfileOperationOutcome::Deleted(Ok(_)) => {
-            "连接配置已删除，但无法刷新列表；当前列表已锁定，请刷新后再继续。"
-        }
-        ProfileOperationOutcome::Deleted(Err(_)) => {
-            "删除失败，且无法刷新连接列表；请刷新后再继续。"
-        }
+        ProfileOperationOutcome::Connected(_) => text(
+            language,
+            "连接结果已返回，但无法刷新连接状态；请刷新后再继续。",
+            "The connect result arrived, but the connection state could not be refreshed. Refresh before continuing.",
+        ),
+        ProfileOperationOutcome::Disconnected(_) => text(
+            language,
+            "断开结果已返回，但无法刷新连接状态；请刷新后再继续。",
+            "The disconnect result arrived, but the connection state could not be refreshed. Refresh before continuing.",
+        ),
+        ProfileOperationOutcome::Deleted(Ok(_)) => text(
+            language,
+            "连接配置已删除，但无法刷新列表；当前列表已锁定，请刷新后再继续。",
+            "The profile was deleted, but the list could not be refreshed. Refresh before continuing.",
+        ),
+        ProfileOperationOutcome::Deleted(Err(_)) => text(
+            language,
+            "删除失败，且无法刷新连接列表；请刷新后再继续。",
+            "Deletion failed and the connection list could not be refreshed. Refresh before continuing.",
+        ),
     }
 }
 
 fn derive_status(
     state: &ConnectionWorkspaceState,
     selected_profile_id: Option<&str>,
+    selected_target: Option<&QueryTarget>,
+    language: crate::platform::UiLanguage,
 ) -> ConnectionProfilesStatus {
     let selected = selected_profile_id.and_then(|selected| {
         state
@@ -579,11 +795,18 @@ fn derive_status(
             )
         })
         .or_else(|| {
-            state
-                .snapshot()
-                .map(|snapshot| format!("{} 个连接配置", snapshot.profiles.len()))
+            state.snapshot().map(|snapshot| {
+                format!(
+                    "{} {}",
+                    snapshot.profiles.len(),
+                    super::localization::text(language, "个连接配置", "connection profiles")
+                )
+            })
         })
-        .unwrap_or_else(|| "未加载连接配置".to_string());
+        .unwrap_or_else(|| {
+            super::localization::text(language, "未加载连接配置", "Connection profiles not loaded")
+                .to_string()
+        });
     let session = match (selected, operation) {
         (_, Some(ProfileOperationKind::Connecting)) => ConnectionSessionStatus::Connecting,
         (_, Some(ProfileOperationKind::Disconnecting)) => ConnectionSessionStatus::Disconnecting,
@@ -608,6 +831,13 @@ fn derive_status(
         )
     }) {
         ConnectionActivityStatus::LoadingDatabases
+    } else if selected_target.is_some_and(|target| {
+        matches!(
+            state.objects(target),
+            Some(crate::application::connection_workspace::ObjectListState::Loading { .. })
+        )
+    }) {
+        ConnectionActivityStatus::LoadingObjects
     } else if state.snapshot().is_some() {
         ConnectionActivityStatus::Ready
     } else {
@@ -625,14 +855,16 @@ fn reconcile_selected_profile(
     selected_profile_id: &mut Option<String>,
     snapshot: Option<&crate::application::ConnectionWorkspaceSnapshot>,
 ) {
-    if selected_profile_id.as_ref().is_some_and(|selected| {
-        snapshot.is_none_or(|snapshot| {
-            !snapshot
-                .profiles
-                .iter()
-                .any(|profile| &profile.profile.id == selected)
-        })
-    }) {
+    let Some(selected) = selected_profile_id.as_ref() else {
+        return;
+    };
+    let selection_exists = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .profiles
+            .iter()
+            .any(|profile| &profile.profile.id == selected)
+    });
+    if !selection_exists {
         *selected_profile_id = None;
     }
 }
@@ -697,12 +929,22 @@ mod tests {
         let refresh = state.begin_refresh();
         state.finish_refresh(refresh, Ok(snapshot(profile("primary"))));
 
-        let status = derive_status(&state, Some("primary"));
+        let status = derive_status(
+            &state,
+            Some("primary"),
+            None,
+            crate::platform::UiLanguage::Chinese,
+        );
         assert_eq!(status.session, ConnectionSessionStatus::Connected);
         assert_eq!(status.activity, ConnectionActivityStatus::Ready);
 
         state.begin_operation("primary", ProfileOperationKind::Disconnecting);
-        let status = derive_status(&state, Some("primary"));
+        let status = derive_status(
+            &state,
+            Some("primary"),
+            None,
+            crate::platform::UiLanguage::Chinese,
+        );
         assert_eq!(status.session, ConnectionSessionStatus::Disconnecting);
         assert_eq!(status.activity, ConnectionActivityStatus::Working);
     }

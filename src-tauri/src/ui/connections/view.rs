@@ -2,14 +2,14 @@ use gpui::{rgb, FontWeight};
 use zed_ui::prelude::*;
 
 use crate::application::connection_workspace::{
-    ConnectionWorkspaceError, DatabaseListState, ProfileOperationKind,
+    ConnectionWorkspaceError, DatabaseListState, ObjectListState, ProfileOperationKind,
 };
-use crate::application::{ConnectionProfileSnapshot, ConnectionWorkspaceSnapshot};
-use crate::connection_repository::SharedConnectionProfile;
+use crate::application::{ConnectionProfileSnapshot, ConnectionWorkspaceSnapshot, QueryTarget};
 
 use super::presentation::grouped_profiles;
 use super::{ConnectionProfilesPanel, NoticeTone, PanelNotice, SIDEBAR_WIDTH};
 use crate::ui::engine_presentation::{engine_label, profile_color, profile_endpoint};
+use crate::ui::localization::text;
 
 impl ConnectionProfilesPanel {
     fn render_initial_error(
@@ -17,6 +17,7 @@ impl ConnectionProfilesPanel {
         error: &ConnectionWorkspaceError,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let language = self.settings.read(cx).language();
         v_flex()
             .flex_1()
             .justify_center()
@@ -30,9 +31,16 @@ impl ConnectionProfilesPanel {
                     .size(LabelSize::XSmall)
                     .line_clamp(3),
             )
-            .child(Label::new(format!("错误码：{}", error.code)).size(LabelSize::XSmall))
             .child(
-                Button::new("retry-connection-profiles", "重试")
+                Label::new(format!(
+                    "{}{}",
+                    text(language, "错误码：", "Error code: "),
+                    error.code
+                ))
+                .size(LabelSize::XSmall),
+            )
+            .child(
+                Button::new("retry-connection-profiles", text(language, "重试", "Retry"))
                     .size(ButtonSize::Compact)
                     .on_click(cx.listener(Self::refresh)),
             )
@@ -44,6 +52,7 @@ impl ConnectionProfilesPanel {
         error: &ConnectionWorkspaceError,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let language = self.settings.read(cx).language();
         v_flex()
             .gap_1()
             .m_2()
@@ -63,9 +72,12 @@ impl ConnectionProfilesPanel {
                     .line_clamp(2),
             )
             .child(
-                Button::new("retry-stale-connection-profiles", "重新加载")
-                    .size(ButtonSize::Compact)
-                    .on_click(cx.listener(Self::refresh)),
+                Button::new(
+                    "retry-stale-connection-profiles",
+                    text(language, "重新加载", "Reload"),
+                )
+                .size(ButtonSize::Compact)
+                .on_click(cx.listener(Self::refresh)),
             )
             .into_any_element()
     }
@@ -75,27 +87,30 @@ impl ConnectionProfilesPanel {
         snapshot: &ConnectionProfileSnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let language = self.settings.read(cx).language();
         let profile = &snapshot.profile;
         let profile_id = profile.id.clone();
         let selected = self.selected_profile_id.as_deref() == Some(profile.id.as_str());
         let colors = cx.theme().colors();
         let operation = self.state.operation(&profile.id);
         let session_label = match operation {
-            Some(ProfileOperationKind::Connecting) => "连接中",
-            Some(ProfileOperationKind::Disconnecting) => "断开中",
-            Some(ProfileOperationKind::Deleting) => "删除中",
-            None if snapshot.session.is_connected() => "已连接",
-            None => "未连接",
+            Some(ProfileOperationKind::Connecting) => text(language, "连接中", "Connecting"),
+            Some(ProfileOperationKind::Disconnecting) => text(language, "断开中", "Disconnecting"),
+            Some(ProfileOperationKind::Deleting) => text(language, "删除中", "Deleting"),
+            None if snapshot.session.is_connected() => text(language, "已连接", "Connected"),
+            None => text(language, "未连接", "Disconnected"),
         };
-        let mcp_label = snapshot.mcp_usage.as_ref().and_then(|usage| {
-            usage.mcp_in_use.then(|| {
+        let mcp_label = snapshot
+            .mcp_usage
+            .as_ref()
+            .filter(|usage| usage.mcp_in_use)
+            .map(|usage| {
                 if usage.mcp_session_count > 0 {
                     format!("MCP {}", usage.mcp_session_count)
                 } else {
                     "MCP".to_string()
                 }
-            })
-        });
+            });
         let tags = profile
             .tags
             .iter()
@@ -202,26 +217,38 @@ impl ConnectionProfilesPanel {
             })
             .child(profile_header)
             .when(selected && snapshot.session.is_connected(), |element| {
-                element.child(self.render_database_list(profile, cx))
+                element.child(self.render_database_list(snapshot, cx))
             })
             .into_any_element()
     }
 
     fn render_database_list(
         &self,
-        profile: &SharedConnectionProfile,
+        snapshot: &ConnectionProfileSnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let profile = &snapshot.profile;
+        let language = self.settings.read(cx).language();
         match self.state.databases(&profile.id) {
             None => h_flex()
                 .pl(px(17.0))
                 .pt_1()
-                .child(Label::new("等待加载数据库…").size(LabelSize::XSmall))
+                .child(
+                    Label::new(text(
+                        language,
+                        "等待加载数据库…",
+                        "Waiting to load databases…",
+                    ))
+                    .size(LabelSize::XSmall),
+                )
                 .into_any_element(),
             Some(DatabaseListState::Loading { .. }) => h_flex()
                 .pl(px(17.0))
                 .pt_1()
-                .child(Label::new("正在加载数据库…").size(LabelSize::XSmall))
+                .child(
+                    Label::new(text(language, "正在加载数据库…", "Loading databases…"))
+                        .size(LabelSize::XSmall),
+                )
                 .into_any_element(),
             Some(DatabaseListState::Failed { error, .. }) => {
                 let connection_id = profile.id.clone();
@@ -236,33 +263,163 @@ impl ConnectionProfilesPanel {
                             .line_clamp(2),
                     )
                     .child(
-                        Button::new(format!("retry-databases-{connection_id}"), "重试")
-                            .size(ButtonSize::Compact)
-                            .on_click(cx.listener(move |panel, event, window, cx| {
+                        Button::new(
+                            format!("retry-databases-{connection_id}"),
+                            text(language, "重试", "Retry"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(
+                            move |panel, event, window, cx| {
                                 panel.retry_databases(connection_id.clone(), event, window, cx);
-                            })),
+                            },
+                        )),
                     )
                     .into_any_element()
             }
             Some(DatabaseListState::Ready { databases, .. }) if databases.is_empty() => h_flex()
                 .pl(px(17.0))
                 .pt_1()
-                .child(Label::new("未发现数据库").size(LabelSize::XSmall))
+                .child(
+                    Label::new(text(language, "未发现数据库", "No databases found"))
+                        .size(LabelSize::XSmall),
+                )
                 .into_any_element(),
             Some(DatabaseListState::Ready { databases, .. }) => v_flex()
                 .pl(px(17.0))
                 .pt_1()
                 .gap_0p5()
                 .children(databases.iter().map(|database| {
+                    let target = QueryTarget {
+                        connection_id: profile.id.clone(),
+                        connection_name: profile.name.clone(),
+                        database: database.clone(),
+                        db_type: profile.db_type,
+                        session_generation: snapshot
+                            .session
+                            .generation
+                            .expect("database rows require a live session"),
+                    };
+                    let selected = self.selected_query_target.as_ref() == Some(&target);
+                    let target_for_click = target.clone();
+                    let target_for_action = target.clone();
+                    v_flex()
+                        .min_w_0()
+                        .child(
+                            h_flex()
+                                .id(format!("query-target-{}-{database}", profile.id))
+                                .min_w_0()
+                                .gap_1p5()
+                                .px_1()
+                                .py_0p5()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .role(gpui::Role::Button)
+                                .tab_index(0)
+                                .key_context("QueryTargetRow")
+                                .aria_label(format!(
+                                    "{} {} · {database}",
+                                    text(language, "查询", "Query"),
+                                    profile.name
+                                ))
+                                .aria_toggled(if selected {
+                                    gpui::Toggled::True
+                                } else {
+                                    gpui::Toggled::False
+                                })
+                                .when(selected, |element| {
+                                    element.bg(cx.theme().colors().ghost_element_selected)
+                                })
+                                .hover(|element| {
+                                    element.bg(cx.theme().colors().ghost_element_hover)
+                                })
+                                .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
+                                    panel.select_database(target_for_action.clone(), cx);
+                                }))
+                                .on_click(cx.listener(move |panel, _, _, cx| {
+                                    panel.select_database(target_for_click.clone(), cx);
+                                }))
+                                .child(div().size(px(4.0)).rounded_full().bg(rgb(0xa1a1aa)))
+                                .child(
+                                    Label::new(database.clone())
+                                        .size(LabelSize::XSmall)
+                                        .truncate(),
+                                ),
+                        )
+                        .when(selected, |element| {
+                            element.child(self.render_object_list(&target, cx))
+                        })
+                }))
+                .into_any_element(),
+        }
+    }
+
+    fn render_object_list(&self, target: &QueryTarget, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.settings.read(cx).language();
+        match self.state.objects(target) {
+            None | Some(ObjectListState::Loading { .. }) => h_flex()
+                .pl_4()
+                .py_1()
+                .child(
+                    Label::new(text(language, "正在加载对象…", "Loading objects…"))
+                        .size(LabelSize::XSmall),
+                )
+                .into_any_element(),
+            Some(ObjectListState::Failed { error, .. }) => {
+                let target = target.clone();
+                v_flex()
+                    .pl_4()
+                    .py_1()
+                    .gap_1()
+                    .child(
+                        Label::new(error.clone())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error)
+                            .line_clamp(2),
+                    )
+                    .child(
+                        Button::new(
+                            format!("retry-objects-{}-{}", target.connection_id, target.database),
+                            text(language, "重试", "Retry"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(
+                            move |panel, event, window, cx| {
+                                panel.retry_objects(target.clone(), event, window, cx);
+                            },
+                        )),
+                    )
+                    .into_any_element()
+            }
+            Some(ObjectListState::Ready { objects, .. }) if objects.is_empty() => h_flex()
+                .pl_4()
+                .py_1()
+                .child(
+                    Label::new(text(language, "未发现对象", "No objects found"))
+                        .size(LabelSize::XSmall),
+                )
+                .into_any_element(),
+            Some(ObjectListState::Ready { objects, .. }) => v_flex()
+                .pl_4()
+                .py_1()
+                .gap_0p5()
+                .children(objects.iter().map(|object| {
+                    let name = object
+                        .reference
+                        .schema()
+                        .map(|schema| format!("{schema}.{}", object.reference.name()))
+                        .unwrap_or_else(|| object.reference.name().to_string());
                     h_flex()
                         .min_w_0()
                         .gap_1p5()
-                        .child(div().size(px(4.0)).rounded_full().bg(rgb(0xa1a1aa)))
-                        .child(
-                            Label::new(database.clone())
-                                .size(LabelSize::XSmall)
-                                .truncate(),
-                        )
+                        .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
+                        .child(Label::new(name).size(LabelSize::XSmall).truncate())
+                        .when_some(object.row_count, |element, count| {
+                            element.child(
+                                Label::new(count.to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
                 }))
                 .into_any_element(),
         }
@@ -273,6 +430,7 @@ impl ConnectionProfilesPanel {
         snapshot: &ConnectionWorkspaceSnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let language = self.settings.read(cx).language();
         if snapshot.profiles.is_empty() {
             return v_flex()
                 .flex_1()
@@ -280,12 +438,24 @@ impl ConnectionProfilesPanel {
                 .items_center()
                 .gap_1()
                 .p_4()
-                .child(Label::new("暂无连接").size(LabelSize::Small))
-                .child(Label::new("创建一个连接配置开始工作").size(LabelSize::XSmall))
                 .child(
-                    Button::new("create-first-connection-profile", "新建连接")
-                        .size(ButtonSize::Compact)
-                        .on_click(cx.listener(Self::create_profile)),
+                    Label::new(text(language, "暂无连接", "No connections")).size(LabelSize::Small),
+                )
+                .child(
+                    Label::new(text(
+                        language,
+                        "创建一个连接配置开始工作",
+                        "Create a connection profile to get started",
+                    ))
+                    .size(LabelSize::XSmall),
+                )
+                .child(
+                    Button::new(
+                        "create-first-connection-profile",
+                        text(language, "新建连接", "New Connection"),
+                    )
+                    .size(ButtonSize::Compact)
+                    .on_click(cx.listener(Self::create_profile)),
                 )
                 .into_any_element();
         }
@@ -299,7 +469,7 @@ impl ConnectionProfilesPanel {
                     .pb_1()
                     .justify_between()
                     .child(
-                        Label::new(group.name.unwrap_or("未分组"))
+                        Label::new(group.name.unwrap_or(text(language, "未分组", "Ungrouped")))
                             .size(LabelSize::XSmall)
                             .weight(FontWeight::SEMIBOLD),
                     )
@@ -354,6 +524,7 @@ impl ConnectionProfilesPanel {
     }
 
     fn render_selected_actions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let language = self.settings.read(cx).language();
         let selected = self.selected_profile()?;
         let connection_id = selected.profile.id.as_str();
         let operation = self.state.operation(connection_id);
@@ -364,11 +535,11 @@ impl ConnectionProfilesPanel {
             .is_some_and(|usage| usage.mcp_in_use);
         let connected = selected.session.is_connected();
         let action_label = match operation {
-            Some(ProfileOperationKind::Connecting) => "连接中",
-            Some(ProfileOperationKind::Disconnecting) => "断开中",
-            Some(ProfileOperationKind::Deleting) => "删除中",
-            None if connected => "断开",
-            None => "连接",
+            Some(ProfileOperationKind::Connecting) => text(language, "连接中", "Connecting"),
+            Some(ProfileOperationKind::Disconnecting) => text(language, "断开中", "Disconnecting"),
+            Some(ProfileOperationKind::Deleting) => text(language, "删除中", "Deleting"),
+            None if connected => text(language, "断开", "Disconnect"),
+            None => text(language, "连接", "Connect"),
         };
 
         Some(
@@ -391,18 +562,22 @@ impl ConnectionProfilesPanel {
                         )
                         .child(
                             Label::new(if connected {
-                                "Database Session"
+                                text(language, "数据库会话", "Database Session")
                             } else {
-                                "Profile"
+                                text(language, "连接配置", "Profile")
                             })
                             .size(LabelSize::XSmall),
                         ),
                 )
                 .when(mcp_in_use, |element| {
                     element.child(
-                        Label::new("MCP 正在使用；资料暂时只读")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Warning),
+                        Label::new(text(
+                            language,
+                            "MCP 正在使用；资料暂时只读",
+                            "MCP is using this profile; it is temporarily read-only",
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
                     )
                 })
                 .child(
@@ -433,18 +608,24 @@ impl ConnectionProfilesPanel {
                                 ),
                         )
                         .child(
-                            Button::new("edit-selected-connection-profile", "编辑")
-                                .size(ButtonSize::Compact)
-                                .disabled(busy || mcp_in_use)
-                                .on_click(cx.listener(Self::edit_selected)),
+                            Button::new(
+                                "edit-selected-connection-profile",
+                                text(language, "编辑", "Edit"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .disabled(busy || mcp_in_use)
+                            .on_click(cx.listener(Self::edit_selected)),
                         )
                         .child(
-                            Button::new("delete-selected-connection-profile", "删除")
-                                .size(ButtonSize::Compact)
-                                .color(Color::Error)
-                                .loading(operation == Some(ProfileOperationKind::Deleting))
-                                .disabled(busy || mcp_in_use)
-                                .on_click(cx.listener(Self::confirm_delete_selected)),
+                            Button::new(
+                                "delete-selected-connection-profile",
+                                text(language, "删除", "Delete"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .color(Color::Error)
+                            .loading(operation == Some(ProfileOperationKind::Deleting))
+                            .disabled(busy || mcp_in_use)
+                            .on_click(cx.listener(Self::confirm_delete_selected)),
                         ),
                 )
                 .into_any_element(),
@@ -456,13 +637,17 @@ impl Render for ConnectionProfilesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().colors().border;
         let panel_background = cx.theme().colors().panel_background;
+        let language = self.settings.read(cx).language();
         let content = match (self.state.snapshot(), self.state.error()) {
             (None, Some(error)) => self.render_initial_error(error, cx),
             (None, None) => v_flex()
                 .flex_1()
                 .justify_center()
                 .items_center()
-                .child(Label::new("正在加载连接…").size(LabelSize::Small))
+                .child(
+                    Label::new(text(language, "正在加载连接…", "Loading connections…"))
+                        .size(LabelSize::Small),
+                )
                 .into_any_element(),
             (Some(snapshot), error) => v_flex()
                 .flex_1()
@@ -492,7 +677,7 @@ impl Render for ConnectionProfilesPanel {
                     .border_b_1()
                     .border_color(border)
                     .child(
-                        Label::new("连接")
+                        Label::new(text(language, "连接", "Connections"))
                             .size(LabelSize::Small)
                             .weight(FontWeight::SEMIBOLD),
                     )
@@ -500,17 +685,23 @@ impl Render for ConnectionProfilesPanel {
                         h_flex()
                             .gap_1()
                             .child(
-                                Button::new("create-connection-profile", "新建")
-                                    .size(ButtonSize::Compact)
-                                    .disabled(self.actions_blocked())
-                                    .on_click(cx.listener(Self::create_profile)),
+                                Button::new(
+                                    "create-connection-profile",
+                                    text(language, "新建", "New"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .disabled(self.actions_blocked())
+                                .on_click(cx.listener(Self::create_profile)),
                             )
                             .child(
-                                Button::new("refresh-connection-profiles", "刷新")
-                                    .size(ButtonSize::Compact)
-                                    .loading(self.state.is_refreshing())
-                                    .disabled(self.state.is_refreshing())
-                                    .on_click(cx.listener(Self::refresh)),
+                                Button::new(
+                                    "refresh-connection-profiles",
+                                    text(language, "刷新", "Refresh"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .loading(self.state.is_refreshing())
+                                .disabled(self.state.is_refreshing())
+                                .on_click(cx.listener(Self::refresh)),
                             ),
                     ),
             )

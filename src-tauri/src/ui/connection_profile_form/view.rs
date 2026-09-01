@@ -7,12 +7,16 @@ use super::{
 };
 use crate::db::DbType;
 use crate::ui::engine_presentation::engine_label;
+use crate::ui::localization::text;
 
 impl ConnectionProfileForm {
     fn render_engine_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_1()
-            .child(Label::new("数据库类型").size(LabelSize::Small))
+            .child(
+                Label::new(text(self.language, "数据库类型", "Database Type"))
+                    .size(LabelSize::Small),
+            )
             .child(
                 h_flex()
                     .flex_wrap()
@@ -85,16 +89,28 @@ impl Render for ConnectionProfileForm {
         let editing = self.origin.is_editing();
         let removes_credential = self.origin.removes_saved_credential(self.db_type);
         let title = if editing {
-            "编辑连接"
+            text(self.language, "编辑连接", "Edit Connection")
         } else {
-            "新建连接"
+            text(self.language, "新建连接", "New Connection")
         };
         let description = if removes_credential {
-            "保存为 SQLite 时会移除此前保存的密码。"
+            text(
+                self.language,
+                "保存为 SQLite 时会移除此前保存的密码。",
+                "Saving as SQLite removes the previously stored password.",
+            )
         } else if editing {
-            "修改连接配置；密码留空时保留已保存的凭据。"
+            text(
+                self.language,
+                "修改连接配置；密码留空时保留已保存的凭据。",
+                "Update the profile; leave the password blank to keep the stored credential.",
+            )
         } else {
-            "配置数据库端点与可选的组织信息。"
+            text(
+                self.language,
+                "配置数据库端点与可选的组织信息。",
+                "Configure the database endpoint and optional organization details.",
+            )
         };
         let busy = self.operation.is_busy();
         let spec = self.db_type.profile_spec();
@@ -108,7 +124,11 @@ impl Render for ConnectionProfileForm {
             .map(|notice| self.render_notice(notice, cx));
         let credential_notice = removes_credential.then(|| {
             self.render_notice(
-                &FormNotice::warning("保存为 SQLite 时将移除此前保存的密码。"),
+                &FormNotice::warning(text(
+                    self.language,
+                    "保存为 SQLite 时将移除此前保存的密码。",
+                    "Saving as SQLite will remove the stored password.",
+                )),
                 cx,
             )
         });
@@ -210,10 +230,13 @@ impl Render for ConnectionProfileForm {
                                         .key_context("ConnectionProfileFormControl")
                                         .on_action(cx.listener(Self::cancel_confirm))
                                         .child(
-                                            Button::new("cancel-connection-profile", "取消")
-                                                .tab_index(17_isize)
-                                                .disabled(busy)
-                                                .on_click(cx.listener(Self::cancel_click)),
+                                            Button::new(
+                                                "cancel-connection-profile",
+                                                text(self.language, "取消", "Cancel"),
+                                            )
+                                            .tab_index(17_isize)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(Self::cancel_click)),
                                         ),
                                 )
                                 .child(
@@ -221,12 +244,15 @@ impl Render for ConnectionProfileForm {
                                         .key_context("ConnectionProfileFormControl")
                                         .on_action(cx.listener(Self::test_confirm))
                                         .child(
-                                            Button::new("test-connection-profile", "测试连接")
-                                                .tab_index(18_isize)
-                                                .style(ButtonStyle::Outlined)
-                                                .loading(self.operation == FormOperation::Testing)
-                                                .disabled(busy)
-                                                .on_click(cx.listener(Self::test_click)),
+                                            Button::new(
+                                                "test-connection-profile",
+                                                text(self.language, "测试连接", "Test Connection"),
+                                            )
+                                            .tab_index(18_isize)
+                                            .style(ButtonStyle::Outlined)
+                                            .loading(self.operation == FormOperation::Testing)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(Self::test_click)),
                                         ),
                                 )
                                 .child(
@@ -234,17 +260,20 @@ impl Render for ConnectionProfileForm {
                                         .key_context("ConnectionProfileFormControl")
                                         .on_action(cx.listener(Self::save_confirm))
                                         .child(
-                                            Button::new("save-connection-profile", "保存")
-                                                .tab_index(19_isize)
-                                                .style(ButtonStyle::Filled)
-                                                .layer(ElevationIndex::ModalSurface)
-                                                .loading(self.operation == FormOperation::Saving)
-                                                .disabled(busy)
-                                                .key_binding(zed_ui::KeyBinding::for_action(
-                                                    &SubmitConnectionProfile,
-                                                    cx,
-                                                ))
-                                                .on_click(cx.listener(Self::save_click)),
+                                            Button::new(
+                                                "save-connection-profile",
+                                                text(self.language, "保存", "Save"),
+                                            )
+                                            .tab_index(19_isize)
+                                            .style(ButtonStyle::Filled)
+                                            .layer(ElevationIndex::ModalSurface)
+                                            .loading(self.operation == FormOperation::Saving)
+                                            .disabled(busy)
+                                            .key_binding(zed_ui::KeyBinding::for_action(
+                                                &SubmitConnectionProfile,
+                                                cx,
+                                            ))
+                                            .on_click(cx.listener(Self::save_click)),
                                         ),
                                 ),
                         ),

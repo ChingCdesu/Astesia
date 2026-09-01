@@ -80,6 +80,8 @@ Exit condition: core workflows compile and test without Tauri types; Tauri comma
 
 ### 3. Build the native shell and connections workflow
 
+Status: Complete on 2026-09-01. See [Milestone 3 acceptance](gpui-milestone-3-acceptance.md).
+
 - Implement GPUI entities for application state, the workspace, tabs, Sidebar, Status Bar, overlays, notifications, theme, and language.
 - Port the command palette and shortcut precedence, including IME composition and editable-focus handling.
 - Implement Connection Profile create, edit, test, connect, disconnect, delete, grouping, tags, lazy schema loading, MCP badges, and Usage Lease restrictions.

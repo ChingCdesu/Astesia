@@ -15,8 +15,10 @@ use crate::application::{
 };
 use crate::connection_repository::{ConnectionRepositoryError, SharedConnectionProfile};
 use crate::db::DbType;
+use crate::platform::UiLanguage;
 
 use super::engine_presentation::engine_hex_color;
+use super::localization::text;
 
 actions!(astesia, [SubmitConnectionProfile]);
 
@@ -140,6 +142,7 @@ pub(super) struct ConnectionProfileForm {
     operation: FormOperation,
     test_notice: Option<FormNotice>,
     save_notice: Option<FormNotice>,
+    language: UiLanguage,
     _input_subscriptions: Vec<Subscription>,
 }
 
@@ -147,6 +150,7 @@ impl ConnectionProfileForm {
     pub(super) fn new(
         application: Arc<Application>,
         mode: ConnectionProfileFormMode,
+        language: UiLanguage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -188,34 +192,96 @@ impl ConnectionProfileForm {
         };
 
         let fields = FormFields {
-            name: input(window, cx, "请输入连接名称", "连接名称", 1),
+            name: input(
+                window,
+                cx,
+                text(language, "请输入连接名称", "Enter a connection name"),
+                text(language, "连接名称", "Connection Name"),
+                1,
+            ),
             endpoint: input(
                 window,
                 cx,
-                "主机地址或 SQLite 文件路径",
-                "主机 / 文件路径",
+                text(
+                    language,
+                    "主机地址或 SQLite 文件路径",
+                    "Host address or SQLite file path",
+                ),
+                text(language, "主机 / 文件路径", "Host / File Path"),
                 9,
             ),
-            port: input(window, cx, "数据库端口", "端口", 10),
-            username: input(window, cx, "请输入用户名", "用户名", 11),
+            port: input(
+                window,
+                cx,
+                text(language, "数据库端口", "Database port"),
+                text(language, "端口", "Port"),
+                10,
+            ),
+            username: input(
+                window,
+                cx,
+                text(language, "请输入用户名", "Enter a username"),
+                text(language, "用户名", "Username"),
+                11,
+            ),
             password: cx.new(|cx| {
                 InputField::new(
                     window,
                     cx,
                     if values.has_credential {
-                        "密码已安全保存；留空将保留原密码"
+                        text(
+                            language,
+                            "密码已安全保存；留空将保留原密码",
+                            "Password is stored securely; leave blank to keep it",
+                        )
                     } else {
-                        "请输入密码（可选）"
+                        text(
+                            language,
+                            "请输入密码（可选）",
+                            "Enter a password (optional)",
+                        )
                     },
                 )
-                .label("密码")
+                .label(text(language, "密码", "Password"))
                 .tab_index(12)
                 .masked(true)
             }),
-            database: input(window, cx, "请输入数据库名（可选）", "数据库", 13),
-            group_name: input(window, cx, "输入分组名称（可选）", "分组", 14),
-            tags: input(window, cx, "以逗号分隔标签（最多 20 个）", "标签", 15),
-            color: input(window, cx, "#RRGGBB（可选）", "颜色", 16),
+            database: input(
+                window,
+                cx,
+                text(
+                    language,
+                    "请输入数据库名（可选）",
+                    "Enter a database (optional)",
+                ),
+                text(language, "数据库", "Database"),
+                13,
+            ),
+            group_name: input(
+                window,
+                cx,
+                text(language, "输入分组名称（可选）", "Enter a group (optional)"),
+                text(language, "分组", "Group"),
+                14,
+            ),
+            tags: input(
+                window,
+                cx,
+                text(
+                    language,
+                    "以逗号分隔标签（最多 20 个）",
+                    "Comma-separated tags (up to 20)",
+                ),
+                text(language, "标签", "Tags"),
+                15,
+            ),
+            color: input(
+                window,
+                cx,
+                text(language, "#RRGGBB（可选）", "#RRGGBB (optional)"),
+                text(language, "颜色", "Color"),
+                16,
+            ),
         };
 
         set_text(&fields.name, &values.name, window, cx);
@@ -253,6 +319,7 @@ impl ConnectionProfileForm {
             operation: FormOperation::Idle,
             test_notice: None,
             save_notice: None,
+            language,
             _input_subscriptions: input_subscriptions,
         }
     }
@@ -390,7 +457,11 @@ impl ConnectionProfileForm {
             return;
         }
         let Some(request) = self.validated_request(cx) else {
-            self.test_notice = Some(FormNotice::error("请修正标记的字段后再测试连接"));
+            self.test_notice = Some(FormNotice::error(text(
+                self.language,
+                "请修正标记的字段后再测试连接",
+                "Fix the marked fields before testing the connection",
+            )));
             cx.notify();
             return;
         };
@@ -411,10 +482,19 @@ impl ConnectionProfileForm {
                 form.operation = FormOperation::Idle;
                 form.set_inputs_read_only(false, cx);
                 form.test_notice = Some(match result {
-                    Ok(Ok(ConnectionOutcome::Succeeded)) => FormNotice::success("连接成功"),
+                    Ok(Ok(ConnectionOutcome::Succeeded)) => {
+                        FormNotice::success(text(form.language, "连接成功", "Connection succeeded"))
+                    }
                     Ok(Ok(ConnectionOutcome::Rejected(message))) => FormNotice::error(message),
                     Ok(Err(error)) => FormNotice::error(error),
-                    Err(error) => FormNotice::error(format!("测试连接的后台任务意外结束：{error}")),
+                    Err(error) => FormNotice::error(format!(
+                        "{}: {error}",
+                        text(
+                            form.language,
+                            "测试连接的后台任务意外结束",
+                            "Connection test task ended unexpectedly",
+                        )
+                    )),
                 });
                 cx.notify();
             })
@@ -429,7 +509,11 @@ impl ConnectionProfileForm {
             return;
         }
         let Some(request) = self.validated_request(cx) else {
-            self.save_notice = Some(FormNotice::error("请修正标记的字段后再保存"));
+            self.save_notice = Some(FormNotice::error(text(
+                self.language,
+                "请修正标记的字段后再保存",
+                "Fix the marked fields before saving",
+            )));
             cx.notify();
             return;
         };
@@ -452,12 +536,17 @@ impl ConnectionProfileForm {
                         cx.emit(DismissEvent);
                     }
                     Ok(Err(error)) => {
-                        form.save_notice = Some(FormNotice::repository_error(error));
+                        form.save_notice = Some(FormNotice::repository_error(error, form.language));
                         cx.notify();
                     }
                     Err(error) => {
                         form.save_notice = Some(FormNotice::error(format!(
-                            "保存连接的后台任务意外结束：{error}"
+                            "{}: {error}",
+                            text(
+                                form.language,
+                                "保存连接的后台任务意外结束",
+                                "Save connection task ended unexpectedly",
+                            )
                         )));
                         cx.notify();
                     }
@@ -539,13 +628,14 @@ impl FormNotice {
         }
     }
 
-    fn repository_error(error: ConnectionRepositoryError) -> Self {
+    fn repository_error(error: ConnectionRepositoryError, language: UiLanguage) -> Self {
         Self {
             kind: NoticeKind::Error,
             message: error.message,
             detail: Some(format!(
-                "{} 错误码：{}",
+                "{} {}{}",
                 error.remediation,
+                text(language, "错误码：", "Error code: "),
                 error.code.as_str()
             )),
         }

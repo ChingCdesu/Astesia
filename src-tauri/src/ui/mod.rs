@@ -1,6 +1,11 @@
+mod command_palette;
 mod connection_profile_form;
 mod connections;
 mod engine_presentation;
+mod localization;
+mod query_item;
+mod shell;
+mod tabs;
 mod workspace;
 
 use std::sync::Arc;
@@ -21,39 +26,34 @@ use http_client::BlockedHttpClient;
 
 use self::connection_profile_form::bind_connection_profile_form_keys;
 use self::connections::bind_connection_profiles_keys;
-use self::workspace::AstesiaRoot;
+use self::query_item::bind_query_item_keys;
+use self::shell::apply_theme;
+use self::workspace::{bind_workspace_keys, AstesiaRoot};
+use crate::platform::{DesktopPreferences, NativePreferencesStore};
 
 const APP_IDENTIFIER: &str = "com.astesia.app";
 const INITIAL_QUERY: &str = "SELECT 1;\n";
-const ISOLATED_ZED_SETTINGS: &str = r#"{
-  "telemetry": {
-    "diagnostics": false,
-    "metrics": false
-  },
-  "disable_ai": true,
-  "auto_update": false
-}"#;
-
 pub fn run() {
     configure_zed_data_dir();
+    let (preferences, preferences_store, preferences_warning) = load_preferences();
 
     gpui_platform::application()
         .with_assets(Assets)
         .with_http_client(Arc::new(BlockedHttpClient::new()))
         .run(|cx| {
-            initialize_editor_runtime(cx);
+            initialize_editor_runtime(preferences.theme, cx);
             cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
                 }
             })
             .detach();
-            open_main_window(cx);
+            open_main_window(cx, preferences, preferences_store, preferences_warning);
             cx.activate(true);
         });
 }
 
-fn initialize_editor_runtime(cx: &mut App) {
+fn initialize_editor_runtime(theme: crate::platform::ThemePreference, cx: &mut App) {
     gpui_tokio::init(cx);
 
     let app_version = release_channel::AppVersion::load(env!("CARGO_PKG_VERSION"), None, None);
@@ -63,20 +63,22 @@ fn initialize_editor_runtime(cx: &mut App) {
         .expect("failed to load embedded Zed fonts");
 
     settings::init(cx);
-    settings::SettingsStore::update(cx, |store, cx| {
-        store
-            .set_user_settings(ISOLATED_ZED_SETTINGS, cx)
-            .result()
-            .expect("failed to apply isolated editor settings");
-    });
-    theme_settings::init(theme::LoadThemes::JustBase, cx);
+    theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+    apply_theme(theme, cx);
     editor::init(cx);
     bind_editor_keys(cx);
     bind_connection_profile_form_keys(cx);
     bind_connection_profiles_keys(cx);
+    bind_query_item_keys(cx);
+    bind_workspace_keys(cx);
 }
 
-fn open_main_window(cx: &mut App) {
+fn open_main_window(
+    cx: &mut App,
+    preferences: DesktopPreferences,
+    preferences_store: Option<NativePreferencesStore>,
+    preferences_warning: Option<String>,
+) {
     let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
     let window_options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -96,9 +98,33 @@ fn open_main_window(cx: &mut App) {
             editor.set_text(INITIAL_QUERY, window, cx);
             editor
         });
-        cx.new(|cx| AstesiaRoot::new(editor, window, cx))
+        cx.new(|cx| {
+            AstesiaRoot::new(
+                editor,
+                preferences,
+                preferences_store,
+                preferences_warning,
+                window,
+                cx,
+            )
+        })
     })
     .expect("failed to open the Astesia window");
+}
+
+fn load_preferences() -> (
+    DesktopPreferences,
+    Option<NativePreferencesStore>,
+    Option<String>,
+) {
+    let store = match NativePreferencesStore::new_default() {
+        Ok(store) => store,
+        Err(error) => return (DesktopPreferences::default(), None, Some(error)),
+    };
+    match store.load() {
+        Ok(preferences) => (preferences, Some(store), None),
+        Err(error) => (DesktopPreferences::default(), Some(store), Some(error)),
+    }
 }
 
 fn configure_zed_data_dir() {

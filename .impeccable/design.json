@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-01T03:44:12Z",
+  "title": "Design System: Astesia",
+  "extensions": {
+    "colorMeta": {
+      "light-focus": { "role": "primary", "displayName": "Light Focus Indigo", "canonical": "#7d82e8ff", "tonalRamp": ["color-mix(in oklch, #7d82e8 55%, black)", "color-mix(in oklch, #7d82e8 70%, black)", "color-mix(in oklch, #7d82e8 85%, black)", "#7d82e8", "color-mix(in oklch, #7d82e8 80%, white)", "color-mix(in oklch, #7d82e8 60%, white)", "color-mix(in oklch, #7d82e8 40%, white)", "color-mix(in oklch, #7d82e8 20%, white)"] },
+      "light-workspace": { "role": "neutral", "displayName": "Light Workspace", "canonical": "#dcdcddff", "tonalRamp": ["color-mix(in oklch, #dcdcdd 55%, black)", "color-mix(in oklch, #dcdcdd 70%, black)", "color-mix(in oklch, #dcdcdd 85%, black)", "#dcdcdd", "color-mix(in oklch, #dcdcdd 80%, white)", "color-mix(in oklch, #dcdcdd 60%, white)", "color-mix(in oklch, #dcdcdd 40%, white)", "color-mix(in oklch, #dcdcdd 20%, white)"] },
+      "light-panel": { "role": "neutral", "displayName": "Light Panel", "canonical": "#ebebecff", "tonalRamp": ["color-mix(in oklch, #ebebec 55%, black)", "color-mix(in oklch, #ebebec 70%, black)", "color-mix(in oklch, #ebebec 85%, black)", "#ebebec", "color-mix(in oklch, #ebebec 80%, white)", "color-mix(in oklch, #ebebec 60%, white)", "color-mix(in oklch, #ebebec 40%, white)", "color-mix(in oklch, #ebebec 20%, white)"] },
+      "light-editor": { "role": "neutral", "displayName": "Light Editor", "canonical": "#fafafaff", "tonalRamp": ["color-mix(in oklch, #fafafa 55%, black)", "color-mix(in oklch, #fafafa 70%, black)", "color-mix(in oklch, #fafafa 85%, black)", "#fafafa", "color-mix(in oklch, #fafafa 80%, white)", "color-mix(in oklch, #fafafa 60%, white)", "color-mix(in oklch, #fafafa 40%, white)", "color-mix(in oklch, #fafafa 20%, white)"] },
+      "light-border": { "role": "neutral", "displayName": "Light Border", "canonical": "#c9c9caff", "tonalRamp": ["color-mix(in oklch, #c9c9ca 55%, black)", "color-mix(in oklch, #c9c9ca 70%, black)", "color-mix(in oklch, #c9c9ca 85%, black)", "#c9c9ca", "color-mix(in oklch, #c9c9ca 80%, white)", "color-mix(in oklch, #c9c9ca 60%, white)", "color-mix(in oklch, #c9c9ca 40%, white)", "color-mix(in oklch, #c9c9ca 20%, white)"] },
+      "light-text": { "role": "neutral", "displayName": "Light Text", "canonical": "#242529ff", "tonalRamp": ["color-mix(in oklch, #242529 55%, black)", "color-mix(in oklch, #242529 70%, black)", "color-mix(in oklch, #242529 85%, black)", "#242529", "color-mix(in oklch, #242529 80%, white)", "color-mix(in oklch, #242529 60%, white)", "color-mix(in oklch, #242529 40%, white)", "color-mix(in oklch, #242529 20%, white)"] },
+      "light-muted": { "role": "neutral", "displayName": "Light Muted Text", "canonical": "#58585aff", "tonalRamp": ["color-mix(in oklch, #58585a 55%, black)", "color-mix(in oklch, #58585a 70%, black)", "color-mix(in oklch, #58585a 85%, black)", "#58585a", "color-mix(in oklch, #58585a 80%, white)", "color-mix(in oklch, #58585a 60%, white)", "color-mix(in oklch, #58585a 40%, white)", "color-mix(in oklch, #58585a 20%, white)"] },
+      "dark-focus": { "role": "primary", "displayName": "Dark Focus Blue", "canonical": "#47679eff", "tonalRamp": ["color-mix(in oklch, #47679e 55%, black)", "color-mix(in oklch, #47679e 70%, black)", "color-mix(in oklch, #47679e 85%, black)", "#47679e", "color-mix(in oklch, #47679e 80%, white)", "color-mix(in oklch, #47679e 60%, white)", "color-mix(in oklch, #47679e 40%, white)", "color-mix(in oklch, #47679e 20%, white)"] },
+      "dark-workspace": { "role": "neutral", "displayName": "Dark Workspace", "canonical": "#3b414dff", "tonalRamp": ["color-mix(in oklch, #3b414d 55%, black)", "color-mix(in oklch, #3b414d 70%, black)", "color-mix(in oklch, #3b414d 85%, black)", "#3b414d", "color-mix(in oklch, #3b414d 80%, white)", "color-mix(in oklch, #3b414d 60%, white)", "color-mix(in oklch, #3b414d 40%, white)", "color-mix(in oklch, #3b414d 20%, white)"] },
+      "dark-panel": { "role": "neutral", "displayName": "Dark Panel", "canonical": "#2f343eff", "tonalRamp": ["color-mix(in oklch, #2f343e 55%, black)", "color-mix(in oklch, #2f343e 70%, black)", "color-mix(in oklch, #2f343e 85%, black)", "#2f343e", "color-mix(in oklch, #2f343e 80%, white)", "color-mix(in oklch, #2f343e 60%, white)", "color-mix(in oklch, #2f343e 40%, white)", "color-mix(in oklch, #2f343e 20%, white)"] },
+      "dark-editor": { "role": "neutral", "displayName": "Dark Editor", "canonical": "#282c33ff", "tonalRamp": ["color-mix(in oklch, #282c33 55%, black)", "color-mix(in oklch, #282c33 70%, black)", "color-mix(in oklch, #282c33 85%, black)", "#282c33", "color-mix(in oklch, #282c33 80%, white)", "color-mix(in oklch, #282c33 60%, white)", "color-mix(in oklch, #282c33 40%, white)", "color-mix(in oklch, #282c33 20%, white)"] },
+      "dark-border": { "role": "neutral", "displayName": "Dark Border", "canonical": "#464b57ff", "tonalRamp": ["color-mix(in oklch, #464b57 55%, black)", "color-mix(in oklch, #464b57 70%, black)", "color-mix(in oklch, #464b57 85%, black)", "#464b57", "color-mix(in oklch, #464b57 80%, white)", "color-mix(in oklch, #464b57 60%, white)", "color-mix(in oklch, #464b57 40%, white)", "color-mix(in oklch, #464b57 20%, white)"] },
+      "dark-text": { "role": "neutral", "displayName": "Dark Text", "canonical": "#dce0e5ff", "tonalRamp": ["color-mix(in oklch, #dce0e5 55%, black)", "color-mix(in oklch, #dce0e5 70%, black)", "color-mix(in oklch, #dce0e5 85%, black)", "#dce0e5", "color-mix(in oklch, #dce0e5 80%, white)", "color-mix(in oklch, #dce0e5 60%, white)", "color-mix(in oklch, #dce0e5 40%, white)", "color-mix(in oklch, #dce0e5 20%, white)"] },
+      "dark-muted": { "role": "neutral", "displayName": "Dark Muted Text", "canonical": "#a9afbcff", "tonalRamp": ["color-mix(in oklch, #a9afbc 55%, black)", "color-mix(in oklch, #a9afbc 70%, black)", "color-mix(in oklch, #a9afbc 85%, black)", "#a9afbc", "color-mix(in oklch, #a9afbc 80%, white)", "color-mix(in oklch, #a9afbc 60%, white)", "color-mix(in oklch, #a9afbc 40%, white)", "color-mix(in oklch, #a9afbc 20%, white)"] },
+      "connected": { "role": "secondary", "displayName": "Connected Green", "canonical": "#22c55e", "tonalRamp": ["color-mix(in oklch, #22c55e 55%, black)", "color-mix(in oklch, #22c55e 70%, black)", "color-mix(in oklch, #22c55e 85%, black)", "#22c55e", "color-mix(in oklch, #22c55e 80%, white)", "color-mix(in oklch, #22c55e 60%, white)", "color-mix(in oklch, #22c55e 40%, white)", "color-mix(in oklch, #22c55e 20%, white)"] },
+      "busy": { "role": "secondary", "displayName": "Busy Amber", "canonical": "#eab308", "tonalRamp": ["color-mix(in oklch, #eab308 55%, black)", "color-mix(in oklch, #eab308 70%, black)", "color-mix(in oklch, #eab308 85%, black)", "#eab308", "color-mix(in oklch, #eab308 80%, white)", "color-mix(in oklch, #eab308 60%, white)", "color-mix(in oklch, #eab308 40%, white)", "color-mix(in oklch, #eab308 20%, white)"] },
+      "attention": { "role": "secondary", "displayName": "Attention Red", "canonical": "#ef4444", "tonalRamp": ["color-mix(in oklch, #ef4444 55%, black)", "color-mix(in oklch, #ef4444 70%, black)", "color-mix(in oklch, #ef4444 85%, black)", "#ef4444", "color-mix(in oklch, #ef4444 80%, white)", "color-mix(in oklch, #ef4444 60%, white)", "color-mix(in oklch, #ef4444 40%, white)", "color-mix(in oklch, #ef4444 20%, white)"] },
+      "idle": { "role": "neutral", "displayName": "Idle Gray", "canonical": "#a1a1aa", "tonalRamp": ["color-mix(in oklch, #a1a1aa 55%, black)", "color-mix(in oklch, #a1a1aa 70%, black)", "color-mix(in oklch, #a1a1aa 85%, black)", "#a1a1aa", "color-mix(in oklch, #a1a1aa 80%, white)", "color-mix(in oklch, #a1a1aa 60%, white)", "color-mix(in oklch, #a1a1aa 40%, white)", "color-mix(in oklch, #a1a1aa 20%, white)"] },
+      "mysql": { "role": "tertiary", "displayName": "MySQL Teal", "canonical": "#00758F", "tonalRamp": ["color-mix(in oklch, #00758F 55%, black)", "color-mix(in oklch, #00758F 70%, black)", "color-mix(in oklch, #00758F 85%, black)", "#00758F", "color-mix(in oklch, #00758F 80%, white)", "color-mix(in oklch, #00758F 60%, white)", "color-mix(in oklch, #00758F 40%, white)", "color-mix(in oklch, #00758F 20%, white)"] },
+      "postgresql": { "role": "tertiary", "displayName": "PostgreSQL Blue", "canonical": "#336791", "tonalRamp": ["color-mix(in oklch, #336791 55%, black)", "color-mix(in oklch, #336791 70%, black)", "color-mix(in oklch, #336791 85%, black)", "#336791", "color-mix(in oklch, #336791 80%, white)", "color-mix(in oklch, #336791 60%, white)", "color-mix(in oklch, #336791 40%, white)", "color-mix(in oklch, #336791 20%, white)"] },
+      "sqlite": { "role": "tertiary", "displayName": "SQLite Navy", "canonical": "#003B57", "tonalRamp": ["color-mix(in oklch, #003B57 55%, black)", "color-mix(in oklch, #003B57 70%, black)", "color-mix(in oklch, #003B57 85%, black)", "#003B57", "color-mix(in oklch, #003B57 80%, white)", "color-mix(in oklch, #003B57 60%, white)", "color-mix(in oklch, #003B57 40%, white)", "color-mix(in oklch, #003B57 20%, white)"] },
+      "sql-server": { "role": "tertiary", "displayName": "SQL Server Red", "canonical": "#CC2927", "tonalRamp": ["color-mix(in oklch, #CC2927 55%, black)", "color-mix(in oklch, #CC2927 70%, black)", "color-mix(in oklch, #CC2927 85%, black)", "#CC2927", "color-mix(in oklch, #CC2927 80%, white)", "color-mix(in oklch, #CC2927 60%, white)", "color-mix(in oklch, #CC2927 40%, white)", "color-mix(in oklch, #CC2927 20%, white)"] },
+      "mongodb": { "role": "tertiary", "displayName": "MongoDB Green", "canonical": "#47A248", "tonalRamp": ["color-mix(in oklch, #47A248 55%, black)", "color-mix(in oklch, #47A248 70%, black)", "color-mix(in oklch, #47A248 85%, black)", "#47A248", "color-mix(in oklch, #47A248 80%, white)", "color-mix(in oklch, #47A248 60%, white)", "color-mix(in oklch, #47A248 40%, white)", "color-mix(in oklch, #47A248 20%, white)"] },
+      "redis": { "role": "tertiary", "displayName": "Redis Red", "canonical": "#DC382D", "tonalRamp": ["color-mix(in oklch, #DC382D 55%, black)", "color-mix(in oklch, #DC382D 70%, black)", "color-mix(in oklch, #DC382D 85%, black)", "#DC382D", "color-mix(in oklch, #DC382D 80%, white)", "color-mix(in oklch, #DC382D 60%, white)", "color-mix(in oklch, #DC382D 40%, white)", "color-mix(in oklch, #DC382D 20%, white)"] },
+      "clickhouse": { "role": "tertiary", "displayName": "ClickHouse Yellow", "canonical": "#FFCC01", "tonalRamp": ["color-mix(in oklch, #FFCC01 55%, black)", "color-mix(in oklch, #FFCC01 70%, black)", "color-mix(in oklch, #FFCC01 85%, black)", "#FFCC01", "color-mix(in oklch, #FFCC01 80%, white)", "color-mix(in oklch, #FFCC01 60%, white)", "color-mix(in oklch, #FFCC01 40%, white)", "color-mix(in oklch, #FFCC01 20%, white)"] }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Structural Title", "purpose": "Sidebar, result, and section headings." },
+      "body": { "displayName": "Operator Body", "purpose": "Profile names, tabs, buttons, and actionable rows." },
+      "label": { "displayName": "Compact Metadata", "purpose": "Endpoints, engines, tags, counts, shortcuts, and status details." },
+      "editor": { "displayName": "Query Editor", "purpose": "Editable query text only." }
+    },
+    "shadows": [
+      { "name": "transient-notice", "value": "0 4px 6px -1px rgba(0,0,0,0.10), 0 2px 4px -2px rgba(0,0,0,0.10)", "purpose": "Upper-right notification surfaces." },
+      { "name": "modal-command-surface", "value": "0 10px 15px -3px rgba(0,0,0,0.10), 0 4px 6px -4px rgba(0,0,0,0.10)", "purpose": "Command palette above its dimmed backdrop." }
+    ],
+    "motion": [],
+    "breakpoints": [
+      { "name": "minimum-desktop-window", "value": "960px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Compact Filled Button",
+      "kind": "button",
+      "refersTo": "button-filled",
+      "description": "Primary operation within an already active workspace context.",
+      "html": "<button class=\"ds-button-filled\">Run</button>",
+      "css": ".ds-button-filled { height: 18px; padding: 0 4px; border: 0; border-radius: 4px; background: #ebebec; color: #242529; font: 400 10px/1 IBM Plex Sans, system-ui, sans-serif; } .ds-button-filled:hover { background: #dfdfe0; } .ds-button-filled:focus-visible { outline: 1px solid #7d82e8; outline-offset: 1px; } .ds-button-filled:active { background: #cacaca; } @media (prefers-color-scheme: dark) { .ds-button-filled { background: #2e343e; color: #dce0e5; } .ds-button-filled:hover { background: #363c46; } .ds-button-filled:focus-visible { outline-color: #47679e; } .ds-button-filled:active { background: #454a56; } }"
+    },
+    {
+      "name": "Compact Outlined Button",
+      "kind": "button",
+      "refersTo": "button-outlined",
+      "description": "Secondary, reversible, or lower-emphasis operation.",
+      "html": "<button class=\"ds-button-outlined\">Clear</button>",
+      "css": ".ds-button-outlined { height: 18px; padding: 0 4px; border: 1px solid #c9c9ca; border-radius: 4px; background: #ebebec; color: #242529; font: 400 10px/1 IBM Plex Sans, system-ui, sans-serif; } .ds-button-outlined:hover { background: #dfdfe0; } .ds-button-outlined:focus-visible { outline: none; border-color: #7d82e8; } .ds-button-outlined:active { background: #cacaca; } @media (prefers-color-scheme: dark) { .ds-button-outlined { border-color: #464b57; background: #2e343e; color: #dce0e5; } .ds-button-outlined:hover { background: #363c46; } .ds-button-outlined:focus-visible { border-color: #47679e; } .ds-button-outlined:active { background: #454a56; } }"
+    },
+    {
+      "name": "Connection Profile Row",
+      "kind": "nav",
+      "refersTo": "connection-profile-row",
+      "description": "Full-width sidebar row carrying profile identity and runtime metadata.",
+      "html": "<button class=\"ds-profile-row\"><span class=\"ds-profile-dot\"></span><span><strong>Analytics</strong><small>PostgreSQL · Connected</small></span></button>",
+      "css": ".ds-profile-row { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #242529; text-align: left; font: 400 12px/1.3 IBM Plex Sans, system-ui, sans-serif; } .ds-profile-row span:last-child { display: grid; gap: 2px; } .ds-profile-row strong { font-weight: 500; } .ds-profile-row small { color: #58585a; font-size: 10px; } .ds-profile-row:hover { background: #dfdfe0; } .ds-profile-row:focus-visible { outline: none; border-color: #7d82e8; } .ds-profile-dot { width: 9px; height: 9px; border-radius: 9999px; background: #336791; } @media (prefers-color-scheme: dark) { .ds-profile-row { color: #dce0e5; } .ds-profile-row small { color: #a9afbc; } .ds-profile-row:hover { background: #363c46; } .ds-profile-row:focus-visible { border-color: #47679e; } }"
+    },
+    {
+      "name": "Active Query Tab",
+      "kind": "nav",
+      "refersTo": "query-tab-active",
+      "description": "Active tab connects the tab strip to the editor surface.",
+      "html": "<button class=\"ds-query-tab\">Query 1</button>",
+      "css": ".ds-query-tab { min-width: 112px; height: 36px; padding: 0 8px; border: 1px solid #c9c9ca; border-bottom: 0; border-radius: 6px 6px 0 0; background: #fafafa; color: #242529; font: 500 12px/1 IBM Plex Sans, system-ui, sans-serif; } .ds-query-tab:hover { background: #dfdfe0; } .ds-query-tab:focus-visible { outline: 1px solid #7d82e8; outline-offset: -2px; } @media (prefers-color-scheme: dark) { .ds-query-tab { border-color: #464b57; background: #282c33; color: #dce0e5; } .ds-query-tab:hover { background: #363c46; } .ds-query-tab:focus-visible { outline-color: #47679e; } }"
+    },
+    {
+      "name": "Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Labeled profile field with visible focus and validation boundaries.",
+      "html": "<label class=\"ds-field\"><span>Host</span><input placeholder=\"127.0.0.1\"></label>",
+      "css": ".ds-field { display: grid; gap: 4px; color: #242529; font: 400 12px/1.3 IBM Plex Sans, system-ui, sans-serif; } .ds-field input { min-height: 32px; padding: 6px 8px; border: 1px solid #c9c9ca; border-radius: 6px; background: #fafafa; color: #242529; font: inherit; } .ds-field input:hover { border-color: #b9b9ba; } .ds-field input:focus-visible { outline: none; border-color: #7d82e8; } @media (prefers-color-scheme: dark) { .ds-field { color: #dce0e5; } .ds-field input { border-color: #363c46; background: #282c33; color: #dce0e5; } .ds-field input:hover { border-color: #464b57; } .ds-field input:focus-visible { border-color: #47679e; } }"
+    },
+    {
+      "name": "Command Palette",
+      "kind": "custom",
+      "refersTo": "command-palette",
+      "description": "Elevated search and command-selection surface.",
+      "html": "<section class=\"ds-palette\"><input aria-label=\"Command search\" placeholder=\"Type a command or search…\"><button><span>New Query<small>Workspace</small></span><kbd>⌘N</kbd></button></section>",
+      "css": ".ds-palette { width: 560px; overflow: hidden; border: 1px solid #c9c9ca; border-radius: 8px; background: #ebebec; color: #242529; box-shadow: 0 10px 15px -3px rgba(0,0,0,.10), 0 4px 6px -4px rgba(0,0,0,.10); font: 400 12px/1.3 IBM Plex Sans, system-ui, sans-serif; } .ds-palette > input { box-sizing: border-box; width: 100%; height: 44px; padding: 8px 12px; border: 0; border-bottom: 1px solid #c9c9ca; background: #fafafa; color: inherit; font: inherit; } .ds-palette > input:focus-visible { outline: 1px solid #7d82e8; outline-offset: -2px; } .ds-palette button { width: 100%; display: flex; justify-content: space-between; padding: 8px 12px; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; } .ds-palette button:hover, .ds-palette button:focus-visible { outline: none; background: #cacaca; } .ds-palette button span { display: grid; } .ds-palette small, .ds-palette kbd { color: #58585a; font-size: 10px; } @media (prefers-color-scheme: dark) { .ds-palette { border-color: #464b57; background: #2f343e; color: #dce0e5; } .ds-palette > input { border-color: #464b57; background: #282c33; } .ds-palette > input:focus-visible { outline-color: #47679e; } .ds-palette button:hover, .ds-palette button:focus-visible { background: #454a56; } .ds-palette small, .ds-palette kbd { color: #a9afbc; } }"
+    },
+    {
+      "name": "Transient Notification",
+      "kind": "card",
+      "refersTo": "transient-notification",
+      "description": "Dismissible semantic status message above the workspace.",
+      "html": "<aside class=\"ds-notice\" role=\"status\">Connection profile saved</aside>",
+      "css": ".ds-notice { width: 360px; padding: 8px; border: 1px solid color-mix(in srgb, #5c78e2 35%, transparent); border-radius: 6px; background: color-mix(in srgb, #5c78e2 10%, #ebebec); color: #5c78e2; box-shadow: 0 4px 6px -1px rgba(0,0,0,.10), 0 2px 4px -2px rgba(0,0,0,.10); font: 400 10px/1.4 IBM Plex Sans, system-ui, sans-serif; } .ds-notice:hover { border-color: #5c78e2; } .ds-notice:focus-visible { outline: 1px solid #7d82e8; outline-offset: 1px; } @media (prefers-color-scheme: dark) { .ds-notice { border-color: #293b5b; background: color-mix(in srgb, #74ade8 10%, #2f343e); color: #74ade8; } .ds-notice:hover { border-color: #74ade8; } .ds-notice:focus-visible { outline-color: #47679e; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Native Operator Console",
+    "overview": "Astesia is a compact, neutral desktop workspace built for sustained database operation. Its visual system keeps connections, query context, results, and runtime state continuously visible while allowing the native editor and data to remain the dominant material.\n\nThe shell follows the operating system by default through the paired One Light and One Dark themes. It uses familiar desktop controls, shallow tonal separation, small labels, and dense toolbars instead of decorative branding or oversized presentation typography.",
+    "keyCharacteristics": [
+      "Compact multi-pane geometry with a fixed connection sidebar, tabbed work area, and persistent status bar.",
+      "Theme-semantic surfaces and text, with color reserved for focus, engine identity, and meaningful status.",
+      "Native Zed UI controls and a local Zed editor, with Simplified Chinese and English occupying the same visual hierarchy.",
+      "Borders and tonal layers establish structure; elevation is reserved for temporary overlays."
+    ],
+    "rules": [
+      { "name": "The Semantic Surface Rule", "body": "New shell surfaces use the active theme's workspace, panel, editor, border, text, and muted roles; they do not introduce an independent gray palette.", "section": "colors" },
+      { "name": "The Identity-Is-Not-Action Rule", "body": "Engine colors identify Connection Profiles and database types. Actions continue to use native control states and the focus color.", "section": "colors" },
+      { "name": "The State-Is-Written Rule", "body": "Connection and error state always includes text or an icon; the green, amber, red, and gray status dots never carry meaning alone.", "section": "colors" },
+      { "name": "The Two-Scale Rule", "body": "Shell chrome stays primarily at body and label sizes. Larger type belongs to modal structure supplied by the native component library, not routine workspace chrome.", "section": "typography" },
+      { "name": "The Editor Owns Mono Rule", "body": "Monospace type is for editable query content and code-like values, not for general labels or navigation.", "section": "typography" },
+      { "name": "The Continuous-State Rule", "body": "Hiding the connection sidebar may enlarge the work area, but the tab strip and status bar remain present so query and runtime context is not lost.", "section": "layout" },
+      { "name": "The Overlay-Only Elevation Rule", "body": "Shadows signal temporary content above the workspace. Persistent application structure uses borders and tonal layering.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use the current theme's semantic roles for every persistent surface, separator, text tier, and focus state.",
+      "Do keep operational state visible in labels, status summaries, notices, or icons in addition to color.",
+      "Do preserve compact row heights, internal scrolling, and the sidebar–tabs–status composition for new Milestone 3 surfaces.",
+      "Do use the engine identity set only where database type or Connection Profile identity is being communicated."
+    ],
+    "donts": [
+      "Don't add large display typography, decorative gradients, glass effects, or standalone marketing-style cards to the operator workspace.",
+      "Don't use shadows on persistent panes, toolbars, tabs, rows, or data grids.",
+      "Don't turn status or engine colors into generic primary-button colors.",
+      "Don't replace text status with color-only dots, especially for errors, connection activity, or Usage Lease state."
+    ]
+  }
+}
