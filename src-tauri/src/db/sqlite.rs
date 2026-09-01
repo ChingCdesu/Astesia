@@ -442,4 +442,21 @@ mod tests {
             "SELECT * FROM \"odd\"\"table's\" LIMIT 10 OFFSET 10"
         );
     }
+
+    #[tokio::test]
+    async fn explain_executes_the_sqlite_query_plan() {
+        let mut driver = SqliteDriver::new(config());
+        driver.connect().await.unwrap();
+
+        let plan = driver.explain("main", "SELECT 1").await.unwrap();
+
+        assert!(!plan.rows.is_empty());
+        assert_eq!(
+            plan.columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "parent", "notused", "detail"]
+        );
+    }
 }

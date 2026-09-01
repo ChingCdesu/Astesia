@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::db::{DbType, SqlScript, StatementResult};
+use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryTarget {
@@ -50,6 +50,20 @@ impl QueryWorkspaceError {
         }
     }
 
+    fn unsupported_explain(db_type: DbType) -> Self {
+        Self {
+            code: "query_explain_unsupported",
+            message: format!("{db_type:?} 不支持执行计划。"),
+        }
+    }
+
+    fn explain_requires_one_statement() -> Self {
+        Self {
+            code: "query_explain_requires_one_statement",
+            message: "执行计划一次只能分析一条 SQL 语句。".to_string(),
+        }
+    }
+
     fn invalid_selection() -> Self {
         Self {
             code: "query_selection_invalid",
@@ -79,11 +93,17 @@ impl QueryWorkspaceError {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum QueryOperation {
+    Statements(Vec<String>),
+    Explain(String),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct QueryExecutionRequest {
     generation: u64,
     pub(crate) target: QueryTarget,
-    pub(crate) statements: Vec<String>,
+    pub(crate) operation: QueryOperation,
 }
 
 #[derive(Default)]
@@ -154,8 +174,27 @@ impl QueryWorkspaceState {
         document: QueryDocument,
         scope: QueryExecutionScope,
     ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
-        let preparation = self.prepare_execution(document, scope);
-        let (target, statements) = match preparation {
+        let preparation = self
+            .prepare_execution(document, scope)
+            .map(|(target, statements)| (target, QueryOperation::Statements(statements)));
+        self.begin_prepared(preparation)
+    }
+
+    pub(crate) fn begin_explain(
+        &mut self,
+        document: QueryDocument,
+    ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
+        let preparation = self
+            .prepare_explain(document)
+            .map(|(target, statement)| (target, QueryOperation::Explain(statement)));
+        self.begin_prepared(preparation)
+    }
+
+    fn begin_prepared(
+        &mut self,
+        preparation: Result<(QueryTarget, QueryOperation), QueryWorkspaceError>,
+    ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
+        let (target, operation) = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
                 self.error = Some(error.clone());
@@ -173,7 +212,7 @@ impl QueryWorkspaceState {
         Ok(QueryExecutionRequest {
             generation: self.next_generation,
             target,
-            statements,
+            operation,
         })
     }
 
@@ -221,6 +260,28 @@ impl QueryWorkspaceState {
         }
         let statements = select_statements(target.db_type, document, scope)?;
         Ok((target, statements))
+    }
+
+    fn prepare_explain(
+        &self,
+        document: QueryDocument,
+    ) -> Result<(QueryTarget, String), QueryWorkspaceError> {
+        let target = self
+            .target
+            .clone()
+            .ok_or_else(QueryWorkspaceError::target_required)?;
+        if target.db_type.capabilities().explain == ExplainMode::None {
+            return Err(QueryWorkspaceError::unsupported_explain(target.db_type));
+        }
+        let mut statements =
+            select_statements(target.db_type, document, QueryExecutionScope::Current)?;
+        if statements.len() != 1 {
+            return Err(QueryWorkspaceError::explain_requires_one_statement());
+        }
+        Ok((
+            target,
+            statements.pop().expect("one Explain statement was checked"),
+        ))
     }
 }
 
@@ -310,7 +371,10 @@ mod tests {
                 QueryExecutionScope::Current,
             )
             .unwrap();
-        assert_eq!(selected.statements, vec!["SELECT 1"]);
+        assert_eq!(
+            selected.operation,
+            QueryOperation::Statements(vec!["SELECT 1".to_string()])
+        );
 
         let cursor = sql.find('二').unwrap();
         let current = state
@@ -319,7 +383,10 @@ mod tests {
                 QueryExecutionScope::Current,
             )
             .unwrap();
-        assert_eq!(current.statements, vec!["SELECT '二'"]);
+        assert_eq!(
+            current.operation,
+            QueryOperation::Statements(vec!["SELECT '二'".to_string()])
+        );
     }
 
     #[test]
@@ -334,7 +401,37 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(request.statements, vec!["SELECT ';'", "SELECT 2"]);
+        assert_eq!(
+            request.operation,
+            QueryOperation::Statements(vec!["SELECT ';'".to_string(), "SELECT 2".to_string()])
+        );
+    }
+
+    #[test]
+    fn explain_uses_the_selection_or_cursor_and_rejects_multiple_statements() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
+        let sql = "SELECT 1; SELECT 2;".to_string();
+
+        let cursor = sql.find('2').unwrap();
+        let request = state
+            .begin_explain(QueryDocument::new(sql.clone(), cursor..cursor))
+            .unwrap();
+        assert_eq!(
+            request.operation,
+            QueryOperation::Explain("SELECT 2".to_string())
+        );
+
+        let error = state
+            .begin_explain(QueryDocument::new(sql.clone(), 0..sql.len()))
+            .unwrap_err();
+        assert_eq!(error.code, "query_explain_requires_one_statement");
+
+        state.set_target(Some(target("redis", 1, DbType::Redis)));
+        let error = state
+            .begin_explain(QueryDocument::new("GET key".to_string(), 0..0))
+            .unwrap_err();
+        assert_eq!(error.code, "query_explain_unsupported");
     }
 
     #[test]

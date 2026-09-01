@@ -276,6 +276,10 @@ pub trait DatabaseDriver: Send + Sync {
         }
         Ok(results)
     }
+    async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
+        let sql = SqlDialect::new(self.db_type()).build_explain_statement(statement)?;
+        self.execute_query(database, &sql).await
+    }
     async fn get_table_data(
         &self,
         database: &str,
