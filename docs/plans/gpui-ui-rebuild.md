@@ -56,6 +56,8 @@ Exit condition: every existing workflow has an explicit destination milestone an
 
 ### 1. Prove the GPUI and Zed editor runtime
 
+Status: Complete on 2026-09-01. See [Milestone 1 acceptance](gpui-milestone-1-acceptance.md).
+
 - Pin Rust 1.97.1 with `rust-toolchain.toml` and update the package toolchain declaration.
 - Add the Zed editor runtime, UI, settings, theme, language, and asset crates at the same pinned commit as `gpui` and `gpui_platform`.
 - Replace `app_lib::run()` with a GPUI application bootstrap based on Zed's minimal component-preview initialization path.

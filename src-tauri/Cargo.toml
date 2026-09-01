@@ -57,7 +57,12 @@ ring = "=0.17.14"
 zeroize = "=1.8.2"
 tempfile = "3"
 
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38", features = ["test-support"] }
+settings = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38", features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2.7"
 security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
 
 [patch.crates-io]
