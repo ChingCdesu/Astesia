@@ -19,7 +19,7 @@ use editor::{
     Editor,
 };
 use gpui::{
-    px, size, App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
+    px, size, App, AppContext as _, Bounds, KeyBinding, QuitMode, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
 use http_client::BlockedHttpClient;
@@ -29,7 +29,9 @@ use self::connections::bind_connection_profiles_keys;
 use self::query_item::bind_query_item_keys;
 use self::shell::apply_theme;
 use self::workspace::{bind_workspace_keys, AstesiaRoot};
-use crate::platform::{DesktopPreferences, NativePreferencesStore};
+use crate::platform::{
+    install_last_window_quit_policy, DesktopPreferences, NativePreferencesStore,
+};
 
 const APP_IDENTIFIER: &str = "com.astesia.app";
 const INITIAL_QUERY: &str = "SELECT 1;\n";
@@ -40,14 +42,10 @@ pub fn run() {
     gpui_platform::application()
         .with_assets(Assets)
         .with_http_client(Arc::new(BlockedHttpClient::new()))
+        .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx| {
+            install_last_window_quit_policy();
             initialize_editor_runtime(preferences.theme, cx);
-            cx.on_window_closed(|cx, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
             open_main_window(cx, preferences, preferences_store, preferences_warning);
             cx.activate(true);
         });
@@ -165,4 +163,42 @@ fn bind_editor_keys(cx: &mut App) {
         KeyBinding::new("ctrl-z", Undo, Some("Editor")),
         KeyBinding::new("ctrl-shift-z", Redo, Some("Editor")),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{EntityInputHandler as _, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn standalone_editor_groups_ime_composition_for_undo(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            Assets.load_test_fonts(cx);
+            let settings = settings::SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(release_channel::AppVersion::load("0.0.0", None, None), cx);
+            editor::init(cx);
+        });
+
+        let editor = cx.add_window(Editor::multi_line);
+
+        editor
+            .update(cx, |editor, window, cx| {
+                editor.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                editor.replace_and_mark_text_in_range(None, "nihao", Some(5..5), window, cx);
+                assert_eq!(editor.marked_text_range(window, cx), Some(0..5));
+
+                editor.replace_text_in_range(None, "你好", window, cx);
+                assert_eq!(editor.text(cx), "你好");
+                assert_eq!(editor.marked_text_range(window, cx), None);
+
+                editor.undo(&Default::default(), window, cx);
+                assert_eq!(editor.text(cx), "");
+                editor.redo(&Default::default(), window, cx);
+                assert_eq!(editor.text(cx), "你好");
+            })
+            .expect("editor window");
+    }
 }
