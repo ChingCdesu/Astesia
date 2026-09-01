@@ -1,6 +1,12 @@
-use std::ops::Range;
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
+
+use super::query_result_selection::QueryResultSelection;
+use super::{query_file::QueryFileState, QueryFileCompletion, QueryFileError, QueryFileRequest};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryTarget {
@@ -108,15 +114,68 @@ pub(crate) struct QueryExecutionRequest {
 
 #[derive(Default)]
 pub(crate) struct QueryWorkspaceState {
+    file: QueryFileState,
     target: Option<QueryTarget>,
     next_generation: u64,
     active_generation: Option<u64>,
     results: Vec<StatementResult>,
     active_result_index: usize,
+    result_selection: QueryResultSelection,
     error: Option<QueryWorkspaceError>,
 }
 
 impl QueryWorkspaceState {
+    pub(crate) fn new(document_text: String) -> Self {
+        Self {
+            file: QueryFileState::new(document_text),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn file_path(&self) -> Option<&Path> {
+        self.file.path()
+    }
+
+    pub(crate) fn file_display_name(&self) -> Option<String> {
+        self.file.display_name()
+    }
+
+    pub(crate) fn is_file_dirty(&self) -> bool {
+        self.file.is_dirty()
+    }
+
+    pub(crate) fn is_file_busy(&self) -> bool {
+        self.file.is_busy()
+    }
+
+    pub(crate) fn file_error(&self) -> Option<&QueryFileError> {
+        self.file.error()
+    }
+
+    pub(crate) fn update_document_text(&mut self, text: String) -> bool {
+        self.file.update_text(text)
+    }
+
+    pub(crate) fn begin_open_file(&mut self, path: PathBuf) -> Option<QueryFileRequest> {
+        self.file.begin_open(path)
+    }
+
+    pub(crate) fn begin_save_file(&mut self, path: PathBuf) -> Option<QueryFileRequest> {
+        self.file.begin_save(path)
+    }
+
+    pub(crate) fn finish_file_operation(
+        &mut self,
+        request: &QueryFileRequest,
+        result: Result<QueryFileCompletion, QueryFileError>,
+    ) -> Option<QueryFileCompletion> {
+        self.file.finish(request, result)
+    }
+
+    pub(crate) fn set_file_error(&mut self, error: QueryFileError) {
+        self.file.set_error(error);
+    }
+
     pub(crate) fn target(&self) -> Option<&QueryTarget> {
         self.target.as_ref()
     }
@@ -128,8 +187,7 @@ impl QueryWorkspaceState {
 
         self.target = target;
         self.active_generation = None;
-        self.results.clear();
-        self.active_result_index = 0;
+        self.reset_result_data();
         self.error = None;
         true
     }
@@ -156,8 +214,7 @@ impl QueryWorkspaceState {
 
     pub(crate) fn clear_results(&mut self) {
         self.active_generation = None;
-        self.results.clear();
-        self.active_result_index = 0;
+        self.reset_result_data();
         self.error = None;
     }
 
@@ -166,7 +223,50 @@ impl QueryWorkspaceState {
             return false;
         }
         self.active_result_index = index;
+        self.result_selection.clear();
         true
+    }
+
+    pub(crate) fn has_result_selection(&self) -> bool {
+        self.result_selection.has_selection()
+    }
+
+    pub(crate) fn is_result_cell_selected(&self, row: usize, column: usize) -> bool {
+        self.result_selection.contains_cell(row, column)
+    }
+
+    pub(crate) fn is_result_row_selected(&self, row: usize) -> bool {
+        self.result_selection.contains_row(row)
+    }
+
+    pub(crate) fn select_result_cell(&mut self, row: usize, column: usize, extend: bool) -> bool {
+        let valid = self.active_result().is_some_and(|result| {
+            row < result.rows.len()
+                && column < result.columns.len()
+                && column < result.rows[row].len()
+        });
+        valid && self.result_selection.select_cell(row, column, extend)
+    }
+
+    pub(crate) fn select_result_row(&mut self, row: usize, extend: bool, toggle: bool) -> bool {
+        let valid = self
+            .active_result()
+            .is_some_and(|result| row < result.rows.len());
+        valid && self.result_selection.select_row(row, extend, toggle)
+    }
+
+    pub(crate) fn select_all_result_rows(&mut self) -> bool {
+        let row_count = self.active_result().map_or(0, |result| result.rows.len());
+        self.result_selection.select_all_rows(row_count)
+    }
+
+    pub(crate) fn clear_result_selection(&mut self) -> bool {
+        self.result_selection.clear()
+    }
+
+    pub(crate) fn result_selection_tsv(&self, include_headers: bool) -> Option<String> {
+        self.result_selection
+            .to_tsv(self.active_result()?, include_headers)
     }
 
     pub(crate) fn begin_execution(
@@ -206,8 +306,7 @@ impl QueryWorkspaceState {
             .checked_add(1)
             .expect("query execution generation exhausted");
         self.active_generation = Some(self.next_generation);
-        self.results.clear();
-        self.active_result_index = 0;
+        self.reset_result_data();
         self.error = None;
         Ok(QueryExecutionRequest {
             generation: self.next_generation,
@@ -228,6 +327,7 @@ impl QueryWorkspaceState {
         }
 
         self.active_generation = None;
+        self.result_selection.clear();
         match result {
             Ok(results) => {
                 self.active_result_index = results
@@ -244,6 +344,12 @@ impl QueryWorkspaceState {
             }
         }
         true
+    }
+
+    fn reset_result_data(&mut self) {
+        self.results.clear();
+        self.active_result_index = 0;
+        self.result_selection.clear();
     }
 
     fn prepare_execution(
@@ -335,6 +441,8 @@ fn validate_range(source: &str, range: &Range<usize>) -> Result<(), QueryWorkspa
 mod tests {
     use serde_json::json;
 
+    use crate::db::ColumnInfo;
+
     use super::*;
 
     fn target(id: &str, generation: u64, db_type: DbType) -> QueryTarget {
@@ -352,7 +460,14 @@ mod tests {
             sql: sql.to_string(),
             success,
             error: (!success).then(|| "failed".to_string()),
-            columns: Vec::new(),
+            columns: vec![ColumnInfo {
+                name: "value".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            }],
             rows: vec![vec![json!(1)]],
             affected_rows: 0,
             execution_time_ms: 1,
@@ -467,6 +582,28 @@ mod tests {
         ));
         assert_eq!(state.active_result_index(), 1);
         assert_eq!(state.active_result().unwrap().sql, "SELECT 2");
+    }
+
+    #[test]
+    fn result_selection_is_scoped_to_the_active_result() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::SQLite)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT 1; SELECT 2".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        state.finish_execution(
+            &request,
+            Ok(vec![result("SELECT 1", true), result("SELECT 2", true)]),
+        );
+
+        assert!(state.select_result_cell(0, 0, false));
+        assert_eq!(state.result_selection_tsv(true).unwrap(), "value\n1");
+        assert!(state.select_result(1));
+        assert!(!state.has_result_selection());
+        assert!(state.result_selection_tsv(false).is_none());
     }
 
     #[test]
