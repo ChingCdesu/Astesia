@@ -47,6 +47,8 @@ Use separate narrow interfaces such as `UiEventSink`, `SidecarHost`, `FileDialog
 
 ### 0. Freeze the behavioral baseline
 
+Status: Complete on 2026-09-01. See [Milestone 0 acceptance](gpui-milestone-0-acceptance.md).
+
 - Record the current Legacy Shell commit as the reference point.
 - Preserve the existing 149-test Rust baseline.
 - Turn the current workflow inventory into a parity checklist covering seven database engines, shortcuts, empty/loading/error states, and destructive confirmations.
@@ -70,6 +72,8 @@ Status: Complete on 2026-09-01. See [Milestone 1 acceptance](gpui-milestone-1-ac
 Exit condition: the macOS app opens a native window containing the Zed editor; typing, selection, IME, undo/redo, focus, resize, and shutdown work without reading the user's Zed data or making Zed network requests.
 
 ### 2. Extract the Application Core
+
+Status: Complete on 2026-09-01. See [Milestone 2 acceptance](gpui-milestone-2-acceptance.md).
 
 - Remove `tauri::AppHandle` from the core `AppState` boundary.
 - Move business logic out of command handlers into UI-independent application services.
