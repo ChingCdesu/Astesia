@@ -41,28 +41,30 @@ actions!(
 
 pub(super) struct QueryDocumentStateChanged;
 
+const QUERY_EDITOR_CONTEXT: &str = "QueryItem > QueryEditor > Editor";
+
 pub(super) fn bind_query_item_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-enter", ExecuteQuery, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("ctrl-enter", ExecuteQuery, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("ctrl-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
         gpui::KeyBinding::new(
             "cmd-shift-enter",
             ExecuteCurrentQuery,
-            Some("QueryItem > Editor"),
+            Some(QUERY_EDITOR_CONTEXT),
         ),
         gpui::KeyBinding::new(
             "ctrl-shift-enter",
             ExecuteCurrentQuery,
-            Some("QueryItem > Editor"),
+            Some(QUERY_EDITOR_CONTEXT),
         ),
-        gpui::KeyBinding::new("cmd-o", OpenQueryFile, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("ctrl-o", OpenQueryFile, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("cmd-s", SaveQueryFile, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("ctrl-s", SaveQueryFile, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("cmd-f", Deploy::find(), Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("ctrl-f", Deploy::find(), Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("cmd-alt-f", DeployReplace, Some("QueryItem > Editor")),
-        gpui::KeyBinding::new("ctrl-h", DeployReplace, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("ctrl-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("cmd-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("ctrl-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("cmd-f", Deploy::find(), Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("ctrl-f", Deploy::find(), Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("cmd-alt-f", DeployReplace, Some(QUERY_EDITOR_CONTEXT)),
+        gpui::KeyBinding::new("ctrl-h", DeployReplace, Some(QUERY_EDITOR_CONTEXT)),
         gpui::KeyBinding::new("cmd-g", SelectNextMatch, Some("QueryItem")),
         gpui::KeyBinding::new("ctrl-g", SelectNextMatch, Some("QueryItem")),
         gpui::KeyBinding::new("cmd-shift-g", SelectPreviousMatch, Some("QueryItem")),
@@ -1138,6 +1140,7 @@ impl Render for QueryItem {
             }))
             .child(
                 div()
+                    .key_context("QueryEditor")
                     .h(px(280.0))
                     .min_h(px(120.0))
                     .flex_none()
@@ -1295,6 +1298,11 @@ mod tests {
             search.read_with(cx, |search, cx| search.query(cx)),
             "select"
         );
+        cx.simulate_keystrokes(window.into(), "cmd-enter");
+        assert!(
+            item.read_with(cx, |item, _| item.state.error().is_none()),
+            "query execution shortcuts must not escape the SQL editor"
+        );
 
         cx.simulate_keystrokes(window.into(), "cmd-shift-h");
         cx.simulate_keystrokes(window.into(), "u p d a t e");
@@ -1314,6 +1322,12 @@ mod tests {
         assert_eq!(
             editor.read_with(cx, |editor, cx| editor.text(cx)),
             "SELECT 1;\nSELECT 1;"
+        );
+
+        cx.simulate_keystrokes(window.into(), "cmd-enter");
+        assert_eq!(
+            item.read_with(cx, |item, _| item.state.error().map(|error| error.code)),
+            Some("query_target_required")
         );
     }
 }
