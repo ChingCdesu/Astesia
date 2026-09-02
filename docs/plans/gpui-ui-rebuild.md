@@ -98,20 +98,7 @@ Exit condition: all seven engines can be configured, tested, connected, disconne
 
 ### 4. Port querying as the first complete vertical slice
 
-Status: In progress since 2026-09-01. The first slice adds selection/current-statement Explain
-through Application Core and the native Query Item for all five SQL engines, including
-session-safe SQL Server `SHOWPLAN_ALL` cleanup. The second slice adds rectangular cell and row
-selection, platform shortcuts, deterministic TSV quoting, and optional headers to the native result
-grid. The third slice adds native open/save dialogs, query file identity and dirty tracking,
-filename-aware tabs, and discard confirmation before Open or tab close can replace unsaved text.
-The fourth slice bundles the official Zed SQL highlight query and its pinned native Tree-sitter
-grammar, assigns that language to every query editor, and refreshes highlight mappings with theme
-changes without loading the extension registry or using the network at runtime.
-The fifth slice ports the five SQL dialect keyword and function vocabularies, adds session-scoped
-table/schema completion with lazy column lookup and dialect-aware quoting, and wires the native Zed
-completion popup to automatic triggers, `Ctrl+Space`, navigation, acceptance, and dismissal keys.
-The sixth slice embeds Zed's native buffer search in each query item, preserving selection-seeded
-find, replace-next/all, match navigation, focus return, highlights, and editor undo grouping.
+Status: Complete on 2026-09-02. See [Milestone 4 acceptance](gpui-milestone-4-acceptance.md).
 
 - Wrap Zed `Editor` in an Astesia-owned `QueryItem` containing connection context, result state, execution state, and file state.
 - Bundle SQL grammar and highlighting locally; do not initialize the Zed extension marketplace.
