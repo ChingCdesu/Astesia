@@ -9,6 +9,7 @@ mod mutation_service;
 mod performance_service;
 mod performance_snapshot;
 mod profile_editor;
+mod query_completion;
 mod query_file;
 mod query_result_selection;
 mod query_service;
@@ -33,6 +34,9 @@ pub use performance_snapshot::{
     SqlServerMetrics, SqliteMetrics,
 };
 pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
+pub(crate) use query_completion::{
+    QueryCompletion, QueryCompletionRequest, QueryCompletionService,
+};
 pub(crate) use query_file::{QueryFileCompletion, QueryFileError, QueryFileRequest};
 pub use query_service::QueryService;
 pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
@@ -57,6 +61,7 @@ pub struct Application {
     exports: ExportService,
     mutations: MutationService,
     performance: PerformanceService,
+    query_completions: QueryCompletionService,
     queries: QueryService,
     transfers: TransferService,
     mcp: Option<McpRuntime>,
@@ -95,13 +100,16 @@ impl Application {
         let mcp_registry = McpSyncRegistry::new(repository, Arc::new(events.clone()));
         let task_manager = TaskManager::new(Arc::new(events.clone()));
         let queries = QueryService::new(connection_manager.clone());
+        let catalog = CatalogService::new(connection_manager.clone());
+        let query_completions = QueryCompletionService::new(catalog.clone());
         let mcp = sidecar_host.map(|host| McpRuntime::new(host, mcp_registry.clone()));
         Self {
-            catalog: CatalogService::new(connection_manager.clone()),
+            catalog,
             connections: ConnectionService::new(connection_manager.clone(), mcp_registry),
             exports: ExportService::new(queries.clone()),
             mutations: MutationService::new(connection_manager.clone()),
             performance: PerformanceService::new(connection_manager.clone()),
+            query_completions,
             queries,
             transfers: TransferService::new(connection_manager, task_manager.clone()),
             mcp,
@@ -124,6 +132,10 @@ impl Application {
 
     pub fn queries(&self) -> &QueryService {
         &self.queries
+    }
+
+    pub(crate) fn query_completions(&self) -> &QueryCompletionService {
+        &self.query_completions
     }
 
     pub fn mutations(&self) -> &MutationService {
