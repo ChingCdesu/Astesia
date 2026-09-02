@@ -474,6 +474,7 @@ dependencies = [
  "rust_xlsxwriter",
  "rustls 0.23.37",
  "schemars",
+ "search",
  "security-framework 3.7.0",
  "serde",
  "serde_json",
@@ -7466,6 +7467,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "picker"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?rev=399258feeaf90ad8a3a208c99221ee87b6452f38#399258feeaf90ad8a3a208c99221ee87b6452f38"
+dependencies = [
+ "anyhow",
+ "db",
+ "gpui",
+ "language",
+ "menu",
+ "project",
+ "schemars",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
+name = "picker_preview"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?rev=399258feeaf90ad8a3a208c99221ee87b6452f38#399258feeaf90ad8a3a208c99221ee87b6452f38"
+dependencies = [
+ "editor",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "picker",
+ "project",
+ "rope",
+ "settings",
+ "ui",
+ "util",
+]
+
+[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9190,6 +9232,45 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
+name = "search"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?rev=399258feeaf90ad8a3a208c99221ee87b6452f38#399258feeaf90ad8a3a208c99221ee87b6452f38"
+dependencies = [
+ "any_vec",
+ "anyhow",
+ "bitflags 2.13.1",
+ "collections",
+ "db",
+ "editor",
+ "file_icons",
+ "fs",
+ "futures",
+ "gpui",
+ "itertools 0.14.0",
+ "language",
+ "log",
+ "menu",
+ "multi_buffer",
+ "picker",
+ "picker_preview",
+ "project",
+ "regex",
+ "serde_json",
+ "settings",
+ "smol",
+ "text",
+ "theme",
+ "theme_settings",
+ "tracing",
+ "ui",
+ "util",
+ "util_macros",
+ "workspace",
+ "zed_actions",
+ "ztracing",
+]
 
 [[package]]
 name = "secret-service"

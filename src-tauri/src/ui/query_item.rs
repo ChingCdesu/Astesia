@@ -6,7 +6,12 @@ use gpui::{
     PathPromptOptions, PromptButton, PromptLevel, Subscription,
 };
 use multi_buffer::MultiBufferOffset;
+use search::{
+    buffer_search::{Deploy, DeployReplace, Dismiss, DivRegistrar, FocusEditor},
+    BufferSearchBar, ReplaceAll, ReplaceNext, SelectNextMatch, SelectPreviousMatch, ToggleReplace,
+};
 use serde_json::Value;
+use workspace::ToolbarItemView as _;
 use zed_ui::prelude::*;
 
 use crate::application::{
@@ -54,23 +59,54 @@ pub(super) fn bind_query_item_keys(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-o", OpenQueryFile, Some("QueryItem > Editor")),
         gpui::KeyBinding::new("cmd-s", SaveQueryFile, Some("QueryItem > Editor")),
         gpui::KeyBinding::new("ctrl-s", SaveQueryFile, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-f", Deploy::find(), Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("ctrl-f", Deploy::find(), Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-alt-f", DeployReplace, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("ctrl-h", DeployReplace, Some("QueryItem > Editor")),
+        gpui::KeyBinding::new("cmd-g", SelectNextMatch, Some("QueryItem")),
+        gpui::KeyBinding::new("ctrl-g", SelectNextMatch, Some("QueryItem")),
+        gpui::KeyBinding::new("cmd-shift-g", SelectPreviousMatch, Some("QueryItem")),
+        gpui::KeyBinding::new("ctrl-shift-g", SelectPreviousMatch, Some("QueryItem")),
         gpui::KeyBinding::new("cmd-c", CopyQueryResults, Some("QueryResultGrid")),
         gpui::KeyBinding::new("ctrl-c", CopyQueryResults, Some("QueryResultGrid")),
         gpui::KeyBinding::new("cmd-a", SelectAllQueryResults, Some("QueryResultGrid")),
         gpui::KeyBinding::new("ctrl-a", SelectAllQueryResults, Some("QueryResultGrid")),
         gpui::KeyBinding::new("escape", ClearQueryResultSelection, Some("QueryResultGrid")),
+        gpui::KeyBinding::new("escape", Dismiss, Some("BufferSearchBar")),
+        gpui::KeyBinding::new("tab", FocusEditor, Some("BufferSearchBar")),
+        gpui::KeyBinding::new("enter", SelectNextMatch, Some("BufferSearchBar")),
+        gpui::KeyBinding::new("shift-enter", SelectPreviousMatch, Some("BufferSearchBar")),
+        gpui::KeyBinding::new("cmd-shift-h", ToggleReplace, Some("BufferSearchBar")),
+        gpui::KeyBinding::new("ctrl-h", ToggleReplace, Some("BufferSearchBar")),
+        gpui::KeyBinding::new(
+            "enter",
+            ReplaceNext,
+            Some("BufferSearchBar && in_replace > Editor"),
+        ),
+        gpui::KeyBinding::new(
+            "cmd-enter",
+            ReplaceAll,
+            Some("BufferSearchBar && in_replace > Editor"),
+        ),
+        gpui::KeyBinding::new(
+            "ctrl-enter",
+            ReplaceAll,
+            Some("BufferSearchBar && in_replace > Editor"),
+        ),
     ]);
 }
 
 pub(super) struct QueryItem {
     application: Arc<Application>,
     editor: Entity<Editor>,
+    search: Entity<BufferSearchBar>,
     result_focus: FocusHandle,
     completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
     file_prompt_active: bool,
     settings: Entity<ShellSettings>,
     _editor_subscription: Subscription,
+    _search_observation: Subscription,
     _settings_observation: Subscription,
 }
 
@@ -79,9 +115,15 @@ impl QueryItem {
         application: Arc<Application>,
         editor: Entity<Editor>,
         settings: Entity<ShellSettings>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_text = editor.read(cx).text(cx);
+        let search = cx.new(|cx| {
+            let mut search = BufferSearchBar::new(None, window, cx);
+            search.set_active_pane_item(Some(&editor), window, cx);
+            search
+        });
         let completion =
             sql_completion::install(application.query_completions().clone(), &editor, cx);
         let editor_subscription = cx.subscribe(&editor, |item, editor, event: &EditorEvent, cx| {
@@ -96,16 +138,19 @@ impl QueryItem {
                 }
             }
         });
+        let search_observation = cx.observe(&search, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             application,
             editor,
+            search,
             result_focus: cx.focus_handle(),
             completion,
             state: QueryWorkspaceState::new(initial_text),
             file_prompt_active: false,
             settings,
             _editor_subscription: editor_subscription,
+            _search_observation: search_observation,
             _settings_observation: settings_observation,
         }
     }
@@ -311,6 +356,12 @@ impl QueryItem {
         cx: &mut Context<Self>,
     ) {
         self.save_query_file(window, cx);
+    }
+
+    fn show_find_click(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |search, cx| {
+            search.deploy(&Deploy::find(), None, window, cx);
+        });
     }
 
     fn save_query_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -930,6 +981,14 @@ impl QueryItem {
             )
             .into_any_element()
     }
+
+    fn search_for_actions(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Entity<BufferSearchBar>> {
+        Some(self.search.clone())
+    }
 }
 
 impl gpui::EventEmitter<QueryDocumentStateChanged> for QueryItem {}
@@ -977,8 +1036,9 @@ impl Render for QueryItem {
             .active_result()
             .is_some_and(|result| !result.columns.is_empty() && !result.rows.is_empty());
         let has_result_selection = self.state.has_result_selection();
+        let search_visible = !self.search.read(cx).is_dismissed();
 
-        v_flex()
+        let content = v_flex()
             .key_context("QueryItem")
             .on_action(cx.listener(Self::execute_all))
             .on_action(cx.listener(Self::execute_current))
@@ -1010,6 +1070,12 @@ impl Render for QueryItem {
                             .disabled(file_busy)
                             .key_binding(zed_ui::KeyBinding::for_action(&SaveQueryFile, cx))
                             .on_click(cx.listener(Self::save_query_file_click)),
+                    )
+                    .child(
+                        Button::new("find-query", text(language, "查找", "Find"))
+                            .size(ButtonSize::Compact)
+                            .key_binding(zed_ui::KeyBinding::for_action(&Deploy::find(), cx))
+                            .on_click(cx.listener(Self::show_find_click)),
                     )
                     .child(Label::new(file_label).size(LabelSize::XSmall).truncate())
                     .child(
@@ -1061,6 +1127,14 @@ impl Render for QueryItem {
                             .size(LabelSize::XSmall)
                             .color(Color::Error),
                     )
+            }))
+            .children(search_visible.then(|| {
+                div()
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.panel_background)
+                    .child(self.search.clone())
             }))
             .child(
                 div()
@@ -1125,7 +1199,11 @@ impl Render for QueryItem {
                     }),
             )
             .children(self.render_result_tabs(cx))
-            .child(div().flex_1().min_h_0().child(self.render_results(cx)))
+            .child(div().flex_1().min_h_0().child(self.render_results(cx)));
+
+        let mut search_actions = DivRegistrar::new(Self::search_for_actions, cx);
+        BufferSearchBar::register(&mut search_actions);
+        search_actions.into_div().size_full().child(content)
     }
 }
 
@@ -1151,7 +1229,16 @@ fn display_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assets::Assets;
+    use gpui::TestAppContext;
+
     use super::*;
+    use crate::{
+        connection_repository::SharedConnectionRepository,
+        credential_vault::test_support::MemoryCredentialVault,
+        platform::DesktopPreferences,
+        ui::{bind_editor_keys, sql_language},
+    };
 
     #[test]
     fn result_cells_preserve_scalar_and_structured_values() {
@@ -1160,6 +1247,73 @@ mod tests {
         assert_eq!(
             display_value(&serde_json::json!({ "ok": true })),
             "{\"ok\":true}"
+        );
+    }
+
+    #[gpui::test]
+    fn native_find_replace_preserves_focus_and_grouped_undo(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            Assets.load_test_fonts(cx);
+            let settings = settings::SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(release_channel::AppVersion::load("0.0.0", None, None), cx);
+            gpui_tokio::init(cx);
+            editor::init(cx);
+            sql_language::init(cx);
+            bind_editor_keys(cx);
+            bind_query_item_keys(cx);
+        });
+
+        let directory = tempfile::tempdir().expect("query search repository directory");
+        let repository = SharedConnectionRepository::new(
+            directory.path().join("connections.sqlite3"),
+            MemoryCredentialVault::shared(),
+        );
+        let application = Arc::new(Application::with_repository(repository));
+        let settings = cx.new(|_| ShellSettings::new(DesktopPreferences::default(), None));
+        let mut editor = None;
+        let window = cx.add_window(|window, cx| {
+            let query_editor =
+                cx.new(|cx| sql_language::editor("SELECT 1;\nSELECT 1;", window, cx));
+            editor = Some(query_editor.clone());
+            QueryItem::new(application, query_editor, settings, window, cx)
+        });
+        let item = window.root(cx).expect("query item root");
+        let editor = editor.expect("query editor");
+        let search = item.read_with(cx, |item, _| item.search.clone());
+        window
+            .update(cx, |item, window, cx| item.focus(window, cx))
+            .expect("query window");
+
+        cx.run_until_parked();
+        cx.simulate_keystrokes(window.into(), "cmd-f");
+        cx.simulate_keystrokes(window.into(), "s e l e c t");
+        cx.run_until_parked();
+        assert!(!search.read_with(cx, |search, _| search.is_dismissed()));
+        assert_eq!(
+            search.read_with(cx, |search, cx| search.query(cx)),
+            "select"
+        );
+
+        cx.simulate_keystrokes(window.into(), "cmd-shift-h");
+        cx.simulate_keystrokes(window.into(), "u p d a t e");
+        assert_eq!(
+            search.update(cx, |search, cx| search.replacement(cx)),
+            "update"
+        );
+        cx.simulate_keystrokes(window.into(), "cmd-enter");
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "update 1;\nupdate 1;"
+        );
+
+        cx.simulate_keystrokes(window.into(), "escape cmd-z");
+        assert!(search.read_with(cx, |search, _| search.is_dismissed()));
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "SELECT 1;\nSELECT 1;"
         );
     }
 }
