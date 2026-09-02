@@ -458,6 +458,7 @@ dependencies = [
  "gpui_tokio",
  "http_client",
  "keyring",
+ "language",
  "log",
  "menu",
  "mongodb",
@@ -484,6 +485,7 @@ dependencies = [
  "tiberius",
  "tokio",
  "tokio-util",
+ "tree-sitter-sequel",
  "ui",
  "ui_input",
  "uuid",
@@ -1366,9 +1368,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.4"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ad534f4357a5264cce5019c989cf66a4f0dc4e0d1b1d15f8aacec0ff7360273"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -11199,6 +11201,15 @@ dependencies = [
 name = "tree-sitter-language"
 version = "0.1.8"
 source = "git+https://github.com/tree-sitter/tree-sitter?rev=43623ec9bf0eaaf7113285c46e8a09018f181b18#43623ec9bf0eaaf7113285c46e8a09018f181b18"
+
+[[package]]
+name = "tree-sitter-sequel"
+version = "0.3.11"
+source = "git+https://github.com/DerekStride/tree-sitter-sql?rev=851e9cb257ba7c66cc8c14214a31c44d2f1e954e#851e9cb257ba7c66cc8c14214a31c44d2f1e954e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "try-lock"

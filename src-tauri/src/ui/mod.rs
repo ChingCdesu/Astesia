@@ -5,18 +5,16 @@ mod engine_presentation;
 mod localization;
 mod query_item;
 mod shell;
+mod sql_language;
 mod tabs;
 mod workspace;
 
 use std::sync::Arc;
 
 use assets::Assets;
-use editor::{
-    actions::{
-        Backspace, Backtab, Copy, Cut, Delete, LineDown, LineUp, MoveLeft, MoveRight, Newline,
-        Paste, Redo, SelectAll, SelectDown, SelectLeft, SelectRight, SelectUp, Tab, Undo,
-    },
-    Editor,
+use editor::actions::{
+    Backspace, Backtab, Copy, Cut, Delete, LineDown, LineUp, MoveLeft, MoveRight, Newline, Paste,
+    Redo, SelectAll, SelectDown, SelectLeft, SelectRight, SelectUp, Tab, Undo,
 };
 use gpui::{
     px, size, App, AppContext as _, Bounds, KeyBinding, QuitMode, TitlebarOptions, WindowBounds,
@@ -64,6 +62,7 @@ fn initialize_editor_runtime(theme: crate::platform::ThemePreference, cx: &mut A
     theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
     apply_theme(theme, cx);
     editor::init(cx);
+    sql_language::init(cx);
     bind_editor_keys(cx);
     bind_connection_profile_form_keys(cx);
     bind_connection_profiles_keys(cx);
@@ -91,11 +90,7 @@ fn open_main_window(
 
     cx.open_window(window_options, move |window, cx| {
         theme_settings::setup_ui_font(window, cx);
-        let editor = cx.new(|cx| {
-            let mut editor = Editor::multi_line(window, cx);
-            editor.set_text(INITIAL_QUERY, window, cx);
-            editor
-        });
+        let editor = cx.new(|cx| sql_language::editor(INITIAL_QUERY, window, cx));
         cx.new(|cx| {
             AstesiaRoot::new(
                 editor,
@@ -180,9 +175,10 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(release_channel::AppVersion::load("0.0.0", None, None), cx);
             editor::init(cx);
+            sql_language::init(cx);
         });
 
-        let editor = cx.add_window(Editor::multi_line);
+        let editor = cx.add_window(|window, cx| sql_language::editor("", window, cx));
 
         editor
             .update(cx, |editor, window, cx| {

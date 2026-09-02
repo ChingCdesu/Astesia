@@ -26,6 +26,7 @@ use super::{
         notify_preference_error, refresh_active_theme, NotificationCenter, NotificationTone,
         ShellSettings,
     },
+    sql_language,
     tabs::{QueryTabId, QueryTabsModel},
 };
 
@@ -416,11 +417,7 @@ impl AstesiaWorkspace {
     }
 
     fn new_query_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = cx.new(|cx| {
-            let mut editor = Editor::multi_line(window, cx);
-            editor.set_text(super::INITIAL_QUERY, window, cx);
-            editor
-        });
+        let editor = cx.new(|cx| sql_language::editor(super::INITIAL_QUERY, window, cx));
         let target = self.connection_profiles.read(cx).query_target().cloned();
         let item = cx
             .new(|cx| QueryItem::new(self.application.clone(), editor, self.settings.clone(), cx));

@@ -22,6 +22,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38", features = ["font-kit", "wayland", "x11"] }
 gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 http_client = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+language = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 menu = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 multi_buffer = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 paths = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
@@ -56,6 +57,7 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 ring = "=0.17.14"
 zeroize = "=1.8.2"
 tempfile = "3"
+tree-sitter-sequel = { git = "https://github.com/DerekStride/tree-sitter-sql", rev = "851e9cb257ba7c66cc8c14214a31c44d2f1e954e" }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38", features = ["test-support"] }
