@@ -31,6 +31,12 @@ async fn all_engines_cross_the_application_connection_workflow() {
         .map(|target| target.config.db_type)
         .collect::<HashSet<_>>();
     assert_eq!(engines, HashSet::from(DbType::all()));
+    let target_engine = std::env::var("ASTESIA_ENGINE_SMOKE_TARGET")
+        .ok()
+        .map(|value| {
+            serde_json::from_value::<DbType>(serde_json::Value::String(value))
+                .expect("ASTESIA_ENGINE_SMOKE_TARGET must name a supported engine")
+        });
 
     let directory = tempfile::tempdir().expect("tempdir");
     let repository = SharedConnectionRepository::new(
@@ -41,12 +47,15 @@ async fn all_engines_cross_the_application_connection_workflow() {
 
     for target in targets {
         let engine = target.config.db_type;
+        if target_engine.is_some() && target_engine != Some(engine) {
+            continue;
+        }
         let connection_id = target.config.id.clone();
         let profile = ValidatedProfile::from_request(SaveConnectionRequest {
             config: target.config.clone(),
             expected_revision: None,
             mcp_enabled: false,
-            group_name: Some("Milestone 3".to_string()),
+            group_name: Some("Native smoke".to_string()),
             tags: vec!["native-smoke".to_string()],
         });
         application
@@ -60,7 +69,11 @@ async fn all_engines_cross_the_application_connection_workflow() {
             .test_connection(target.config.clone())
             .await
             .unwrap_or_else(|error| panic!("{engine:?} test failed: {error}"));
-        assert_eq!(tested, ConnectionOutcome::Succeeded);
+        assert_eq!(
+            tested,
+            ConnectionOutcome::Succeeded,
+            "{engine:?} connection test was rejected"
+        );
 
         let connected = application
             .connections()
@@ -88,6 +101,37 @@ async fn all_engines_cross_the_application_connection_workflow() {
             .tables(&connection_id, &database)
             .await
             .unwrap_or_else(|error| panic!("{engine:?} browse failed: {error}"));
+
+        if engine.capabilities().sql {
+            let results = application
+                .queries()
+                .execute_statements(
+                    &connection_id,
+                    &database,
+                    vec!["SELECT 1 AS astesia_milestone_4".to_string()],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{engine:?} query failed: {error}"));
+            assert_eq!(results.len(), 1, "{engine:?} returned extra results");
+            assert!(results[0].success, "{engine:?} query was unsuccessful");
+            assert_eq!(results[0].columns.len(), 1, "{engine:?} lost the column");
+            assert_eq!(results[0].rows.len(), 1, "{engine:?} lost the row");
+
+            let explained = application
+                .queries()
+                .explain(
+                    &connection_id,
+                    &database,
+                    "SELECT 1 AS astesia_milestone_4".to_string(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{engine:?} explain failed: {error}"));
+            assert!(
+                explained.success,
+                "{engine:?} explain was unsuccessful: {:?}",
+                explained.error
+            );
+        }
 
         let disconnected = application
             .connections()

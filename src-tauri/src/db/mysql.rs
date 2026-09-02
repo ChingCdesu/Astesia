@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::types::BigDecimal;
-use sqlx::{Column, MySqlConnection, Row, TypeInfo};
+use sqlx::{Column, Executor, MySqlConnection, Row, TypeInfo};
 use std::time::Instant;
 
 use super::{
@@ -128,6 +128,13 @@ async fn run_mysql_query(conn: &mut MySqlConnection, sql: &str) -> anyhow::Resul
 fn use_database_sql(database: &str) -> anyhow::Result<String> {
     let database = SqlDialect::new(DbType::MySQL).quote_identifier(database)?;
     Ok(format!("USE {database}"))
+}
+
+async fn select_database(conn: &mut MySqlConnection, database: &str) -> anyhow::Result<()> {
+    // MySQL rejects `USE` through the prepared-statement protocol.
+    let sql = use_database_sql(database)?;
+    conn.execute(sql.as_str()).await?;
+    Ok(())
 }
 
 fn table_data_sql(
@@ -310,9 +317,7 @@ impl DatabaseDriver for MySqlDriver {
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        sqlx::query(&use_database_sql(database)?)
-            .execute(&mut *conn)
-            .await?;
+        select_database(&mut conn, database).await?;
         run_mysql_query(&mut conn, sql).await
     }
 
@@ -323,9 +328,7 @@ impl DatabaseDriver for MySqlDriver {
     ) -> anyhow::Result<Vec<StatementResult>> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
-        sqlx::query(&use_database_sql(database)?)
-            .execute(&mut *conn)
-            .await?;
+        select_database(&mut conn, database).await?;
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();
