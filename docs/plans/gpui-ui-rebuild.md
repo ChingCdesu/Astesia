@@ -110,6 +110,41 @@ Exit condition: the five SQL engines support open/edit/save, completion, selecte
 
 ### 5. Port schema browsing and editable data grids
 
+Status: Complete on 2026-09-02. See [Milestone 5 acceptance](gpui-milestone-5-acceptance.md).
+The first slice adds actionable SQL table rows, a native table-structure workspace item for columns
+and indexes, and an Application Core state model that
+rejects stale loads when a connection session changes. The workspace tab model now hosts typed
+query and table-structure items so later data-grid sessions can reuse the same navigation seam. The
+second slice extracts a UI-independent `GridSession` for paging, typed sorting, filter state, row and
+cell selection, staged edits/inserts/deletes, undo, discard, and deterministic save planning. It
+keeps ClickHouse read-only, requires exactly one primary key for writes, preserves unsaved changes
+when a session becomes unavailable, and orders primary-key edits after other edits to the same row.
+The third slice adds a session-generation-checked `GridService` that loads filtered, typed-sorted,
+paginated rows with authoritative column metadata and executes each save plan as one transaction on
+one driver session. Successful saves invalidate the page for reload; any failed statement rolls the
+whole batch back and leaves the staged changes available for correction, undo, discard, or retry.
+The fourth slice exposes a native read-only `DataGridItem`: table rows open reusable data tabs,
+while a dedicated tree action keeps table structure accessible. The grid virtualizes rows, supports
+row and rectangular cell selection, cycles single-column typed sorting from keyboard or pointer,
+and presents refresh, pagination, row totals, empty results, failures, and invalidated sessions.
+The fifth slice connects editable single-primary-key grids to the staged mutation service. Operators
+can open an inline cell editor from the keyboard or pointer, validate boolean, numeric, JSON, text,
+and nullable values, then Undo, Discard, or Save the batch. Dirty cells and tabs remain visible,
+navigation is locked until changes are resolved, closing a dirty grid requires confirmation, and
+failed transactions preserve the complete staged change set for correction or retry. ClickHouse,
+missing-primary-key tables, and composite-primary-key tables remain explicitly read-only.
+The sixth slice completes the grid interaction contract: draft rows distinguish database defaults
+from explicit SQL NULL, staged row deletion stays reversible, filtering can recover from query
+errors, and rectangular CSV/TSV paste is one undoable batch. Copy uses `\\N` for SQL NULL, typed
+editors validate date/time, integer, JSON, and catalog-backed enum values, long values use an
+expanded editor, and columns can be resized without hiding the Save action at the minimum window
+width. The seventh slice expands each database into capability-gated catalog sections, adds table
+constraints and foreign keys to structure tabs, and opens view, function, and procedure definitions
+as qualified read-only SQL snapshots with explicit missing-definition and stale-session states. The
+final slice adds typed create, rename, and drop workflows with complete destructive identities,
+credential-safe notices, and visible busy/error states; completes ClickHouse read-only CSV export;
+and passes the catalog, object, and grid workflow against disposable instances of all seven engines.
+
 - Move SQL and DDL construction out of views into typed application services.
 - Implement schema trees, table structure, indexes, object definitions, and supported create/rename/drop actions from the engine capability matrix.
 - Extract a `GridSession` model for pagination, filtering, sorting, selection, staged insert/update/delete operations, undo, discard, and batch save.

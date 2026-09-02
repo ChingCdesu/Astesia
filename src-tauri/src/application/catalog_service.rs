@@ -1,9 +1,10 @@
 use crate::db::{
     ColumnInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, TableInfo, TableRef,
-    TriggerInfo, UserInfo, ViewInfo,
+    TriggerInfo, UnsupportedFeature, UserInfo, ViewInfo,
 };
 
 use super::connections::ConnectionManager;
+use super::{CatalogKind, CatalogLoadResult, TableStructureLoadError, TableStructureSnapshot};
 
 #[derive(Clone)]
 pub struct CatalogService {
@@ -37,6 +38,72 @@ impl CatalogService {
             .map_err(|error| format!("获取表列表失败: {error}"))
     }
 
+    pub(crate) async fn catalog_section(
+        &self,
+        connection_id: &str,
+        database: &str,
+        kind: CatalogKind,
+    ) -> CatalogLoadResult {
+        let handle = match self.manager.driver(connection_id).await {
+            Ok(handle) => handle,
+            Err(error) => return CatalogLoadResult::failed(kind, error),
+        };
+        let driver = match handle.lock_active().await {
+            Ok(driver) => driver,
+            Err(error) => return CatalogLoadResult::failed(kind, error),
+        };
+        if !kind.supported(driver.db_type()) {
+            return CatalogLoadResult::failed(
+                kind,
+                format!("{kind:?} is not supported for {:?}", driver.db_type()),
+            );
+        }
+        match kind {
+            CatalogKind::Schemas => CatalogLoadResult::Schemas(
+                driver
+                    .get_schemas(database)
+                    .await
+                    .map_err(|error| format!("获取Schema列表失败: {error}")),
+            ),
+            CatalogKind::Tables => CatalogLoadResult::Tables(
+                driver
+                    .get_tables(database)
+                    .await
+                    .map_err(|error| format!("获取表列表失败: {error}")),
+            ),
+            CatalogKind::Views => CatalogLoadResult::Views(
+                driver
+                    .get_views(database)
+                    .await
+                    .map_err(|error| format!("获取视图失败: {error}")),
+            ),
+            CatalogKind::Functions => CatalogLoadResult::Functions(
+                driver
+                    .get_functions(database)
+                    .await
+                    .map_err(|error| format!("获取函数失败: {error}")),
+            ),
+            CatalogKind::Procedures => CatalogLoadResult::Procedures(
+                driver
+                    .get_procedures(database)
+                    .await
+                    .map_err(|error| format!("获取存储过程失败: {error}")),
+            ),
+            CatalogKind::Triggers => CatalogLoadResult::Triggers(
+                driver
+                    .get_triggers(database)
+                    .await
+                    .map_err(|error| format!("获取触发器失败: {error}")),
+            ),
+            CatalogKind::Users => CatalogLoadResult::Users(
+                driver
+                    .get_users()
+                    .await
+                    .map_err(|error| format!("获取用户列表失败: {error}")),
+            ),
+        }
+    }
+
     pub async fn columns(
         &self,
         connection_id: &str,
@@ -63,6 +130,64 @@ impl CatalogService {
             .get_indexes(database, table)
             .await
             .map_err(|error| format!("获取索引信息失败: {error}"))
+    }
+
+    pub(crate) async fn table_structure(
+        &self,
+        connection_id: &str,
+        database: &str,
+        table: &TableRef,
+    ) -> Result<TableStructureSnapshot, TableStructureLoadError> {
+        let handle = self
+            .manager
+            .driver(connection_id)
+            .await
+            .map_err(TableStructureLoadError::Connection)?;
+        let driver = handle
+            .lock_active()
+            .await
+            .map_err(TableStructureLoadError::Connection)?;
+        let db_type = driver.db_type();
+        let capabilities = db_type.capabilities();
+        if !capabilities.sql {
+            return Err(TableStructureLoadError::Unsupported(
+                UnsupportedFeature::new(db_type, "SQL table structure browsing").to_string(),
+            ));
+        }
+        let columns = driver
+            .get_columns(database, table)
+            .await
+            .map_err(|error| TableStructureLoadError::Columns(error.to_string()))?;
+        let indexes = driver
+            .get_indexes(database, table)
+            .await
+            .map_err(|error| TableStructureLoadError::Indexes(error.to_string()))?;
+        let constraints = if capabilities.constraints {
+            Some(
+                driver
+                    .get_constraints(database, table)
+                    .await
+                    .map_err(|error| TableStructureLoadError::Constraints(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let foreign_keys = if capabilities.foreign_keys {
+            Some(
+                driver
+                    .get_foreign_keys(database, table)
+                    .await
+                    .map_err(|error| TableStructureLoadError::ForeignKeys(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(TableStructureSnapshot {
+            columns,
+            indexes,
+            constraints,
+            foreign_keys,
+        })
     }
 
     pub async fn schemas(

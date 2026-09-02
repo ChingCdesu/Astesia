@@ -190,7 +190,10 @@ impl ConnectionManager {
         Ok((session_generation, databases))
     }
 
-    async fn driver_session(&self, connection_id: &str) -> Result<(DriverHandle, u64), String> {
+    pub(super) async fn driver_session(
+        &self,
+        connection_id: &str,
+    ) -> Result<(DriverHandle, u64), String> {
         self.runtime
             .driver_session(connection_id)
             .await

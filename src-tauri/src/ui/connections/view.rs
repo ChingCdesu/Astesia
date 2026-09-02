@@ -1,13 +1,15 @@
 use gpui::{rgb, FontWeight};
-use zed_ui::prelude::*;
-
-use crate::application::connection_workspace::{
-    ConnectionWorkspaceError, DatabaseListState, ObjectListState, ProfileOperationKind,
-};
-use crate::application::{ConnectionProfileSnapshot, ConnectionWorkspaceSnapshot, QueryTarget};
+use zed_ui::{prelude::*, Tooltip};
 
 use super::presentation::grouped_profiles;
 use super::{ConnectionProfilesPanel, NoticeTone, PanelNotice, SIDEBAR_WIDTH};
+use crate::application::connection_workspace::{
+    ConnectionWorkspaceError, DatabaseListState, ProfileOperationKind,
+};
+use crate::application::{
+    object_kind_can_drop, object_kind_can_rename, ConnectionProfileSnapshot,
+    ConnectionWorkspaceSnapshot, DatabaseObjectKind, DropObjectTarget, ObjectMutation, QueryTarget,
+};
 use crate::ui::engine_presentation::{engine_label, profile_color, profile_endpoint};
 use crate::ui::localization::text;
 
@@ -302,123 +304,152 @@ impl ConnectionProfilesPanel {
                     let selected = self.selected_query_target.as_ref() == Some(&target);
                     let target_for_click = target.clone();
                     let target_for_action = target.clone();
+                    let database_operation_target = databases
+                        .iter()
+                        .find(|candidate| *candidate != database)
+                        .map(|control_database| {
+                            let mut target = target.clone();
+                            target.database = control_database.clone();
+                            target
+                        });
+                    let rename_target = database_operation_target.clone();
+                    let rename_name = database.clone();
+                    let drop_target = database_operation_target;
+                    let drop_name = database.clone();
                     v_flex()
                         .min_w_0()
                         .child(
                             h_flex()
-                                .id(format!("query-target-{}-{database}", profile.id))
                                 .min_w_0()
-                                .gap_1p5()
-                                .px_1()
-                                .py_0p5()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .role(gpui::Role::Button)
-                                .tab_index(0)
-                                .key_context("QueryTargetRow")
-                                .aria_label(format!(
-                                    "{} {} · {database}",
-                                    text(language, "查询", "Query"),
-                                    profile.name
-                                ))
-                                .aria_toggled(if selected {
-                                    gpui::Toggled::True
-                                } else {
-                                    gpui::Toggled::False
-                                })
-                                .when(selected, |element| {
-                                    element.bg(cx.theme().colors().ghost_element_selected)
-                                })
-                                .hover(|element| {
-                                    element.bg(cx.theme().colors().ghost_element_hover)
-                                })
-                                .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
-                                    panel.select_database(target_for_action.clone(), cx);
-                                }))
-                                .on_click(cx.listener(move |panel, _, _, cx| {
-                                    panel.select_database(target_for_click.clone(), cx);
-                                }))
-                                .child(div().size(px(4.0)).rounded_full().bg(rgb(0xa1a1aa)))
+                                .gap_0p5()
                                 .child(
-                                    Label::new(database.clone())
-                                        .size(LabelSize::XSmall)
-                                        .truncate(),
-                                ),
+                                    h_flex()
+                                        .id(format!("query-target-{}-{database}", profile.id))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .gap_1p5()
+                                        .px_1()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border.opacity(0.0))
+                                        .cursor_pointer()
+                                        .role(gpui::Role::Button)
+                                        .tab_index(0)
+                                        .key_context("QueryTargetRow")
+                                        .aria_label(format!(
+                                            "{} {} · {database}",
+                                            text(language, "查询", "Query"),
+                                            profile.name
+                                        ))
+                                        .aria_toggled(if selected {
+                                            gpui::Toggled::True
+                                        } else {
+                                            gpui::Toggled::False
+                                        })
+                                        .when(selected, |element| {
+                                            element.bg(cx.theme().colors().ghost_element_selected)
+                                        })
+                                        .hover(|element| {
+                                            element.bg(cx.theme().colors().ghost_element_hover)
+                                        })
+                                        .focus_visible(|element| {
+                                            element.border_color(cx.theme().colors().border_focused)
+                                        })
+                                        .on_action(cx.listener(
+                                            move |panel, _: &menu::Confirm, _, cx| {
+                                                panel
+                                                    .select_database(target_for_action.clone(), cx);
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |panel, _, _, cx| {
+                                            panel.select_database(target_for_click.clone(), cx);
+                                        }))
+                                        .child(div().size(px(4.0)).rounded_full().bg(rgb(0xa1a1aa)))
+                                        .child(
+                                            Label::new(database.clone())
+                                                .size(LabelSize::XSmall)
+                                                .truncate()
+                                                .flex_1(),
+                                        ),
+                                )
+                                .when_some(rename_target, |element, rename_target| {
+                                    element.when(
+                                        object_kind_can_rename(
+                                            profile.db_type,
+                                            DatabaseObjectKind::Database,
+                                        ),
+                                        |element| {
+                                            element.child(
+                                                IconButton::new(
+                                                    format!(
+                                                        "rename-database-{}-{database}",
+                                                        profile.id
+                                                    ),
+                                                    IconName::Pencil,
+                                                )
+                                                .icon_size(IconSize::XSmall)
+                                                .disabled(self.object_operation_in_progress)
+                                                .tooltip(Tooltip::text(text(
+                                                    language,
+                                                    "重命名数据库",
+                                                    "Rename database",
+                                                )))
+                                                .on_click(cx.listener(move |panel, _, _, cx| {
+                                                    panel.request_rename_object(
+                                                        rename_target.clone(),
+                                                        DatabaseObjectKind::Database,
+                                                        rename_name.clone(),
+                                                        cx,
+                                                    );
+                                                })),
+                                            )
+                                        },
+                                    )
+                                })
+                                .when_some(drop_target, |element, drop_target| {
+                                    element.when(
+                                        object_kind_can_drop(
+                                            profile.db_type,
+                                            DatabaseObjectKind::Database,
+                                        ),
+                                        |element| {
+                                            element.child(
+                                                IconButton::new(
+                                                    format!(
+                                                        "drop-database-{}-{database}",
+                                                        profile.id
+                                                    ),
+                                                    IconName::Trash,
+                                                )
+                                                .icon_size(IconSize::XSmall)
+                                                .disabled(self.object_operation_in_progress)
+                                                .tooltip(Tooltip::text(text(
+                                                    language,
+                                                    "删除数据库",
+                                                    "Drop database",
+                                                )))
+                                                .on_click(cx.listener(
+                                                    move |panel, _, window, cx| {
+                                                        panel.confirm_drop_object(
+                                                            drop_target.clone(),
+                                                            ObjectMutation::Drop(
+                                                                DropObjectTarget::Database(
+                                                                    drop_name.clone(),
+                                                                ),
+                                                            ),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            )
+                                        },
+                                    )
+                                }),
                         )
                         .when(selected, |element| {
                             element.child(self.render_object_list(&target, cx))
-                        })
-                }))
-                .into_any_element(),
-        }
-    }
-
-    fn render_object_list(&self, target: &QueryTarget, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.read(cx).language();
-        match self.state.objects(target) {
-            None | Some(ObjectListState::Loading { .. }) => h_flex()
-                .pl_4()
-                .py_1()
-                .child(
-                    Label::new(text(language, "正在加载对象…", "Loading objects…"))
-                        .size(LabelSize::XSmall),
-                )
-                .into_any_element(),
-            Some(ObjectListState::Failed { error, .. }) => {
-                let target = target.clone();
-                v_flex()
-                    .pl_4()
-                    .py_1()
-                    .gap_1()
-                    .child(
-                        Label::new(error.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Error)
-                            .line_clamp(2),
-                    )
-                    .child(
-                        Button::new(
-                            format!("retry-objects-{}-{}", target.connection_id, target.database),
-                            text(language, "重试", "Retry"),
-                        )
-                        .size(ButtonSize::Compact)
-                        .on_click(cx.listener(
-                            move |panel, event, window, cx| {
-                                panel.retry_objects(target.clone(), event, window, cx);
-                            },
-                        )),
-                    )
-                    .into_any_element()
-            }
-            Some(ObjectListState::Ready { objects, .. }) if objects.is_empty() => h_flex()
-                .pl_4()
-                .py_1()
-                .child(
-                    Label::new(text(language, "未发现对象", "No objects found"))
-                        .size(LabelSize::XSmall),
-                )
-                .into_any_element(),
-            Some(ObjectListState::Ready { objects, .. }) => v_flex()
-                .pl_4()
-                .py_1()
-                .gap_0p5()
-                .children(objects.iter().map(|object| {
-                    let name = object
-                        .reference
-                        .schema()
-                        .map(|schema| format!("{schema}.{}", object.reference.name()))
-                        .unwrap_or_else(|| object.reference.name().to_string());
-                    h_flex()
-                        .min_w_0()
-                        .gap_1p5()
-                        .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
-                        .child(Label::new(name).size(LabelSize::XSmall).truncate())
-                        .when_some(object.row_count, |element, count| {
-                            element.child(
-                                Label::new(count.to_string())
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
                         })
                 }))
                 .into_any_element(),

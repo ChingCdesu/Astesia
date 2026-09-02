@@ -6,9 +6,9 @@ use sqlx::{Column, Executor, MySqlConnection, Row, TypeInfo};
 use std::time::Instant;
 
 use super::{
-    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, SqlDialect,
-    StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo,
+    ConstraintKind, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo,
+    QueryResult, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
 };
 
 /// Decode the `i`-th column of a MySQL row into a JSON value, dispatching on the
@@ -56,6 +56,24 @@ fn mysql_value_to_json(row: &MySqlRow, i: usize, type_name: &str) -> serde_json:
             })
             .unwrap_or(J::Null),
     }
+}
+
+fn mysql_catalog_text(row: &MySqlRow, column: &str) -> anyhow::Result<String> {
+    row.try_get::<String, _>(column)
+        .or_else(|_| {
+            row.try_get::<Vec<u8>, _>(column)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .map_err(Into::into)
+}
+
+fn mysql_optional_catalog_text(row: &MySqlRow, column: &str) -> anyhow::Result<Option<String>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(column) {
+        return Ok(value);
+    }
+    row.try_get::<Option<Vec<u8>>, _>(column)
+        .map(|value| value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        .map_err(Into::into)
 }
 
 async fn run_mysql_query(conn: &mut MySqlConnection, sql: &str) -> anyhow::Result<QueryResult> {
@@ -115,7 +133,7 @@ async fn run_mysql_query(conn: &mut MySqlConnection, sql: &str) -> anyhow::Resul
             execution_time_ms: elapsed,
         })
     } else {
-        let result = sqlx::query(sql).execute(&mut *conn).await?;
+        let result = conn.execute(sql).await?;
         let elapsed = start.elapsed().as_millis() as u64;
         Ok(QueryResult {
             affected_rows: result.rows_affected(),
@@ -243,9 +261,12 @@ impl DatabaseDriver for MySqlDriver {
             .iter()
             .map(|row| -> anyhow::Result<_> {
                 Ok(TableInfo {
-                    reference: TableRef::qualified(database, row.get::<String, _>("TABLE_NAME")),
+                    reference: TableRef::qualified(
+                        database,
+                        mysql_catalog_text(row, "TABLE_NAME")?,
+                    ),
                     row_count: row.try_get::<i64, _>("TABLE_ROWS").ok(),
-                    comment: row.try_get::<String, _>("TABLE_COMMENT").ok(),
+                    comment: mysql_optional_catalog_text(row, "TABLE_COMMENT")?,
                 })
             })
             .collect::<anyhow::Result<_>>()?;
@@ -259,7 +280,8 @@ impl DatabaseDriver for MySqlDriver {
     ) -> anyhow::Result<Vec<ColumnInfo>> {
         let pool = self.pool()?;
         let rows: Vec<MySqlRow> = sqlx::query(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT \
+            "SELECT COLUMN_NAME, CAST(COLUMN_TYPE AS CHAR) AS COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, \
+             CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT, CAST(COLUMN_COMMENT AS CHAR) AS COLUMN_COMMENT \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
         )
@@ -269,15 +291,17 @@ impl DatabaseDriver for MySqlDriver {
         .await?;
         let columns = rows
             .iter()
-            .map(|row| ColumnInfo {
-                name: row.get::<String, _>("COLUMN_NAME"),
-                data_type: row.get::<String, _>("DATA_TYPE"),
-                nullable: row.get::<String, _>("IS_NULLABLE") == "YES",
-                is_primary_key: row.get::<String, _>("COLUMN_KEY") == "PRI",
-                default_value: row.try_get::<String, _>("COLUMN_DEFAULT").ok(),
-                comment: row.try_get::<String, _>("COLUMN_COMMENT").ok(),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(ColumnInfo {
+                    name: mysql_catalog_text(row, "COLUMN_NAME")?,
+                    data_type: mysql_catalog_text(row, "COLUMN_TYPE")?,
+                    nullable: mysql_catalog_text(row, "IS_NULLABLE")? == "YES",
+                    is_primary_key: mysql_catalog_text(row, "COLUMN_KEY")? == "PRI",
+                    default_value: mysql_optional_catalog_text(row, "COLUMN_DEFAULT")?,
+                    comment: mysql_optional_catalog_text(row, "COLUMN_COMMENT")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(columns)
     }
 
@@ -300,8 +324,8 @@ impl DatabaseDriver for MySqlDriver {
         let mut indexes: std::collections::HashMap<String, IndexInfo> =
             std::collections::HashMap::new();
         for row in &rows {
-            let name: String = row.get("INDEX_NAME");
-            let column: String = row.get("COLUMN_NAME");
+            let name = mysql_catalog_text(row, "INDEX_NAME")?;
+            let column = mysql_catalog_text(row, "COLUMN_NAME")?;
             let non_unique: i32 = row.get("NON_UNIQUE");
             let entry = indexes.entry(name.clone()).or_insert_with(|| IndexInfo {
                 name: name.clone(),
@@ -312,6 +336,59 @@ impl DatabaseDriver for MySqlDriver {
             entry.columns.push(column);
         }
         Ok(indexes.into_values().collect())
+    }
+
+    async fn get_constraints(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ConstraintInfo>> {
+        let pool = self.pool()?;
+        let schema = table.schema().unwrap_or(database);
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, \
+             GROUP_CONCAT(kcu.COLUMN_NAME ORDER BY kcu.ORDINAL_POSITION SEPARATOR ', ') AS COLUMN_NAMES, \
+             cc.CHECK_CLAUSE \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu \
+               ON kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND kcu.TABLE_NAME = tc.TABLE_NAME \
+              AND kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+             LEFT JOIN information_schema.CHECK_CONSTRAINTS cc \
+               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA \
+              AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+             WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? \
+               AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE', 'CHECK') \
+             GROUP BY tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, cc.CHECK_CLAUSE \
+             ORDER BY tc.CONSTRAINT_NAME",
+        )
+        .bind(schema)
+        .bind(table.name())
+        .fetch_all(pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let constraint_type = mysql_catalog_text(row, "CONSTRAINT_TYPE")?;
+                let kind = match constraint_type.as_str() {
+                    "PRIMARY KEY" => ConstraintKind::PrimaryKey,
+                    "UNIQUE" => ConstraintKind::Unique,
+                    "CHECK" => ConstraintKind::Check,
+                    value => anyhow::bail!("Unknown MySQL constraint type {value}"),
+                };
+                let columns = mysql_optional_catalog_text(row, "COLUMN_NAMES")?
+                    .unwrap_or_default()
+                    .split(", ")
+                    .filter(|column| !column.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                Ok(ConstraintInfo {
+                    name: mysql_catalog_text(row, "CONSTRAINT_NAME")?,
+                    kind,
+                    columns,
+                    definition: mysql_optional_catalog_text(row, "CHECK_CLAUSE")?,
+                })
+            })
+            .collect()
     }
 
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
@@ -344,6 +421,37 @@ impl DatabaseDriver for MySqlDriver {
         Ok(results)
     }
 
+    async fn execute_mutation_batch(
+        &self,
+        database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let pool = self.pool()?;
+        let mut conn = pool.acquire().await?;
+        select_database(&mut conn, database).await?;
+        run_mysql_query(&mut conn, "START TRANSACTION").await?;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_mysql_query(&mut conn, &sql).await {
+                Ok(result) => results.push(StatementResult::from_query_result(sql, result)),
+                Err(error) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let message = error.to_string();
+                    if let Err(rollback_error) = run_mysql_query(&mut conn, "ROLLBACK").await {
+                        return Err(anyhow::anyhow!(
+                            "Mutation failed: {message}; rollback also failed: {rollback_error}"
+                        ));
+                    }
+                    results.push(StatementResult::from_error(sql, message, elapsed));
+                    return Ok(results);
+                }
+            }
+        }
+        run_mysql_query(&mut conn, "COMMIT").await?;
+        Ok(results)
+    }
+
     async fn get_table_data(
         &self,
         database: &str,
@@ -365,11 +473,13 @@ impl DatabaseDriver for MySqlDriver {
         .await?;
         let views = rows
             .iter()
-            .map(|row| ViewInfo {
-                name: row.get::<String, _>("TABLE_NAME"),
-                definition: row.try_get::<String, _>("VIEW_DEFINITION").ok(),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(ViewInfo {
+                    name: mysql_catalog_text(row, "TABLE_NAME")?,
+                    definition: mysql_optional_catalog_text(row, "VIEW_DEFINITION")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(views)
     }
 
@@ -383,13 +493,15 @@ impl DatabaseDriver for MySqlDriver {
         .await?;
         let functions = rows
             .iter()
-            .map(|row| FunctionInfo {
-                name: row.get::<String, _>("ROUTINE_NAME"),
-                language: Some("SQL".to_string()),
-                return_type: row.try_get::<String, _>("DTD_IDENTIFIER").ok(),
-                definition: row.try_get::<String, _>("ROUTINE_DEFINITION").ok(),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(FunctionInfo {
+                    name: mysql_catalog_text(row, "ROUTINE_NAME")?,
+                    language: Some("SQL".to_string()),
+                    return_type: mysql_optional_catalog_text(row, "DTD_IDENTIFIER")?,
+                    definition: mysql_optional_catalog_text(row, "ROUTINE_DEFINITION")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(functions)
     }
 
@@ -403,12 +515,14 @@ impl DatabaseDriver for MySqlDriver {
         .await?;
         let procedures = rows
             .iter()
-            .map(|row| ProcedureInfo {
-                name: row.get::<String, _>("ROUTINE_NAME"),
-                language: Some("SQL".to_string()),
-                definition: row.try_get::<String, _>("ROUTINE_DEFINITION").ok(),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(ProcedureInfo {
+                    name: mysql_catalog_text(row, "ROUTINE_NAME")?,
+                    language: Some("SQL".to_string()),
+                    definition: mysql_optional_catalog_text(row, "ROUTINE_DEFINITION")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(procedures)
     }
 
@@ -422,13 +536,15 @@ impl DatabaseDriver for MySqlDriver {
         .await?;
         let triggers = rows
             .iter()
-            .map(|row| TriggerInfo {
-                name: row.get::<String, _>("TRIGGER_NAME"),
-                event: row.get::<String, _>("EVENT_MANIPULATION"),
-                table: row.get::<String, _>("EVENT_OBJECT_TABLE"),
-                timing: row.get::<String, _>("ACTION_TIMING"),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(TriggerInfo {
+                    name: mysql_catalog_text(row, "TRIGGER_NAME")?,
+                    event: mysql_catalog_text(row, "EVENT_MANIPULATION")?,
+                    table: mysql_catalog_text(row, "EVENT_OBJECT_TABLE")?,
+                    timing: mysql_catalog_text(row, "ACTION_TIMING")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(triggers)
     }
 
@@ -451,10 +567,10 @@ impl DatabaseDriver for MySqlDriver {
         let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
             std::collections::HashMap::new();
         for row in &rows {
-            let name: String = row.get("CONSTRAINT_NAME");
-            let from_col: String = row.get("COLUMN_NAME");
-            let to_table: String = row.get("REFERENCED_TABLE_NAME");
-            let to_col: String = row.get("REFERENCED_COLUMN_NAME");
+            let name = mysql_catalog_text(row, "CONSTRAINT_NAME")?;
+            let from_col = mysql_catalog_text(row, "COLUMN_NAME")?;
+            let to_table = mysql_catalog_text(row, "REFERENCED_TABLE_NAME")?;
+            let to_col = mysql_catalog_text(row, "REFERENCED_COLUMN_NAME")?;
             let to_table =
                 TableRef::qualified(table.schema().unwrap_or(database), to_table.clone());
             let entry = fk_map
@@ -474,16 +590,20 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn get_users(&self) -> anyhow::Result<Vec<UserInfo>> {
         let pool = self.pool()?;
-        let rows: Vec<MySqlRow> = sqlx::query("SELECT User, Host FROM mysql.user")
-            .fetch_all(pool)
-            .await?;
+        let rows: Vec<MySqlRow> = sqlx::query(
+            "SELECT CAST(User AS CHAR) AS User, CAST(Host AS CHAR) AS Host FROM mysql.user",
+        )
+        .fetch_all(pool)
+        .await?;
         let users = rows
             .iter()
-            .map(|row| UserInfo {
-                name: row.get::<String, _>("User"),
-                host: row.try_get::<String, _>("Host").ok(),
+            .map(|row| -> anyhow::Result<_> {
+                Ok(UserInfo {
+                    name: mysql_catalog_text(row, "User")?,
+                    host: mysql_optional_catalog_text(row, "Host")?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()?;
         Ok(users)
     }
 

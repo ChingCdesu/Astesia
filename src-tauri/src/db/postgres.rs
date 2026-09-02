@@ -12,9 +12,9 @@ use sqlx::{Column, PgConnection, Row, TypeInfo, ValueRef};
 use std::time::Instant;
 
 use super::{
-    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, SqlDialect,
-    StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo,
+    ConstraintKind, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo,
+    QueryResult, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
 };
 
 /// Render a `BitVec` (BIT / VARBIT) as a string of '0'/'1' characters.
@@ -516,6 +516,54 @@ impl DatabaseDriver for PostgresDriver {
         Ok(indexes.into_values().collect())
     }
 
+    async fn get_constraints(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ConstraintInfo>> {
+        let pool = self.pool_for_db(database).await?;
+        let (schema, table_name) = table.schema_and_table("public");
+        let rows: Vec<PgRow> = sqlx::query(
+            "SELECT c.conname, c.contype::text AS constraint_type, \
+             COALESCE(string_agg(a.attname, ', ' ORDER BY keys.ordinality), '') AS column_names, \
+             pg_get_constraintdef(c.oid) AS definition \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             LEFT JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS keys(attnum, ordinality) ON true \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = keys.attnum \
+             WHERE n.nspname = $1 AND t.relname = $2 AND c.contype IN ('p', 'u', 'c') \
+             GROUP BY c.oid, c.conname, c.contype \
+             ORDER BY c.conname",
+        )
+        .bind(schema)
+        .bind(table_name)
+        .fetch_all(&pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let kind = match row.get::<String, _>("constraint_type").as_str() {
+                    "p" => ConstraintKind::PrimaryKey,
+                    "u" => ConstraintKind::Unique,
+                    "c" => ConstraintKind::Check,
+                    value => anyhow::bail!("Unknown PostgreSQL constraint type {value}"),
+                };
+                let columns = row
+                    .get::<String, _>("column_names")
+                    .split(", ")
+                    .filter(|column| !column.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                Ok(ConstraintInfo {
+                    name: row.get("conname"),
+                    kind,
+                    columns,
+                    definition: row.try_get("definition").ok(),
+                })
+            })
+            .collect()
+    }
+
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool_for_db(database).await?;
         let mut conn = pool.acquire().await?;
@@ -541,6 +589,36 @@ impl DatabaseDriver for PostgresDriver {
                 }
             }
         }
+        Ok(results)
+    }
+
+    async fn execute_mutation_batch(
+        &self,
+        database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let pool = self.pool_for_db(database).await?;
+        let mut conn = pool.acquire().await?;
+        run_pg_query(&mut conn, "BEGIN").await?;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_pg_query(&mut conn, &sql).await {
+                Ok(result) => results.push(StatementResult::from_query_result(sql, result)),
+                Err(error) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let message = error.to_string();
+                    if let Err(rollback_error) = run_pg_query(&mut conn, "ROLLBACK").await {
+                        return Err(anyhow::anyhow!(
+                            "Mutation failed: {message}; rollback also failed: {rollback_error}"
+                        ));
+                    }
+                    results.push(StatementResult::from_error(sql, message, elapsed));
+                    return Ok(results);
+                }
+            }
+        }
+        run_pg_query(&mut conn, "COMMIT").await?;
         Ok(results)
     }
 
@@ -580,7 +658,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_functions(&self, database: &str) -> anyhow::Result<Vec<FunctionInfo>> {
         let pool = self.pool_for_db(database).await?;
         let rows: Vec<PgRow> = sqlx::query(
-            "SELECT n.nspname, p.proname, l.lanname, pg_get_function_result(p.oid) as return_type, pg_get_functiondef(p.oid) as definition \
+            "SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as identity_args, l.lanname, pg_get_function_result(p.oid) as return_type, pg_get_functiondef(p.oid) as definition \
              FROM pg_proc p \
              JOIN pg_namespace n ON p.pronamespace = n.oid \
              JOIN pg_language l ON p.prolang = l.oid \
@@ -593,8 +671,9 @@ impl DatabaseDriver for PostgresDriver {
             .map(|row| {
                 let schema: String = row.get("nspname");
                 let name: String = row.get("proname");
+                let identity_args: String = row.get("identity_args");
                 FunctionInfo {
-                    name: format!("{}.{}", schema, name),
+                    name: format!("{schema}.{name}({identity_args})"),
                     language: row.try_get::<String, _>("lanname").ok(),
                     return_type: row.try_get::<String, _>("return_type").ok(),
                     definition: row.try_get::<String, _>("definition").ok(),
@@ -607,7 +686,7 @@ impl DatabaseDriver for PostgresDriver {
     async fn get_procedures(&self, database: &str) -> anyhow::Result<Vec<ProcedureInfo>> {
         let pool = self.pool_for_db(database).await?;
         let rows: Vec<PgRow> = sqlx::query(
-            "SELECT n.nspname, p.proname, l.lanname, pg_get_functiondef(p.oid) as definition \
+            "SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as identity_args, l.lanname, pg_get_functiondef(p.oid) as definition \
              FROM pg_proc p \
              JOIN pg_namespace n ON p.pronamespace = n.oid \
              JOIN pg_language l ON p.prolang = l.oid \
@@ -620,8 +699,9 @@ impl DatabaseDriver for PostgresDriver {
             .map(|row| {
                 let schema: String = row.get("nspname");
                 let name: String = row.get("proname");
+                let identity_args: String = row.get("identity_args");
                 ProcedureInfo {
-                    name: format!("{}.{}", schema, name),
+                    name: format!("{schema}.{name}({identity_args})"),
                     language: row.try_get::<String, _>("lanname").ok(),
                     definition: row.try_get::<String, _>("definition").ok(),
                 }
@@ -647,7 +727,7 @@ impl DatabaseDriver for PostgresDriver {
                 TriggerInfo {
                     name: format!("{}.{}", schema, name),
                     event: row.get::<String, _>("event_manipulation"),
-                    table: row.get::<String, _>("event_object_table"),
+                    table: format!("{}.{}", schema, row.get::<String, _>("event_object_table")),
                     timing: row.get::<String, _>("action_timing"),
                 }
             })

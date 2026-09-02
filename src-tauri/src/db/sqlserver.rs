@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use super::{
-    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo, QueryResult, SqlDialect,
-    StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+    bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo,
+    ConstraintKind, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo,
+    QueryResult, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
 };
 
 /// Decode a SQL Server cell into a JSON value by matching on the tiberius
@@ -61,13 +61,25 @@ async fn run_mssql_query(
     let start = Instant::now();
     let stream = client.query(sql, &[]).await?;
     let rows = stream.into_first_result().await?;
-    let elapsed = start.elapsed().as_millis() as u64;
+    Ok(mssql_result(rows, start.elapsed().as_millis() as u64))
+}
 
+async fn run_mssql_batch(
+    client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
+    sql: &str,
+) -> anyhow::Result<QueryResult> {
+    let start = Instant::now();
+    let stream = client.simple_query(sql).await?;
+    let rows = stream.into_first_result().await?;
+    Ok(mssql_result(rows, start.elapsed().as_millis() as u64))
+}
+
+fn mssql_result(rows: Vec<tiberius::Row>, elapsed: u64) -> QueryResult {
     if rows.is_empty() {
-        return Ok(QueryResult {
+        return QueryResult {
             execution_time_ms: elapsed,
             ..Default::default()
-        });
+        };
     }
 
     let columns: Vec<ColumnInfo> = rows[0]
@@ -93,12 +105,12 @@ async fn run_mssql_query(
         })
         .collect();
 
-    Ok(QueryResult {
+    QueryResult {
         columns,
         rows: data_rows,
         affected_rows: 0,
         execution_time_ms: elapsed,
-    })
+    }
 }
 
 fn use_database_sql(database: &str) -> anyhow::Result<String> {
@@ -326,14 +338,71 @@ impl DatabaseDriver for SqlServerDriver {
         Ok(indexes.into_values().collect())
     }
 
+    async fn get_constraints(
+        &self,
+        database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ConstraintInfo>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        let (schema, table_name) = table.schema_and_table("dbo");
+        let sql = in_database_sql(
+            database,
+            "SELECT kc.name, kc.type_desc, COL_NAME(ic.object_id, ic.column_id) AS column_name, \
+             CAST(NULL AS nvarchar(max)) AS definition, ic.key_ordinal \
+             FROM sys.key_constraints kc \
+             JOIN sys.index_columns ic \
+               ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id \
+             WHERE kc.parent_object_id = OBJECT_ID(QUOTENAME(@P1) + '.' + QUOTENAME(@P2)) \
+             UNION ALL \
+             SELECT cc.name, 'CHECK_CONSTRAINT', CAST(NULL AS nvarchar(128)), cc.definition, 0 \
+             FROM sys.check_constraints cc \
+             WHERE cc.parent_object_id = OBJECT_ID(QUOTENAME(@P1) + '.' + QUOTENAME(@P2)) \
+             ORDER BY 1, 5",
+        )?;
+        let stream = client.query(sql.as_str(), &[&schema, &table_name]).await?;
+        let rows = stream.into_first_result().await?;
+        let mut constraints = std::collections::BTreeMap::<String, ConstraintInfo>::new();
+        for row in &rows {
+            let name = row
+                .try_get::<&str, _>(0)
+                .ok()
+                .flatten()
+                .unwrap_or("")
+                .to_string();
+            let kind = match row.try_get::<&str, _>(1).ok().flatten().unwrap_or("") {
+                "PRIMARY_KEY_CONSTRAINT" => ConstraintKind::PrimaryKey,
+                "UNIQUE_CONSTRAINT" => ConstraintKind::Unique,
+                "CHECK_CONSTRAINT" => ConstraintKind::Check,
+                value => anyhow::bail!("Unknown SQL Server constraint type {value}"),
+            };
+            let entry = constraints
+                .entry(name.clone())
+                .or_insert_with(|| ConstraintInfo {
+                    name,
+                    kind,
+                    columns: Vec::new(),
+                    definition: row.try_get::<&str, _>(3).ok().flatten().map(str::to_string),
+                });
+            if let Some(column) = row.try_get::<&str, _>(2).ok().flatten() {
+                entry.columns.push(column.to_string());
+            }
+        }
+        Ok(constraints.into_values().collect())
+    }
+
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let mutex = self
             .client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let mut client = mutex.lock().await;
-        let full_sql = in_database_sql(database, sql)?;
-        run_mssql_query(&mut client, &full_sql).await
+        let use_database = use_database_sql(database)?;
+        run_mssql_query(&mut client, &use_database).await?;
+        run_mssql_batch(&mut client, sql).await
     }
 
     async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
@@ -376,7 +445,7 @@ impl DatabaseDriver for SqlServerDriver {
         let mut results = Vec::with_capacity(statements.len());
         for sql in statements {
             let start = Instant::now();
-            match run_mssql_query(&mut client, &sql).await {
+            match run_mssql_batch(&mut client, &sql).await {
                 Ok(qr) => results.push(StatementResult::from_query_result(sql, qr)),
                 Err(e) => {
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -385,6 +454,44 @@ impl DatabaseDriver for SqlServerDriver {
                 }
             }
         }
+        Ok(results)
+    }
+
+    async fn execute_mutation_batch(
+        &self,
+        database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        let use_database = use_database_sql(database)?;
+        client.query(use_database.as_str(), &[]).await?;
+        run_mssql_batch(&mut client, "BEGIN TRANSACTION").await?;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_mssql_batch(&mut client, &sql).await {
+                Ok(result) => results.push(StatementResult::from_query_result(sql, result)),
+                Err(error) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let message = error.to_string();
+                    if let Err(rollback_error) =
+                        run_mssql_batch(&mut client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION")
+                            .await
+                    {
+                        return Err(anyhow::anyhow!(
+                            "Mutation failed: {message}; rollback also failed: {rollback_error}"
+                        ));
+                    }
+                    results.push(StatementResult::from_error(sql, message, elapsed));
+                    return Ok(results);
+                }
+            }
+        }
+        run_mssql_batch(&mut client, "COMMIT TRANSACTION").await?;
         Ok(results)
     }
 
@@ -407,21 +514,20 @@ impl DatabaseDriver for SqlServerDriver {
         let mut client = mutex.lock().await;
         let sql = in_database_sql(
             database,
-            "SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.views",
+            "SELECT SCHEMA_NAME(schema_id) AS schema_name, name, OBJECT_DEFINITION(object_id) AS definition FROM sys.views",
         )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let views: Vec<ViewInfo> = rows
             .iter()
             .map(|row| ViewInfo {
-                name: row
-                    .try_get::<&str, _>(0)
-                    .ok()
-                    .flatten()
-                    .unwrap_or("")
-                    .to_string(),
+                name: format!(
+                    "{}.{}",
+                    row.try_get::<&str, _>(0).ok().flatten().unwrap_or("dbo"),
+                    row.try_get::<&str, _>(1).ok().flatten().unwrap_or("")
+                ),
                 definition: row
-                    .try_get::<&str, _>(1)
+                    .try_get::<&str, _>(2)
                     .ok()
                     .flatten()
                     .map(|s| s.to_string()),
@@ -438,27 +544,26 @@ impl DatabaseDriver for SqlServerDriver {
         let mut client = mutex.lock().await;
         let sql = in_database_sql(
             database,
-            "SELECT name, OBJECT_DEFINITION(object_id) AS definition, type_desc FROM sys.objects WHERE type IN ('FN', 'IF', 'TF')",
+            "SELECT SCHEMA_NAME(schema_id) AS schema_name, name, OBJECT_DEFINITION(object_id) AS definition, type_desc FROM sys.objects WHERE type IN ('FN', 'IF', 'TF')",
         )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let functions: Vec<FunctionInfo> = rows
             .iter()
             .map(|row| FunctionInfo {
-                name: row
-                    .try_get::<&str, _>(0)
-                    .ok()
-                    .flatten()
-                    .unwrap_or("")
-                    .to_string(),
+                name: format!(
+                    "{}.{}",
+                    row.try_get::<&str, _>(0).ok().flatten().unwrap_or("dbo"),
+                    row.try_get::<&str, _>(1).ok().flatten().unwrap_or("")
+                ),
                 language: Some("T-SQL".to_string()),
                 return_type: row
-                    .try_get::<&str, _>(2)
+                    .try_get::<&str, _>(3)
                     .ok()
                     .flatten()
                     .map(|s| s.to_string()),
                 definition: row
-                    .try_get::<&str, _>(1)
+                    .try_get::<&str, _>(2)
                     .ok()
                     .flatten()
                     .map(|s| s.to_string()),
@@ -475,22 +580,21 @@ impl DatabaseDriver for SqlServerDriver {
         let mut client = mutex.lock().await;
         let sql = in_database_sql(
             database,
-            "SELECT name, OBJECT_DEFINITION(object_id) AS definition FROM sys.procedures",
+            "SELECT SCHEMA_NAME(schema_id) AS schema_name, name, OBJECT_DEFINITION(object_id) AS definition FROM sys.procedures",
         )?;
         let stream = client.query(sql.as_str(), &[]).await?;
         let rows = stream.into_first_result().await?;
         let procedures: Vec<ProcedureInfo> = rows
             .iter()
             .map(|row| ProcedureInfo {
-                name: row
-                    .try_get::<&str, _>(0)
-                    .ok()
-                    .flatten()
-                    .unwrap_or("")
-                    .to_string(),
+                name: format!(
+                    "{}.{}",
+                    row.try_get::<&str, _>(0).ok().flatten().unwrap_or("dbo"),
+                    row.try_get::<&str, _>(1).ok().flatten().unwrap_or("")
+                ),
                 language: Some("T-SQL".to_string()),
                 definition: row
-                    .try_get::<&str, _>(1)
+                    .try_get::<&str, _>(2)
                     .ok()
                     .flatten()
                     .map(|s| s.to_string()),
@@ -507,7 +611,9 @@ impl DatabaseDriver for SqlServerDriver {
         let mut client = mutex.lock().await;
         let sql = in_database_sql(
             database,
-            "SELECT t.name, te.type_desc, OBJECT_NAME(t.parent_id) AS table_name \
+            "SELECT OBJECT_SCHEMA_NAME(t.object_id) AS trigger_schema, t.name, \
+             t.is_instead_of_trigger, te.type_desc, \
+             OBJECT_SCHEMA_NAME(t.parent_id) AS table_schema, OBJECT_NAME(t.parent_id) AS table_name \
              FROM sys.triggers t \
              JOIN sys.trigger_events te ON t.object_id = te.object_id",
         )?;
@@ -516,32 +622,31 @@ impl DatabaseDriver for SqlServerDriver {
         let triggers: Vec<TriggerInfo> = rows
             .iter()
             .map(|row| {
-                let name = row
-                    .try_get::<&str, _>(0)
-                    .ok()
-                    .flatten()
-                    .unwrap_or("")
-                    .to_string();
+                let name = format!(
+                    "{}.{}",
+                    row.try_get::<&str, _>(0).ok().flatten().unwrap_or("dbo"),
+                    row.try_get::<&str, _>(1).ok().flatten().unwrap_or("")
+                );
+                let instead_of = row.try_get::<bool, _>(2).ok().flatten().unwrap_or(false);
                 let event = row
-                    .try_get::<&str, _>(1)
+                    .try_get::<&str, _>(3)
                     .ok()
                     .flatten()
                     .unwrap_or("")
                     .to_string();
-                let table = row
-                    .try_get::<&str, _>(2)
-                    .ok()
-                    .flatten()
-                    .unwrap_or("")
-                    .to_string();
+                let table = format!(
+                    "{}.{}",
+                    row.try_get::<&str, _>(4).ok().flatten().unwrap_or("dbo"),
+                    row.try_get::<&str, _>(5).ok().flatten().unwrap_or("")
+                );
                 TriggerInfo {
                     name,
                     event: event.clone(),
                     table,
-                    timing: if event.contains("AFTER") {
-                        "AFTER".to_string()
-                    } else {
+                    timing: if instead_of {
                         "INSTEAD OF".to_string()
+                    } else {
+                        "AFTER".to_string()
                     },
                 }
             })
@@ -623,6 +728,24 @@ impl DatabaseDriver for SqlServerDriver {
         Ok(fk_map.into_values().collect())
     }
 
+    async fn get_schemas(&self, database: &str) -> anyhow::Result<Vec<String>> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        let sql = in_database_sql(
+            database,
+            "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME",
+        )?;
+        let stream = client.query(sql.as_str(), &[]).await?;
+        let rows = stream.into_first_result().await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.try_get::<&str, _>(0).ok().flatten().map(str::to_string))
+            .collect())
+    }
+
     async fn get_users(&self) -> anyhow::Result<Vec<UserInfo>> {
         let mutex = self
             .client
@@ -631,7 +754,8 @@ impl DatabaseDriver for SqlServerDriver {
         let mut client = mutex.lock().await;
         let stream = client
             .query(
-                "SELECT name FROM sys.database_principals WHERE type IN ('S','U')",
+                "SELECT name FROM sys.server_principals \
+                 WHERE type = 'S' AND name <> 'sa' AND name NOT LIKE '##%' ORDER BY name",
                 &[],
             )
             .await?;

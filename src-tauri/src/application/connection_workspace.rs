@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{ConnectionWorkspaceSnapshot, LoadedDatabases, QueryTarget};
 use crate::connection_repository::ConnectionRepositoryError;
-use crate::db::TableInfo;
+use crate::db::{DbType, FunctionInfo, ProcedureInfo, TableInfo, TriggerInfo, UserInfo, ViewInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConnectionWorkspaceError {
@@ -85,6 +85,21 @@ pub(crate) struct ObjectLoadRequest {
     database: String,
     session_generation: u64,
     request_generation: u64,
+    kind: CatalogKind,
+}
+
+impl ObjectLoadRequest {
+    pub(crate) const fn kind(&self) -> CatalogKind {
+        self.kind
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    pub(crate) fn database(&self) -> &str {
+        &self.database
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,32 +149,186 @@ impl DatabaseListState {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ObjectListState {
-    Loading {
-        session_generation: u64,
-        request_generation: u64,
-    },
     Ready {
         session_generation: u64,
-        objects: Vec<TableInfo>,
+        request_generation: u64,
+        catalog: DatabaseCatalogSnapshot,
     },
-    Failed {
-        session_generation: u64,
-        error: String,
-    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CatalogSection<T> {
+    Unsupported,
+    Loading,
+    Ready(Vec<T>),
+    Failed(String),
+}
+
+impl<T> CatalogSection<T> {
+    pub(crate) fn from_result(result: Result<Vec<T>, String>) -> Self {
+        match result {
+            Ok(items) => Self::Ready(items),
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogKind {
+    Schemas,
+    Tables,
+    Views,
+    Functions,
+    Procedures,
+    Triggers,
+    Users,
+}
+
+impl CatalogKind {
+    pub(crate) fn supported(self, db_type: DbType) -> bool {
+        let capabilities = db_type.capabilities();
+        match self {
+            Self::Tables => true,
+            Self::Schemas => capabilities.schemas,
+            Self::Views => capabilities.views,
+            Self::Functions => capabilities.functions,
+            Self::Procedures => capabilities.procedures,
+            Self::Triggers => capabilities.triggers,
+            Self::Users => capabilities.users,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CatalogLoadResult {
+    Schemas(Result<Vec<String>, String>),
+    Tables(Result<Vec<TableInfo>, String>),
+    Views(Result<Vec<ViewInfo>, String>),
+    Functions(Result<Vec<FunctionInfo>, String>),
+    Procedures(Result<Vec<ProcedureInfo>, String>),
+    Triggers(Result<Vec<TriggerInfo>, String>),
+    Users(Result<Vec<UserInfo>, String>),
+}
+
+impl CatalogLoadResult {
+    pub(crate) const fn kind(&self) -> CatalogKind {
+        match self {
+            Self::Schemas(_) => CatalogKind::Schemas,
+            Self::Tables(_) => CatalogKind::Tables,
+            Self::Views(_) => CatalogKind::Views,
+            Self::Functions(_) => CatalogKind::Functions,
+            Self::Procedures(_) => CatalogKind::Procedures,
+            Self::Triggers(_) => CatalogKind::Triggers,
+            Self::Users(_) => CatalogKind::Users,
+        }
+    }
+
+    pub(crate) fn failed(kind: CatalogKind, error: impl Into<String>) -> Self {
+        let error = error.into();
+        match kind {
+            CatalogKind::Schemas => Self::Schemas(Err(error)),
+            CatalogKind::Tables => Self::Tables(Err(error)),
+            CatalogKind::Views => Self::Views(Err(error)),
+            CatalogKind::Functions => Self::Functions(Err(error)),
+            CatalogKind::Procedures => Self::Procedures(Err(error)),
+            CatalogKind::Triggers => Self::Triggers(Err(error)),
+            CatalogKind::Users => Self::Users(Err(error)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DatabaseCatalogSnapshot {
+    pub(crate) schemas: CatalogSection<String>,
+    pub(crate) tables: CatalogSection<TableInfo>,
+    pub(crate) views: CatalogSection<ViewInfo>,
+    pub(crate) functions: CatalogSection<FunctionInfo>,
+    pub(crate) procedures: CatalogSection<ProcedureInfo>,
+    pub(crate) triggers: CatalogSection<TriggerInfo>,
+    pub(crate) users: CatalogSection<UserInfo>,
+}
+
+impl DatabaseCatalogSnapshot {
+    pub(crate) fn loading(db_type: DbType) -> Self {
+        let capabilities = db_type.capabilities();
+        Self {
+            schemas: loading_if(capabilities.schemas),
+            tables: CatalogSection::Loading,
+            views: loading_if(capabilities.views),
+            functions: loading_if(capabilities.functions),
+            procedures: loading_if(capabilities.procedures),
+            triggers: loading_if(capabilities.triggers),
+            users: loading_if(capabilities.users),
+        }
+    }
+
+    pub(crate) fn pending_kinds(&self) -> Vec<CatalogKind> {
+        let mut kinds = Vec::new();
+        if matches!(self.schemas, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Schemas);
+        }
+        if matches!(self.tables, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Tables);
+        }
+        if matches!(self.views, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Views);
+        }
+        if matches!(self.functions, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Functions);
+        }
+        if matches!(self.procedures, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Procedures);
+        }
+        if matches!(self.triggers, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Triggers);
+        }
+        if matches!(self.users, CatalogSection::Loading) {
+            kinds.push(CatalogKind::Users);
+        }
+        kinds
+    }
+
+    pub(crate) fn apply(&mut self, result: CatalogLoadResult) {
+        match result {
+            CatalogLoadResult::Schemas(result) => {
+                self.schemas = CatalogSection::from_result(result)
+            }
+            CatalogLoadResult::Tables(result) => self.tables = CatalogSection::from_result(result),
+            CatalogLoadResult::Views(result) => self.views = CatalogSection::from_result(result),
+            CatalogLoadResult::Functions(result) => {
+                self.functions = CatalogSection::from_result(result)
+            }
+            CatalogLoadResult::Procedures(result) => {
+                self.procedures = CatalogSection::from_result(result)
+            }
+            CatalogLoadResult::Triggers(result) => {
+                self.triggers = CatalogSection::from_result(result)
+            }
+            CatalogLoadResult::Users(result) => self.users = CatalogSection::from_result(result),
+        }
+    }
+}
+
+fn loading_if<T>(supported: bool) -> CatalogSection<T> {
+    if supported {
+        CatalogSection::Loading
+    } else {
+        CatalogSection::Unsupported
+    }
 }
 
 impl ObjectListState {
     fn session_generation(&self) -> u64 {
         match self {
-            Self::Loading {
-                session_generation, ..
-            }
-            | Self::Ready {
-                session_generation, ..
-            }
-            | Self::Failed {
+            Self::Ready {
                 session_generation, ..
             } => *session_generation,
+        }
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        match self {
+            Self::Ready { catalog, .. } => !catalog.pending_kinds().is_empty(),
         }
     }
 }
@@ -406,7 +575,10 @@ impl ConnectionWorkspaceState {
             .retain(|(candidate, _), _| candidate != connection_id);
     }
 
-    pub(crate) fn begin_object_load(&mut self, target: &QueryTarget) -> Option<ObjectLoadRequest> {
+    pub(crate) fn begin_object_load(
+        &mut self,
+        target: &QueryTarget,
+    ) -> Option<Vec<ObjectLoadRequest>> {
         if !self.query_target_is_live(target) {
             return None;
         }
@@ -421,25 +593,33 @@ impl ConnectionWorkspaceState {
 
         self.object_request_generation = self.object_request_generation.wrapping_add(1);
         let request_generation = self.object_request_generation;
-        self.objects.insert(
-            key,
-            ObjectListState::Loading {
+        let catalog = DatabaseCatalogSnapshot::loading(target.db_type);
+        let requests = catalog
+            .pending_kinds()
+            .into_iter()
+            .map(|kind| ObjectLoadRequest {
+                connection_id: target.connection_id.clone(),
+                database: target.database.clone(),
                 session_generation: target.session_generation,
                 request_generation,
+                kind,
+            })
+            .collect();
+        self.objects.insert(
+            key,
+            ObjectListState::Ready {
+                session_generation: target.session_generation,
+                request_generation,
+                catalog,
             },
         );
-        Some(ObjectLoadRequest {
-            connection_id: target.connection_id.clone(),
-            database: target.database.clone(),
-            session_generation: target.session_generation,
-            request_generation,
-        })
+        Some(requests)
     }
 
     pub(crate) fn finish_object_load(
         &mut self,
         request: &ObjectLoadRequest,
-        result: Result<Vec<TableInfo>, String>,
+        result: CatalogLoadResult,
     ) -> bool {
         let key = (request.connection_id.clone(), request.database.clone());
         let target_is_live = self.session_generation(&request.connection_id)
@@ -452,30 +632,23 @@ impl ConnectionWorkspaceState {
                 }) if *session_generation == request.session_generation
                     && databases.contains(&request.database)
             );
-        if !target_is_live
-            || !matches!(
-                self.objects.get(&key),
-                Some(ObjectListState::Loading {
-                    session_generation,
-                    request_generation,
-                }) if *session_generation == request.session_generation
-                    && *request_generation == request.request_generation
-            )
+        if !target_is_live || result.kind() != request.kind {
+            return false;
+        }
+        let Some(ObjectListState::Ready {
+            session_generation,
+            request_generation,
+            catalog,
+        }) = self.objects.get_mut(&key)
+        else {
+            return false;
+        };
+        if *session_generation != request.session_generation
+            || *request_generation != request.request_generation
         {
             return false;
         }
-
-        let state = match result {
-            Ok(objects) => ObjectListState::Ready {
-                session_generation: request.session_generation,
-                objects,
-            },
-            Err(error) => ObjectListState::Failed {
-                session_generation: request.session_generation,
-                error,
-            },
-        };
-        self.objects.insert(key, state);
+        catalog.apply(result);
         true
     }
 
@@ -569,368 +742,4 @@ impl ConnectionWorkspaceState {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::application::{ConnectionProfileSnapshot, DatabaseSessionSnapshot};
-    use crate::connection_repository::{ConnectionRepositoryErrorCode, SharedConnectionProfile};
-    use crate::db::DbType;
-
-    fn profile(id: &str, db_type: DbType) -> SharedConnectionProfile {
-        SharedConnectionProfile {
-            id: id.to_string(),
-            name: id.to_string(),
-            db_type,
-            host: if id == "sqlite" {
-                "/tmp/astesia.sqlite3".to_string()
-            } else {
-                "127.0.0.1".to_string()
-            },
-            port: 5432,
-            username: "tester".to_string(),
-            database: None,
-            color: None,
-            group_name: None,
-            tags: Vec::new(),
-            has_credential: false,
-            revision: 1,
-            mcp_enabled: false,
-        }
-    }
-
-    fn snapshot(
-        revision: i64,
-        profiles: Vec<SharedConnectionProfile>,
-    ) -> ConnectionWorkspaceSnapshot {
-        ConnectionWorkspaceSnapshot {
-            repository_revision: revision,
-            mcp_revision: 0,
-            profiles: profiles
-                .into_iter()
-                .map(|profile| ConnectionProfileSnapshot {
-                    profile,
-                    session: DatabaseSessionSnapshot { generation: None },
-                    mcp_usage: None,
-                })
-                .collect(),
-        }
-    }
-
-    fn connected_snapshot(
-        revision: i64,
-        profile: SharedConnectionProfile,
-        session_generation: u64,
-    ) -> ConnectionWorkspaceSnapshot {
-        ConnectionWorkspaceSnapshot {
-            repository_revision: revision,
-            mcp_revision: 0,
-            profiles: vec![ConnectionProfileSnapshot {
-                profile,
-                session: DatabaseSessionSnapshot {
-                    generation: Some(session_generation),
-                },
-                mcp_usage: None,
-            }],
-        }
-    }
-
-    fn error(message: &str) -> ConnectionWorkspaceError {
-        ConnectionWorkspaceError::from(ConnectionRepositoryError {
-            code: ConnectionRepositoryErrorCode::StorageUnavailable,
-            message: message.to_string(),
-            remediation: "Retry".to_string(),
-            retryable: true,
-            details: Box::new(json!({})),
-        })
-    }
-
-    #[test]
-    fn initial_refresh_transitions_to_loaded_or_error() {
-        let mut state = ConnectionWorkspaceState::default();
-        let request = state.begin_refresh();
-        assert!(state.is_refreshing());
-        assert_eq!(
-            state.finish_refresh(request, Ok(snapshot(4, Vec::new()))),
-            SnapshotApply::Applied
-        );
-        assert!(!state.is_refreshing());
-        assert_eq!(
-            state
-                .snapshot()
-                .map(|snapshot| snapshot.repository_revision),
-            Some(4)
-        );
-
-        let request = state.begin_refresh();
-        assert_eq!(
-            state.finish_refresh(request, Err(error("unavailable"))),
-            SnapshotApply::Failed
-        );
-        assert_eq!(
-            state
-                .snapshot()
-                .map(|snapshot| snapshot.repository_revision),
-            Some(4)
-        );
-        assert_eq!(
-            state.error().map(|error| error.message.as_str()),
-            Some("unavailable")
-        );
-    }
-
-    #[test]
-    fn stale_refresh_cannot_replace_a_newer_snapshot() {
-        let mut state = ConnectionWorkspaceState::default();
-        let stale = state.begin_refresh();
-        let current = state.begin_refresh();
-
-        assert_eq!(
-            state.finish_refresh(current, Ok(snapshot(2, Vec::new()))),
-            SnapshotApply::Applied
-        );
-        assert_eq!(
-            state.finish_refresh(stale, Ok(snapshot(1, Vec::new()))),
-            SnapshotApply::Superseded
-        );
-        assert_eq!(
-            state
-                .snapshot()
-                .map(|snapshot| snapshot.repository_revision),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn operation_snapshot_supersedes_an_older_refresh() {
-        let mut state = ConnectionWorkspaceState::default();
-        let refresh = state.begin_refresh();
-        let operation = state
-            .begin_operation("primary", ProfileOperationKind::Connecting)
-            .expect("operation starts");
-
-        assert_eq!(
-            state.finish_refresh(refresh, Ok(snapshot(1, Vec::new()))),
-            SnapshotApply::Superseded
-        );
-        assert_eq!(
-            state.finish_operation(&operation, Ok(snapshot(2, Vec::new()))),
-            OperationApply::Snapshot(SnapshotApply::Applied)
-        );
-        assert_eq!(
-            state
-                .snapshot()
-                .map(|snapshot| snapshot.repository_revision),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn operations_finishing_out_of_order_keep_the_latest_snapshot() {
-        let mut state = ConnectionWorkspaceState::default();
-        let first = state
-            .begin_operation("first", ProfileOperationKind::Connecting)
-            .expect("first operation starts");
-        let second = state
-            .begin_operation("second", ProfileOperationKind::Disconnecting)
-            .expect("second operation starts");
-
-        assert_eq!(
-            state.finish_operation(
-                &second,
-                Ok(snapshot(
-                    8,
-                    vec![
-                        profile("first", DbType::PostgreSQL),
-                        profile("second", DbType::SQLite),
-                    ],
-                )),
-            ),
-            OperationApply::Snapshot(SnapshotApply::Applied)
-        );
-        assert_eq!(
-            state.finish_operation(&first, Ok(snapshot(7, Vec::new()))),
-            OperationApply::Snapshot(SnapshotApply::Superseded)
-        );
-        assert_eq!(
-            state
-                .snapshot()
-                .map(|snapshot| snapshot.repository_revision),
-            Some(8)
-        );
-    }
-
-    #[test]
-    fn snapshot_failure_preserves_rows_and_marks_them_stale() {
-        let mut state = ConnectionWorkspaceState::default();
-        let refresh = state.begin_refresh();
-        state.finish_refresh(
-            refresh,
-            Ok(snapshot(3, vec![profile("primary", DbType::PostgreSQL)])),
-        );
-        let operation = state
-            .begin_operation("primary", ProfileOperationKind::Connecting)
-            .expect("operation starts");
-
-        assert_eq!(
-            state.finish_operation(&operation, Err(error("refresh failed"))),
-            OperationApply::Snapshot(SnapshotApply::Failed)
-        );
-        assert_eq!(state.snapshot().unwrap().repository_revision, 3);
-        assert_eq!(
-            state.error().map(|error| error.message.as_str()),
-            Some("refresh failed")
-        );
-    }
-
-    #[test]
-    fn stale_database_result_cannot_cross_a_reconnected_session() {
-        let mut state = ConnectionWorkspaceState::default();
-        let profile = profile("primary", DbType::PostgreSQL);
-        let refresh = state.begin_refresh();
-        state.finish_refresh(refresh, Ok(connected_snapshot(1, profile.clone(), 4)));
-        let request = state
-            .begin_database_load("primary")
-            .expect("database load starts");
-
-        let reconnect = state
-            .begin_operation("primary", ProfileOperationKind::Connecting)
-            .expect("reconnect starts");
-        state.finish_operation(&reconnect, Ok(connected_snapshot(1, profile, 5)));
-
-        assert!(!state.finish_database_load(
-            &request,
-            Ok(LoadedDatabases {
-                session_generation: 4,
-                databases: vec!["stale".to_string()],
-            }),
-        ));
-        assert!(state.databases("primary").is_none());
-    }
-
-    #[test]
-    fn connected_profile_loads_databases_once_per_session_generation() {
-        let mut state = ConnectionWorkspaceState::default();
-        let profile = profile("primary", DbType::PostgreSQL);
-        let refresh = state.begin_refresh();
-        state.finish_refresh(refresh, Ok(connected_snapshot(1, profile.clone(), 4)));
-
-        assert!(state.begin_database_load("primary").is_some());
-        assert!(state.begin_database_load("primary").is_none());
-
-        let reconnect = state
-            .begin_operation("primary", ProfileOperationKind::Connecting)
-            .expect("reconnect starts");
-        state.finish_operation(&reconnect, Ok(connected_snapshot(2, profile, 5)));
-        assert!(state.begin_database_load("primary").is_some());
-    }
-
-    #[test]
-    fn query_targets_require_the_same_live_session_and_loaded_database() {
-        let mut state = ConnectionWorkspaceState::default();
-        let refresh = state.begin_refresh();
-        state.finish_refresh(
-            refresh,
-            Ok(connected_snapshot(
-                1,
-                profile("primary", DbType::PostgreSQL),
-                7,
-            )),
-        );
-        let request = state.begin_database_load("primary").unwrap();
-        state.finish_database_load(
-            &request,
-            Ok(LoadedDatabases {
-                session_generation: 7,
-                databases: vec!["app".to_string()],
-            }),
-        );
-
-        let mut target = QueryTarget {
-            connection_id: "primary".to_string(),
-            connection_name: "Primary".to_string(),
-            database: "app".to_string(),
-            db_type: DbType::PostgreSQL,
-            session_generation: 7,
-        };
-        assert!(state.query_target_is_live(&target));
-
-        target.session_generation = 8;
-        assert!(!state.query_target_is_live(&target));
-        target.session_generation = 7;
-        target.database = "missing".to_string();
-        assert!(!state.query_target_is_live(&target));
-    }
-
-    #[test]
-    fn object_loading_is_lazy_and_rejects_stale_session_results() {
-        let mut state = ConnectionWorkspaceState::default();
-        let profile = profile("primary", DbType::PostgreSQL);
-        let refresh = state.begin_refresh();
-        state.finish_refresh(refresh, Ok(connected_snapshot(1, profile.clone(), 7)));
-        let database_request = state.begin_database_load("primary").unwrap();
-        state.finish_database_load(
-            &database_request,
-            Ok(LoadedDatabases {
-                session_generation: 7,
-                databases: vec!["app".to_string()],
-            }),
-        );
-        let target = QueryTarget {
-            connection_id: "primary".to_string(),
-            connection_name: "Primary".to_string(),
-            database: "app".to_string(),
-            db_type: DbType::PostgreSQL,
-            session_generation: 7,
-        };
-        let request = state
-            .begin_object_load(&target)
-            .expect("object load starts");
-        assert!(state.begin_object_load(&target).is_none());
-
-        let reconnect = state
-            .begin_operation("primary", ProfileOperationKind::Connecting)
-            .expect("reconnect starts");
-        state.finish_operation(&reconnect, Ok(connected_snapshot(2, profile, 8)));
-
-        assert!(!state.finish_object_load(&request, Ok(Vec::new())));
-        assert!(state.objects(&target).is_none());
-    }
-
-    #[test]
-    fn loaded_objects_are_scoped_to_database_and_session() {
-        let mut state = ConnectionWorkspaceState::default();
-        let refresh = state.begin_refresh();
-        state.finish_refresh(
-            refresh,
-            Ok(connected_snapshot(1, profile("primary", DbType::SQLite), 3)),
-        );
-        let database_request = state.begin_database_load("primary").unwrap();
-        state.finish_database_load(
-            &database_request,
-            Ok(LoadedDatabases {
-                session_generation: 3,
-                databases: vec!["main".to_string()],
-            }),
-        );
-        let target = QueryTarget {
-            connection_id: "primary".to_string(),
-            connection_name: "Primary".to_string(),
-            database: "main".to_string(),
-            db_type: DbType::SQLite,
-            session_generation: 3,
-        };
-        let request = state.begin_object_load(&target).unwrap();
-        let table = TableInfo {
-            reference: crate::db::TableRef::unqualified("users"),
-            row_count: Some(4),
-            comment: None,
-        };
-
-        assert!(state.finish_object_load(&request, Ok(vec![table])));
-        assert!(matches!(
-            state.objects(&target),
-            Some(ObjectListState::Ready { objects, .. }) if objects.len() == 1
-        ));
-    }
-}
+mod tests;
