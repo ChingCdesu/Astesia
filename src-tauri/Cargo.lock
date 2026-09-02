@@ -465,6 +465,7 @@ dependencies = [
  "multi_buffer",
  "objc",
  "paths",
+ "project",
  "redis",
  "release_channel",
  "reqwest",

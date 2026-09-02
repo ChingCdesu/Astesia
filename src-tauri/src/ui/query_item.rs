@@ -18,6 +18,7 @@ use crate::db::{ExplainMode, StatementResult};
 
 use super::localization::text;
 use super::shell::ShellSettings;
+use super::sql_completion::{self, SqlCompletionHandle};
 
 actions!(
     astesia_query,
@@ -65,6 +66,7 @@ pub(super) struct QueryItem {
     application: Arc<Application>,
     editor: Entity<Editor>,
     result_focus: FocusHandle,
+    completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
     file_prompt_active: bool,
     settings: Entity<ShellSettings>,
@@ -80,6 +82,8 @@ impl QueryItem {
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_text = editor.read(cx).text(cx);
+        let completion =
+            sql_completion::install(application.query_completions().clone(), &editor, cx);
         let editor_subscription = cx.subscribe(&editor, |item, editor, event: &EditorEvent, cx| {
             if matches!(event, EditorEvent::Edited { .. }) {
                 let was_dirty = item.state.is_file_dirty();
@@ -97,6 +101,7 @@ impl QueryItem {
             application,
             editor,
             result_focus: cx.focus_handle(),
+            completion,
             state: QueryWorkspaceState::new(initial_text),
             file_prompt_active: false,
             settings,
@@ -112,6 +117,7 @@ impl QueryItem {
         cx: &mut Context<Self>,
     ) {
         let should_focus = target.is_some();
+        self.completion.set_target(target.clone());
         if self.state.set_target(target) {
             cx.notify();
         }
@@ -181,6 +187,7 @@ impl QueryItem {
     }
 
     fn clear_target(&mut self, cx: &mut Context<Self>) {
+        self.completion.set_target(None);
         if self.state.set_target(None) {
             cx.notify();
         }

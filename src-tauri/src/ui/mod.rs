@@ -5,6 +5,7 @@ mod engine_presentation;
 mod localization;
 mod query_item;
 mod shell;
+mod sql_completion;
 mod sql_language;
 mod tabs;
 mod workspace;
@@ -13,8 +14,10 @@ use std::sync::Arc;
 
 use assets::Assets;
 use editor::actions::{
-    Backspace, Backtab, Copy, Cut, Delete, LineDown, LineUp, MoveLeft, MoveRight, Newline, Paste,
-    Redo, SelectAll, SelectDown, SelectLeft, SelectRight, SelectUp, Tab, Undo,
+    Backspace, Backtab, Cancel, ComposeCompletion, ConfirmCompletion, ContextMenuFirst,
+    ContextMenuLast, ContextMenuNext, ContextMenuPrevious, Copy, Cut, Delete, LineDown, LineUp,
+    MoveLeft, MoveRight, Newline, Paste, Redo, SelectAll, SelectDown, SelectLeft, SelectRight,
+    SelectUp, ShowCompletions, Tab, Undo,
 };
 use gpui::{
     px, size, App, AppContext as _, Bounds, KeyBinding, QuitMode, TitlebarOptions, WindowBounds,
@@ -132,6 +135,7 @@ fn configure_zed_data_dir() {
 
 fn bind_editor_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("ctrl-space", ShowCompletions, Some("Editor")),
         KeyBinding::new("backspace", Backspace, Some("Editor")),
         KeyBinding::new("delete", Delete, Some("Editor")),
         KeyBinding::new("enter", Newline, Some("Editor")),
@@ -157,6 +161,37 @@ fn bind_editor_keys(cx: &mut App) {
         KeyBinding::new("ctrl-v", Paste, Some("Editor")),
         KeyBinding::new("ctrl-z", Undo, Some("Editor")),
         KeyBinding::new("ctrl-shift-z", Redo, Some("Editor")),
+        KeyBinding::new(
+            "enter",
+            ConfirmCompletion::default(),
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "tab",
+            ComposeCompletion::default(),
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new("escape", Cancel, Some("Editor && showing_completions")),
+        KeyBinding::new(
+            "up",
+            ContextMenuPrevious,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "down",
+            ContextMenuNext,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "pageup",
+            ContextMenuFirst,
+            Some("Editor && showing_completions"),
+        ),
+        KeyBinding::new(
+            "pagedown",
+            ContextMenuLast,
+            Some("Editor && showing_completions"),
+        ),
     ]);
 }
 
