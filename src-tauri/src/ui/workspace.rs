@@ -270,7 +270,7 @@ impl AstesiaWorkspace {
         let modal_layer = cx.new(|_| ModalLayer::new());
         let tabs = QueryTabsModel::new();
         let query_item =
-            cx.new(|cx| QueryItem::new(application.clone(), editor, settings.clone(), cx));
+            cx.new(|cx| QueryItem::new(application.clone(), editor, settings.clone(), window, cx));
         let query_item_subscription = cx
             .subscribe(&query_item, |_, _, _: &QueryDocumentStateChanged, cx| {
                 cx.notify()
@@ -419,8 +419,15 @@ impl AstesiaWorkspace {
     fn new_query_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editor = cx.new(|cx| sql_language::editor(super::INITIAL_QUERY, window, cx));
         let target = self.connection_profiles.read(cx).query_target().cloned();
-        let item = cx
-            .new(|cx| QueryItem::new(self.application.clone(), editor, self.settings.clone(), cx));
+        let item = cx.new(|cx| {
+            QueryItem::new(
+                self.application.clone(),
+                editor,
+                self.settings.clone(),
+                window,
+                cx,
+            )
+        });
         let document_subscription =
             cx.subscribe(&item, |_, _, _: &QueryDocumentStateChanged, cx| cx.notify());
         if let Some(target) = target {

@@ -110,6 +110,8 @@ changes without loading the extension registry or using the network at runtime.
 The fifth slice ports the five SQL dialect keyword and function vocabularies, adds session-scoped
 table/schema completion with lazy column lookup and dialect-aware quoting, and wires the native Zed
 completion popup to automatic triggers, `Ctrl+Space`, navigation, acceptance, and dismissal keys.
+The sixth slice embeds Zed's native buffer search in each query item, preserving selection-seeded
+find, replace-next/all, match navigation, focus return, highlights, and editor undo grouping.
 
 - Wrap Zed `Editor` in an Astesia-owned `QueryItem` containing connection context, result state, execution state, and file state.
 - Bundle SQL grammar and highlighting locally; do not initialize the Zed extension marketplace.
