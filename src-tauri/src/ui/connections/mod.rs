@@ -1,3 +1,5 @@
+mod catalog_view;
+mod object_actions;
 mod presentation;
 mod view;
 
@@ -15,11 +17,14 @@ use crate::application::{
     ProfileOperationCommand, ProfileOperationCompletion, ProfileOperationOutcome, QueryTarget,
 };
 use crate::connection_repository::SharedConnectionProfile;
+use crate::db::TableRef;
 use crate::platform::UiEvent;
 
 use self::presentation::repository_error_message;
 use super::engine_presentation::engine_label;
 use super::localization::text;
+use super::object_definition_item::ObjectDefinition;
+use super::object_mutation_form::ObjectMutationFormMode;
 use super::shell::ShellSettings;
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(272.0);
@@ -30,6 +35,8 @@ pub(super) fn bind_connection_profiles_keys(cx: &mut App) {
         gpui::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileRow")),
         gpui::KeyBinding::new("enter", menu::Confirm, Some("QueryTargetRow")),
         gpui::KeyBinding::new("space", menu::Confirm, Some("QueryTargetRow")),
+        gpui::KeyBinding::new("enter", menu::Confirm, Some("SchemaObjectRow")),
+        gpui::KeyBinding::new("space", menu::Confirm, Some("SchemaObjectRow")),
     ]);
 }
 
@@ -39,6 +46,7 @@ pub(super) struct ConnectionProfilesPanel {
     selected_profile_id: Option<String>,
     selected_query_target: Option<QueryTarget>,
     notice: Option<PanelNotice>,
+    object_operation_in_progress: bool,
     settings: Entity<ShellSettings>,
     _settings_observation: Subscription,
     _application_events: Task<()>,
@@ -49,6 +57,16 @@ pub(super) enum ConnectionProfilesEvent {
     CreateRequested,
     EditRequested(Arc<SharedConnectionProfile>),
     QueryTargetSelected(QueryTarget),
+    TableStructureRequested {
+        target: QueryTarget,
+        table: TableRef,
+    },
+    TableDataRequested {
+        target: QueryTarget,
+        table: TableRef,
+    },
+    ObjectDefinitionRequested(ObjectDefinition),
+    ObjectMutationRequested(ObjectMutationFormMode),
     QueryTargetInvalidated(QueryTarget),
     QuerySessionInvalidated {
         connection_id: String,
@@ -128,6 +146,7 @@ impl ConnectionProfilesPanel {
             selected_profile_id: None,
             selected_query_target: None,
             notice: None,
+            object_operation_in_progress: false,
             settings,
             _settings_observation: settings_observation,
             _application_events: application_event_task,
@@ -146,6 +165,7 @@ impl ConnectionProfilesPanel {
             &self.state,
             self.selected_profile_id.as_deref(),
             self.selected_query_target.as_ref(),
+            self.object_operation_in_progress,
             self.settings.read(cx).language(),
         )
     }
@@ -164,7 +184,9 @@ impl ConnectionProfilesPanel {
     }
 
     fn actions_blocked(&self) -> bool {
-        self.state.is_refreshing() || self.state.error().is_some()
+        self.state.is_refreshing()
+            || self.state.error().is_some()
+            || self.object_operation_in_progress
     }
 
     fn reconcile_selection(&mut self) {
@@ -187,6 +209,31 @@ impl ConnectionProfilesPanel {
         }
         self.load_objects(target, cx);
         cx.notify();
+    }
+
+    fn request_table_structure(
+        &mut self,
+        target: QueryTarget,
+        table: TableRef,
+        cx: &mut Context<Self>,
+    ) {
+        if target.db_type.capabilities().sql && self.state.query_target_is_live(&target) {
+            cx.emit(ConnectionProfilesEvent::TableStructureRequested { target, table });
+        }
+    }
+
+    fn request_table_data(&mut self, target: QueryTarget, table: TableRef, cx: &mut Context<Self>) {
+        if target.db_type.capabilities().sql && self.state.query_target_is_live(&target) {
+            cx.emit(ConnectionProfilesEvent::TableDataRequested { target, table });
+        }
+    }
+
+    fn request_object_definition(&mut self, object: ObjectDefinition, cx: &mut Context<Self>) {
+        if object.target.db_type.capabilities().sql
+            && self.state.query_target_is_live(&object.target)
+        {
+            cx.emit(ConnectionProfilesEvent::ObjectDefinitionRequested(object));
+        }
     }
 
     fn invalidate_query_session(&mut self, connection_id: &str, cx: &mut Context<Self>) {
@@ -611,42 +658,48 @@ impl ConnectionProfilesPanel {
     }
 
     fn load_objects(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
-        let Some(request) = self.state.begin_object_load(&target) else {
+        let Some(requests) = self.state.begin_object_load(&target) else {
             return;
         };
         cx.notify();
 
-        let application = self.application.clone();
         let language = self.settings.read(cx).language();
-        let connection_id = target.connection_id.clone();
-        let database = target.database.clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move {
-            application
-                .catalog()
-                .tables(&connection_id, &database)
-                .await
-        });
-        cx.spawn(async move |panel, cx| {
-            let result = match load.await {
-                Ok(result) => result,
-                Err(error) => Err(format!(
-                    "{}: {error}",
-                    text(
-                        language,
-                        "数据库对象后台任务意外结束",
-                        "The database-object task ended unexpectedly",
-                    )
-                )),
-            };
-            panel
-                .update(cx, |panel, cx| {
-                    if panel.state.finish_object_load(&request, result) {
-                        cx.notify();
-                    }
-                })
-                .ok();
-        })
-        .detach();
+        for request in requests {
+            let application = self.application.clone();
+            let kind = request.kind();
+            let connection_id = request.connection_id().to_string();
+            let database = request.database().to_string();
+            let load = gpui_tokio::Tokio::spawn(cx, async move {
+                application
+                    .catalog()
+                    .catalog_section(&connection_id, &database, kind)
+                    .await
+            });
+            cx.spawn(async move |panel, cx| {
+                let result = match load.await {
+                    Ok(result) => result,
+                    Err(error) => crate::application::CatalogLoadResult::failed(
+                        kind,
+                        format!(
+                            "{}: {error}",
+                            text(
+                                language,
+                                "数据库对象后台任务意外结束",
+                                "The database-object task ended unexpectedly",
+                            )
+                        ),
+                    ),
+                };
+                panel
+                    .update(cx, |panel, cx| {
+                        if panel.state.finish_object_load(&request, result) {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            })
+            .detach();
+        }
     }
 
     fn retry_objects(
@@ -776,6 +829,7 @@ fn derive_status(
     state: &ConnectionWorkspaceState,
     selected_profile_id: Option<&str>,
     selected_target: Option<&QueryTarget>,
+    object_operation_in_progress: bool,
     language: crate::platform::UiLanguage,
 ) -> ConnectionProfilesStatus {
     let selected = selected_profile_id.and_then(|selected| {
@@ -822,7 +876,7 @@ fn derive_status(
         ConnectionActivityStatus::NeedsRefresh
     } else if state.is_refreshing() {
         ConnectionActivityStatus::Refreshing
-    } else if operation.is_some() {
+    } else if operation.is_some() || object_operation_in_progress {
         ConnectionActivityStatus::Working
     } else if selected.is_some_and(|profile| {
         matches!(
@@ -832,10 +886,9 @@ fn derive_status(
     }) {
         ConnectionActivityStatus::LoadingDatabases
     } else if selected_target.is_some_and(|target| {
-        matches!(
-            state.objects(target),
-            Some(crate::application::connection_workspace::ObjectListState::Loading { .. })
-        )
+        state
+            .objects(target)
+            .is_some_and(crate::application::connection_workspace::ObjectListState::is_loading)
     }) {
         ConnectionActivityStatus::LoadingObjects
     } else if state.snapshot().is_some() {
@@ -870,82 +923,4 @@ fn reconcile_selected_profile(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::application::{
-        ConnectionProfileSnapshot, ConnectionWorkspaceSnapshot, DatabaseSessionSnapshot,
-    };
-    use crate::db::DbType;
-
-    fn profile(id: &str) -> SharedConnectionProfile {
-        SharedConnectionProfile {
-            id: id.to_string(),
-            name: id.to_string(),
-            db_type: DbType::PostgreSQL,
-            host: "127.0.0.1".to_string(),
-            port: 5432,
-            username: "tester".to_string(),
-            database: None,
-            color: None,
-            group_name: None,
-            tags: Vec::new(),
-            has_credential: false,
-            revision: 1,
-            mcp_enabled: false,
-        }
-    }
-
-    fn snapshot(profile: SharedConnectionProfile) -> ConnectionWorkspaceSnapshot {
-        ConnectionWorkspaceSnapshot {
-            repository_revision: 1,
-            mcp_revision: 0,
-            profiles: vec![ConnectionProfileSnapshot {
-                profile,
-                session: DatabaseSessionSnapshot {
-                    generation: Some(7),
-                },
-                mcp_usage: None,
-            }],
-        }
-    }
-
-    #[test]
-    fn replacing_profiles_clears_a_missing_selection() {
-        let mut selected = Some("primary".to_string());
-        let empty = ConnectionWorkspaceSnapshot {
-            repository_revision: 2,
-            mcp_revision: 0,
-            profiles: Vec::new(),
-        };
-
-        reconcile_selected_profile(&mut selected, Some(&empty));
-
-        assert!(selected.is_none());
-    }
-
-    #[test]
-    fn structured_status_tracks_selected_session_and_operation() {
-        let mut state = ConnectionWorkspaceState::default();
-        let refresh = state.begin_refresh();
-        state.finish_refresh(refresh, Ok(snapshot(profile("primary"))));
-
-        let status = derive_status(
-            &state,
-            Some("primary"),
-            None,
-            crate::platform::UiLanguage::Chinese,
-        );
-        assert_eq!(status.session, ConnectionSessionStatus::Connected);
-        assert_eq!(status.activity, ConnectionActivityStatus::Ready);
-
-        state.begin_operation("primary", ProfileOperationKind::Disconnecting);
-        let status = derive_status(
-            &state,
-            Some("primary"),
-            None,
-            crate::platform::UiLanguage::Chinese,
-        );
-        assert_eq!(status.session, ConnectionSessionStatus::Disconnecting);
-        assert_eq!(status.activity, ConnectionActivityStatus::Working);
-    }
-}
+mod tests;

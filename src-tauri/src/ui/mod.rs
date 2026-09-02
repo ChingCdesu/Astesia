@@ -1,12 +1,16 @@
 mod command_palette;
 mod connection_profile_form;
 mod connections;
+mod data_grid_item;
 mod engine_presentation;
 mod localization;
+mod object_definition_item;
+mod object_mutation_form;
 mod query_item;
 mod shell;
 mod sql_completion;
 mod sql_language;
+mod table_structure_item;
 mod tabs;
 mod workspace;
 
@@ -27,6 +31,7 @@ use http_client::BlockedHttpClient;
 
 use self::connection_profile_form::bind_connection_profile_form_keys;
 use self::connections::bind_connection_profiles_keys;
+use self::data_grid_item::bind_data_grid_item_keys;
 use self::query_item::bind_query_item_keys;
 use self::shell::apply_theme;
 use self::workspace::{bind_workspace_keys, AstesiaRoot};
@@ -69,6 +74,7 @@ fn initialize_editor_runtime(theme: crate::platform::ThemePreference, cx: &mut A
     bind_editor_keys(cx);
     bind_connection_profile_form_keys(cx);
     bind_connection_profiles_keys(cx);
+    bind_data_grid_item_keys(cx);
     bind_query_item_keys(cx);
     bind_workspace_keys(cx);
 }

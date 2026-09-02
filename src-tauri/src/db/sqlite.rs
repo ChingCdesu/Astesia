@@ -4,9 +4,9 @@ use sqlx::{Column, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::time::Instant;
 
 use super::{
-    bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType,
-    ForeignKeyInfo, IndexInfo, QueryResult, SqlDialect, StatementResult, TableInfo, TableRef,
-    TriggerInfo, ViewInfo,
+    bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo, ConstraintKind,
+    DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, SqlDialect, StatementResult,
+    TableInfo, TableRef, TriggerInfo, ViewInfo,
 };
 
 /// Decode the `i`-th column of a SQLite row into a JSON value, dispatching on the
@@ -240,6 +240,84 @@ impl DatabaseDriver for SqliteDriver {
         Ok(indexes)
     }
 
+    async fn get_constraints(
+        &self,
+        _database: &str,
+        table: &TableRef,
+    ) -> anyhow::Result<Vec<ConstraintInfo>> {
+        let pool = self.pool()?;
+        let table_rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_table_info(?)")
+            .bind(table.name())
+            .fetch_all(pool)
+            .await?;
+        let mut primary_columns = table_rows
+            .iter()
+            .filter_map(|row| {
+                let position = row.get::<i32, _>("pk");
+                (position > 0).then(|| (position, row.get::<String, _>("name")))
+            })
+            .collect::<Vec<_>>();
+        primary_columns.sort_by_key(|(position, _)| *position);
+
+        let mut constraints = Vec::new();
+        if !primary_columns.is_empty() {
+            constraints.push(ConstraintInfo {
+                name: "PRIMARY KEY".to_string(),
+                kind: ConstraintKind::PrimaryKey,
+                columns: primary_columns
+                    .into_iter()
+                    .map(|(_, column)| column)
+                    .collect(),
+                definition: None,
+            });
+        }
+
+        let index_rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_index_list(?)")
+            .bind(table.name())
+            .fetch_all(pool)
+            .await?;
+        for row in index_rows
+            .iter()
+            .filter(|row| row.get::<String, _>("origin") == "u")
+        {
+            let name = row.get::<String, _>("name");
+            let info_rows: Vec<SqliteRow> = sqlx::query("SELECT * FROM pragma_index_info(?)")
+                .bind(&name)
+                .fetch_all(pool)
+                .await?;
+            constraints.push(ConstraintInfo {
+                name,
+                kind: ConstraintKind::Unique,
+                columns: info_rows
+                    .iter()
+                    .map(|row| row.get::<String, _>("name"))
+                    .collect(),
+                definition: None,
+            });
+        }
+
+        let create_sql =
+            sqlx::query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .bind(table.name())
+                .fetch_optional(pool)
+                .await?
+                .and_then(|row| row.try_get::<String, _>("sql").ok());
+        if let Some(create_sql) = create_sql {
+            constraints.extend(
+                sqlite_check_expressions(&create_sql)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, definition)| ConstraintInfo {
+                        name: format!("CHECK {}", index + 1),
+                        kind: ConstraintKind::Check,
+                        columns: Vec::new(),
+                        definition: Some(definition),
+                    }),
+            );
+        }
+        Ok(constraints)
+    }
+
     async fn execute_query(&self, _database: &str, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool()?;
         let mut conn = pool.acquire().await?;
@@ -265,6 +343,36 @@ impl DatabaseDriver for SqliteDriver {
                 }
             }
         }
+        Ok(results)
+    }
+
+    async fn execute_mutation_batch(
+        &self,
+        _database: &str,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let pool = self.pool()?;
+        let mut conn = pool.acquire().await?;
+        run_sqlite_query(&mut conn, "BEGIN IMMEDIATE").await?;
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_sqlite_query(&mut conn, &sql).await {
+                Ok(result) => results.push(StatementResult::from_query_result(sql, result)),
+                Err(error) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let message = error.to_string();
+                    if let Err(rollback_error) = run_sqlite_query(&mut conn, "ROLLBACK").await {
+                        return Err(anyhow::anyhow!(
+                            "Mutation failed: {message}; rollback also failed: {rollback_error}"
+                        ));
+                    }
+                    results.push(StatementResult::from_error(sql, message, elapsed));
+                    return Ok(results);
+                }
+            }
+        }
+        run_sqlite_query(&mut conn, "COMMIT").await?;
         Ok(results)
     }
 
@@ -389,6 +497,91 @@ impl DatabaseDriver for SqliteDriver {
     }
 }
 
+fn sqlite_check_expressions(create_sql: &str) -> Vec<String> {
+    let bytes = create_sql.as_bytes();
+    let mut expressions = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == delimiter {
+                if index + 1 < bytes.len() && bytes[index + 1] == delimiter {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let keyword_end = index.saturating_add(5);
+        let is_check = keyword_end <= bytes.len()
+            && bytes[index..keyword_end].eq_ignore_ascii_case(b"CHECK")
+            && (index == 0 || !is_identifier_byte(bytes[index - 1]))
+            && (keyword_end == bytes.len() || !is_identifier_byte(bytes[keyword_end]));
+        if !is_check {
+            index += 1;
+            continue;
+        }
+        let mut open = keyword_end;
+        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if open == bytes.len() || bytes[open] != b'(' {
+            index = keyword_end;
+            continue;
+        }
+        if let Some(close) = matching_sql_parenthesis(bytes, open) {
+            expressions.push(create_sql[open + 1..close].trim().to_string());
+            index = close + 1;
+        } else {
+            break;
+        }
+    }
+    expressions
+}
+
+fn matching_sql_parenthesis(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut index = open;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == delimiter {
+                if index + 1 < bytes.len() && bytes[index + 1] == delimiter {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => quote = Some(bytes[index]),
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_identifier_byte(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || value == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +651,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["id", "parent", "notused", "detail"]
         );
+    }
+
+    #[tokio::test]
+    async fn constraints_distinguish_keys_unique_constraints_and_checks() {
+        let mut driver = SqliteDriver::new(config());
+        driver.connect().await.unwrap();
+        let table = TableRef::unqualified("accounts");
+        driver
+            .execute_query(
+                "main",
+                "CREATE TABLE accounts (tenant_id INTEGER, id INTEGER, email TEXT UNIQUE, balance INTEGER CHECK (balance >= 0 AND length('CHECK (ignored)') > 0), PRIMARY KEY (tenant_id, id))",
+            )
+            .await
+            .unwrap();
+
+        let constraints = driver.get_constraints("main", &table).await.unwrap();
+
+        assert!(constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::PrimaryKey
+                && constraint.columns == ["tenant_id", "id"]
+        }));
+        assert!(constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::Unique && constraint.columns == ["email"]
+        }));
+        assert!(constraints.iter().any(|constraint| {
+            constraint.kind == ConstraintKind::Check
+                && constraint.definition.as_deref()
+                    == Some("balance >= 0 AND length('CHECK (ignored)') > 0")
+        }));
     }
 }

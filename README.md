@@ -1,114 +1,106 @@
 # Astesia
 
-A cross-platform desktop database management tool built with **Tauri 2 + React 19 + TypeScript**.
+Astesia is a native desktop database workspace built in Rust with GPUI and the embedded Zed
+Editor. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 
-## Features
+The native-runtime migration has completed Milestones 0-5 on macOS. See the
+[GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) and
+[Milestone 5 acceptance](docs/plans/gpui-milestone-5-acceptance.md) for the behavioral checklist
+and current evidence.
 
-- **Multi-database support** — MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, Redis
-- **SQL query editor** — Monaco Editor with syntax highlighting
-- **Data browsing & editing** — Virtual-scrolling data grid with inline CRUD
-- **Schema explorer** — Lazy-loading sidebar tree (databases → schemas → tables → columns)
-- **Table structure** — View columns, indexes, constraints, and foreign keys
-- **Database objects** — Browse views, functions, procedures, and triggers
-- **ER diagrams** — Auto-layout entity relationship visualization (React Flow + Dagre)
-- **Performance dashboards** — Database-specific metrics with Recharts
-- **Data charts** — Visualize query results as charts
-- **Backup & restore** — Background tasks with real-time progress tracking
-- **Cross-connection table copy** — Copy tables between different connections
-- **Redis key browser** — Dedicated key-value viewer
-- **MongoDB document viewer** — Collection-based document browsing
-- **MCP helper** — Run the bundled, authenticated local MCP server for AI tools
-- **i18n** — Simplified Chinese (default) and English
-- **Theming** — Light / Dark / System
+## Delivered native capabilities
 
-## Tech Stack
+- Native workspace, connection profiles, lazy connection lifecycle, notifications, command
+  palette, shortcuts, localization, and light/dark/system appearance
+- SQL query tabs for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse using the embedded Zed
+  Editor, local SQL highlighting and completion, multi-statement execution, Explain, result
+  selection, and TSV copy
+- Capability-gated catalog browsing for all seven engines
+- SQL table structure, indexes, constraints, foreign keys, and qualified object definitions
+- Supported database-object creation, rename, and destructive-confirmed deletion
+- Paged relational data grids with filtering, typed sorting, selection, copying, CSV/TSV paste,
+  typed and long-value editing, staged insert/update/delete, undo, discard, and deterministic saves
+- Read-only ClickHouse grids with filtering, sorting, paging, selection, copy, and CSV export
 
-| Layer | Technology |
-|---|---|
-| Desktop framework | [Tauri 2](https://v2.tauri.app/) (Rust backend) |
-| Frontend | React 19 + TypeScript, Vite |
-| Styling | Tailwind CSS v4 |
-| UI primitives | Radix UI (shadcn-ui style) |
-| State management | Zustand v5 |
-| Editor | Monaco Editor |
-| Charts | Recharts |
-| ER diagrams | React Flow + Dagre |
-| i18n | i18next + react-i18next |
-| Virtual scroll | @tanstack/react-virtual |
-| Package manager | pnpm |
+## Remaining parity work
 
-## Getting Started
+Milestones 6-8 cover MongoDB document and Redis key editing; long-running export, backup, restore,
+and table-copy tasks; native MCP Sidecar lifecycle; charts, ER diagrams, and performance dashboards;
+cross-platform validation; packaging; and final removal of the Legacy Shell. These capabilities may
+still exist in the retained React/Tauri source, but they are not yet accepted in the native runtime.
 
-### Prerequisites
+## Tech stack
 
-- [Node.js](https://nodejs.org/) (LTS)
-- [pnpm](https://pnpm.io/)
-- [Rust](https://www.rust-lang.org/tools/install) (for the Tauri backend)
-- Platform-specific Tauri prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
+| Layer | Current technology |
+| --- | --- |
+| Desktop UI | GPUI and Zed UI |
+| Editor | Embedded Zed Editor with bundled Tree-sitter SQL |
+| Application Core | Rust and Tokio |
+| Database drivers | SQLx, Tiberius, MongoDB, Redis, and ClickHouse HTTP |
+| Local state and credentials | SQLite repository and platform credential vault |
+| Legacy Shell, pending Milestone 8 removal | React 19, TypeScript, Tauri 2, Monaco, Vite, Tailwind, Radix UI, and Zustand |
 
-### Development
+## Native development
+
+The repository pins Rust 1.97.1 in `rust-toolchain.toml`.
 
 ```bash
-pnpm install          # Install frontend dependencies
-pnpm tauri:dev        # Start development (Vite HMR + Tauri window)
+cargo run --locked --manifest-path src-tauri/Cargo.toml --bin astesia
+cargo check --locked --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
 
-### Build
+Environment-dependent seven-engine tests are ignored by the normal suite. Their disposable-service
+configuration and latest results are recorded in the milestone acceptance documents.
+
+## Legacy Shell migration commands
+
+Node.js and pnpm are needed for the retained frontend, Tauri packaging paths, and MCP sidecar
+staging helpers while the migration is in progress.
 
 ```bash
-pnpm tauri:build      # Production build (creates platform installer)
+pnpm install
+pnpm dev              # Legacy frontend only
+pnpm tauri:dev        # Legacy Tauri CLI wrapper
+pnpm build            # Legacy TypeScript and Vite build gate
+pnpm lint             # Legacy frontend lint baseline
+pnpm tauri:build      # Legacy packaging path
 ```
 
-### MCP Server
+## MCP server
 
-Astesia includes an MCP server for database access from compatible AI tools. In
-the desktop app, open **MCP** from the status bar to start or stop the bundled
-loopback-only Streamable HTTP service and copy its client configuration.
-
-To build and stage the standalone sidecar for the current platform:
+The standalone authenticated MCP server remains in `src-tauri/src/bin/astesia-mcp.rs`. The native
+desktop lifecycle and status-bar integration are Milestone 6 work. Existing build helpers remain
+available during migration:
 
 ```bash
+pnpm mcp:prepare:debug
 pnpm mcp:build
 ```
 
-`pnpm tauri:dev` prepares a debug sidecar automatically, while
-`pnpm tauri:build` builds and packages the release sidecar with the app. See the
-[MCP server guide](docs/mcp.md) for stdio configuration, credential handling,
-available tools, and destructive-operation safeguards.
+See the [MCP server guide](docs/mcp.md) for stdio configuration, credential handling, available
+tools, and destructive-operation safeguards.
 
-### Other Commands
+## Project structure
 
-```bash
-pnpm dev              # Frontend only (no Tauri window)
-pnpm build            # TypeScript check + Vite build (frontend only)
-pnpm lint             # ESLint
-pnpm mcp:prepare:debug # Build and stage the debug MCP sidecar
-cd src-tauri && cargo build   # Rust backend only
-```
-
-## Project Structure
-
-```
-src/                        # React frontend
-  components/               # Feature components (one folder per feature)
-    ui/                     # Reusable Radix-based UI primitives
-    Sidebar/                # Database explorer tree
-    QueryEditor/            # Monaco SQL editor
-    DataViewers/            # DataGrid, RedisViewer, MongoViewer
-    ERDiagram/              # Entity relationship diagrams
-    PerformanceDashboard/   # DB-specific performance metrics
-    ...
-  stores/                   # Zustand stores (one file per domain)
-  types/                    # TypeScript type definitions
-  hooks/                    # Custom React hooks
-  i18n/                     # Translation files (zh-CN, en-US)
-  lib/                      # Utilities (cn(), Monaco setup)
-
-src-tauri/                  # Rust backend
+```text
+src-tauri/                  # Native Rust application; directory name is retained until cutover
   src/
-    commands/               # Tauri IPC command handlers
-    db/                     # Database driver implementations
-    tasks/                  # Background task system
-    state.rs                # AppState (connections, task manager)
-    lib.rs                  # Plugin & command registration
+    application/            # UI-independent services and workflow state
+    connection_runtime/     # Live connection and session ownership
+    connection_repository/  # Durable profiles, revisions, and migration
+    credential_vault/       # Platform-backed credential storage
+    db/                     # Seven database-driver implementations
+    platform/               # Native lifecycle, preferences, events, and sidecars
+    ui/                     # GPUI shell, workspace, tabs, forms, catalogs, and grids
+    mcp/                    # Standalone MCP tools and policy
+    mcp_runtime/            # Native MCP lifecycle under migration
+    tasks/                  # Background task model
+    bin/astesia-mcp.rs      # Standalone MCP entry point
+    main.rs                 # Native desktop entry point
+
+src/                        # Temporary React/Tauri Legacy Shell; removed in Milestone 8
+public/                     # Legacy frontend assets
 ```

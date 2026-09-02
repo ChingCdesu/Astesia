@@ -5,10 +5,11 @@ use gpui::{
     actions, rgb, App, ClickEvent, Entity, Focusable as _, PromptButton, PromptLevel, Subscription,
 };
 use workspace::ModalLayer;
-use zed_ui::{prelude::*, Tooltip};
+use zed_ui::{prelude::*, Indicator, Tooltip};
 
 use crate::application::connection_workspace::ConnectionWorkspaceError;
-use crate::application::Application;
+use crate::application::{Application, ConnectionWorkspaceSnapshot, QueryTarget};
+use crate::db::TableRef;
 use crate::platform::{DesktopPreferences, NativePreferencesStore, ThemePreference, UiLanguage};
 
 use super::{
@@ -20,14 +21,18 @@ use super::{
         ConnectionActivityStatus, ConnectionProfilesEvent, ConnectionProfilesPanel,
         ConnectionSessionStatus,
     },
+    data_grid_item::DataGridItem,
     localization::{text, theme_label},
+    object_definition_item::{ObjectDefinition, ObjectDefinitionItem},
+    object_mutation_form::{ObjectMutationForm, ObjectMutationFormMode, ObjectMutationSaved},
     query_item::{QueryDocumentStateChanged, QueryItem},
     shell::{
         notify_preference_error, refresh_active_theme, NotificationCenter, NotificationTone,
         ShellSettings,
     },
     sql_language,
-    tabs::{QueryTabId, QueryTabsModel},
+    table_structure_item::TableStructureItem,
+    tabs::{WorkspaceTabId, WorkspaceTabsModel},
 };
 
 actions!(
@@ -75,10 +80,15 @@ pub(super) fn bind_workspace_keys(cx: &mut App) {
         gpui::KeyBinding::new("escape", menu::Cancel, Some("CommandPalette")),
         gpui::KeyBinding::new("enter", menu::Confirm, Some("CommandPaletteEntry")),
         gpui::KeyBinding::new("space", menu::Confirm, Some("CommandPaletteEntry")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("QueryTabRow")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("QueryTabRow")),
+        gpui::KeyBinding::new("enter", menu::Confirm, Some("WorkspaceTabRow")),
+        gpui::KeyBinding::new("space", menu::Confirm, Some("WorkspaceTabRow")),
     ]);
 }
+
+mod item;
+mod view;
+
+use item::WorkspaceItem;
 
 pub(super) struct AstesiaRoot {
     phase: AppPhase,
@@ -239,8 +249,8 @@ impl Render for AstesiaRoot {
 pub(super) struct AstesiaWorkspace {
     application: Arc<Application>,
     connection_profiles: Entity<ConnectionProfilesPanel>,
-    tabs: QueryTabsModel,
-    query_tabs: Vec<QueryTab>,
+    tabs: WorkspaceTabsModel,
+    workspace_tabs: Vec<WorkspaceTab>,
     settings: Entity<ShellSettings>,
     notifications: Entity<NotificationCenter>,
     modal_layer: Entity<ModalLayer>,
@@ -248,13 +258,13 @@ pub(super) struct AstesiaWorkspace {
     _profiles_observation: Subscription,
     _settings_observation: Subscription,
     profile_form_subscription: Option<Subscription>,
+    object_mutation_form_subscription: Option<Subscription>,
     command_palette_subscription: Option<Subscription>,
 }
 
-struct QueryTab {
-    id: QueryTabId,
-    item: Entity<QueryItem>,
-    _document_subscription: Subscription,
+struct WorkspaceTab {
+    id: WorkspaceTabId,
+    item: WorkspaceItem,
 }
 
 impl AstesiaWorkspace {
@@ -268,17 +278,19 @@ impl AstesiaWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let modal_layer = cx.new(|_| ModalLayer::new());
-        let tabs = QueryTabsModel::new();
+        let tabs = WorkspaceTabsModel::new();
         let query_item =
             cx.new(|cx| QueryItem::new(application.clone(), editor, settings.clone(), window, cx));
         let query_item_subscription = cx
             .subscribe(&query_item, |_, _, _: &QueryDocumentStateChanged, cx| {
                 cx.notify()
             });
-        let query_tabs = vec![QueryTab {
+        let workspace_tabs = vec![WorkspaceTab {
             id: tabs.active(),
-            item: query_item,
-            _document_subscription: query_item_subscription,
+            item: WorkspaceItem::Query {
+                item: query_item,
+                _document_subscription: query_item_subscription,
+            },
         }];
         let profiles_subscription = cx.subscribe_in(
             &connection_profiles,
@@ -293,7 +305,7 @@ impl AstesiaWorkspace {
             application,
             connection_profiles,
             tabs,
-            query_tabs,
+            workspace_tabs,
             settings,
             notifications,
             modal_layer,
@@ -301,6 +313,7 @@ impl AstesiaWorkspace {
             _profiles_observation: profiles_observation,
             _settings_observation: settings_observation,
             profile_form_subscription: None,
+            object_mutation_form_subscription: None,
             command_palette_subscription: None,
         }
     }
@@ -317,15 +330,32 @@ impl AstesiaWorkspace {
                 ConnectionProfileFormMode::Edit(profile.clone())
             }
             ConnectionProfilesEvent::QueryTargetSelected(target) => {
-                self.active_query_item().update(cx, |item, cx| {
-                    item.set_target(Some(target.clone()), window, cx);
-                });
+                if let Some(item) = self.active_query_item() {
+                    item.update(cx, |item, cx| {
+                        item.set_target(Some(target.clone()), window, cx);
+                    });
+                }
+                return;
+            }
+            ConnectionProfilesEvent::TableStructureRequested { target, table } => {
+                self.open_table_structure(target.clone(), table.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::TableDataRequested { target, table } => {
+                self.open_data_grid(target.clone(), table.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::ObjectDefinitionRequested(object) => {
+                self.open_object_definition(object.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::ObjectMutationRequested(mode) => {
+                self.open_object_mutation_form(mode.clone(), window, cx);
                 return;
             }
             ConnectionProfilesEvent::QueryTargetInvalidated(target) => {
-                for tab in &self.query_tabs {
-                    tab.item
-                        .update(cx, |item, cx| item.invalidate_target(target, cx));
+                for tab in &self.workspace_tabs {
+                    tab.item.invalidate_target(target, cx);
                 }
                 return;
             }
@@ -333,18 +363,15 @@ impl AstesiaWorkspace {
                 connection_id,
                 session_generation,
             } => {
-                for tab in &self.query_tabs {
-                    tab.item.update(cx, |item, cx| {
-                        item.invalidate_session(connection_id, *session_generation, cx)
-                    });
+                for tab in &self.workspace_tabs {
+                    tab.item
+                        .invalidate_session(connection_id, *session_generation, cx);
                 }
                 return;
             }
             ConnectionProfilesEvent::QuerySessionsChanged(snapshot) => {
-                for tab in &self.query_tabs {
-                    tab.item.update(cx, |item, cx| {
-                        item.reconcile_sessions(snapshot, cx);
-                    });
+                for tab in &self.workspace_tabs {
+                    tab.item.reconcile_sessions(snapshot, cx);
                 }
                 return;
             }
@@ -396,19 +423,72 @@ impl AstesiaWorkspace {
         ));
     }
 
-    fn active_query_item(&self) -> &Entity<QueryItem> {
+    fn open_object_mutation_form(
+        &mut self,
+        mode: ObjectMutationFormMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let application = self.application.clone();
+        let language = self.settings.read(cx).language();
+        self.modal_layer.update(cx, |layer, cx| {
+            layer.toggle_modal(window, cx, move |window, cx| {
+                ObjectMutationForm::new(application, mode, language, window, cx)
+            });
+        });
+        let Some(form) = self
+            .modal_layer
+            .read(cx)
+            .active_modal::<ObjectMutationForm>()
+        else {
+            return;
+        };
+        self.object_mutation_form_subscription = Some(cx.subscribe_in(
+            &form,
+            window,
+            |workspace, _, event: &ObjectMutationSaved, _, cx| {
+                workspace.connection_profiles.update(cx, |panel, cx| {
+                    panel.object_mutated(
+                        event.target.clone(),
+                        event.kind == crate::application::DatabaseObjectKind::Database,
+                        cx,
+                    );
+                });
+                workspace.notifications.update(cx, |center, cx| {
+                    center.push(
+                        NotificationTone::Info,
+                        format!(
+                            "{}: {}",
+                            text(
+                                workspace.settings.read(cx).language(),
+                                "数据库对象已更新",
+                                "Database object updated"
+                            ),
+                            event.identity
+                        ),
+                        cx,
+                    );
+                });
+            },
+        ));
+    }
+
+    fn active_item(&self) -> &WorkspaceItem {
         let active = self.tabs.active();
         &self
-            .query_tabs
+            .workspace_tabs
             .iter()
             .find(|tab| tab.id == active)
-            .expect("active query tab must have a view")
+            .expect("active workspace tab must have a view")
             .item
     }
 
-    fn focus_active_query(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_query_item()
-            .update(cx, |item, cx| item.focus(window, cx));
+    fn active_query_item(&self) -> Option<&Entity<QueryItem>> {
+        self.active_item().query()
+    }
+
+    fn focus_active_item(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_item().focus(window, cx);
         cx.notify();
     }
 
@@ -436,28 +516,123 @@ impl AstesiaWorkspace {
             item.update(cx, |item, cx| item.focus(window, cx));
         }
         let id = self.tabs.add();
-        self.query_tabs.push(QueryTab {
+        self.workspace_tabs.push(WorkspaceTab {
             id,
-            item,
-            _document_subscription: document_subscription,
+            item: WorkspaceItem::Query {
+                item,
+                _document_subscription: document_subscription,
+            },
         });
         cx.notify();
     }
 
-    fn activate_tab(&mut self, id: QueryTabId, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_table_structure(
+        &mut self,
+        target: QueryTarget,
+        table: TableRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.item.matches_table_structure(&target, &table, cx))
+        {
+            self.activate_tab(existing.id, window, cx);
+            return;
+        }
+        let item = cx.new(|cx| {
+            TableStructureItem::new(
+                self.application.clone(),
+                target,
+                table,
+                self.settings.clone(),
+                cx,
+            )
+        });
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            item: WorkspaceItem::TableStructure(item),
+        });
+        self.focus_active_item(window, cx);
+    }
+
+    fn open_data_grid(
+        &mut self,
+        target: QueryTarget,
+        table: TableRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.item.matches_data_grid(&target, &table, cx))
+        {
+            self.activate_tab(existing.id, window, cx);
+            return;
+        }
+        let item = cx.new(|cx| {
+            DataGridItem::new(
+                self.application.clone(),
+                target,
+                table,
+                self.settings.clone(),
+                window,
+                cx,
+            )
+        });
+        let observation = cx.observe(&item, |_, _, cx| cx.notify());
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            item: WorkspaceItem::DataGrid {
+                item,
+                _observation: observation,
+            },
+        });
+        self.focus_active_item(window, cx);
+    }
+
+    fn open_object_definition(
+        &mut self,
+        object: ObjectDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.item.matches_object_definition(&object, cx))
+        {
+            self.activate_tab(existing.id, window, cx);
+            return;
+        }
+        let item =
+            cx.new(|cx| ObjectDefinitionItem::new(object, self.settings.clone(), window, cx));
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            item: WorkspaceItem::ObjectDefinition(item),
+        });
+        self.focus_active_item(window, cx);
+    }
+
+    fn activate_tab(&mut self, id: WorkspaceTabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
-            self.focus_active_query(window, cx);
+            self.focus_active_item(window, cx);
         }
     }
 
-    fn close_tab(&mut self, id: QueryTabId, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, id: WorkspaceTabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.tabs().len() == 1 {
             return;
         }
-        let Some(tab) = self.query_tabs.iter().find(|tab| tab.id == id) else {
+        let Some(tab) = self.workspace_tabs.iter().find(|tab| tab.id == id) else {
             return;
         };
-        if tab.item.read(cx).has_unsaved_changes() {
+        if tab.item.has_unsaved_changes(cx) {
             self.confirm_discard_and_close(id, window, cx);
             return;
         }
@@ -466,22 +641,18 @@ impl AstesiaWorkspace {
 
     fn confirm_discard_and_close(
         &mut self,
-        id: QueryTabId,
+        id: WorkspaceTabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if window.has_active_prompt() {
             return;
         }
-        let Some(tab) = self.query_tabs.iter().find(|tab| tab.id == id) else {
+        let Some(tab) = self.workspace_tabs.iter().find(|tab| tab.id == id) else {
             return;
         };
         let language = self.settings.read(cx).language();
-        let name = tab
-            .item
-            .read(cx)
-            .file_display_name()
-            .unwrap_or_else(|| text(language, "未命名查询", "Untitled Query").to_string());
+        let name = tab.item.discard_name(language, cx);
         let message = format!(
             "{} “{name}”?",
             text(language, "放弃更改并关闭", "Discard changes and close")
@@ -513,22 +684,22 @@ impl AstesiaWorkspace {
         .detach();
     }
 
-    fn close_tab_now(&mut self, id: QueryTabId, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab_now(&mut self, id: WorkspaceTabId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.close(id) {
             return;
         }
-        self.query_tabs.retain(|tab| tab.id != id);
-        self.focus_active_query(window, cx);
+        self.workspace_tabs.retain(|tab| tab.id != id);
+        self.focus_active_item(window, cx);
     }
 
     fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.next();
-        self.focus_active_query(window, cx);
+        self.focus_active_item(window, cx);
     }
 
     fn previous_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.previous();
-        self.focus_active_query(window, cx);
+        self.focus_active_item(window, cx);
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -685,236 +856,5 @@ impl AstesiaWorkspace {
     fn cycle_language(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let language = self.settings.read(cx).language().next();
         self.set_language(language, cx);
-    }
-}
-
-impl Render for AstesiaWorkspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-        let status = self.connection_profiles.read(cx).status(cx);
-        let language = self.settings.read(cx).language();
-        let theme = self.settings.read(cx).theme();
-        let sidebar_visible = self.settings.read(cx).sidebar_visible();
-        let active_item = self.active_query_item().clone();
-        let active_tab = self.tabs.active();
-        let status_indicator = if status.activity == ConnectionActivityStatus::NeedsRefresh {
-            rgb(0xef4444)
-        } else {
-            match status.session {
-                ConnectionSessionStatus::Connected => rgb(0x22c55e),
-                ConnectionSessionStatus::Connecting
-                | ConnectionSessionStatus::Disconnecting
-                | ConnectionSessionStatus::Deleting => rgb(0xeab308),
-                ConnectionSessionStatus::Loading
-                | ConnectionSessionStatus::NoSelection
-                | ConnectionSessionStatus::Disconnected => rgb(0xa1a1aa),
-            }
-        };
-        let session_label = match status.session {
-            ConnectionSessionStatus::Loading => {
-                text(language, "连接状态加载中", "Loading connection state")
-            }
-            ConnectionSessionStatus::NoSelection => {
-                text(language, "未选择连接", "No connection selected")
-            }
-            ConnectionSessionStatus::Disconnected => text(language, "未连接", "Disconnected"),
-            ConnectionSessionStatus::Connecting => text(language, "连接中", "Connecting"),
-            ConnectionSessionStatus::Connected => text(language, "已连接", "Connected"),
-            ConnectionSessionStatus::Disconnecting => text(language, "断开中", "Disconnecting"),
-            ConnectionSessionStatus::Deleting => text(language, "删除中", "Deleting"),
-        };
-        let activity_label = match status.activity {
-            ConnectionActivityStatus::Loading => text(language, "正在加载", "Loading"),
-            ConnectionActivityStatus::Refreshing => text(language, "正在刷新", "Refreshing"),
-            ConnectionActivityStatus::LoadingDatabases => {
-                text(language, "正在加载数据库", "Loading databases")
-            }
-            ConnectionActivityStatus::LoadingObjects => {
-                text(language, "正在加载对象", "Loading objects")
-            }
-            ConnectionActivityStatus::Working => text(language, "正在处理", "Working"),
-            ConnectionActivityStatus::NeedsRefresh => {
-                text(language, "需要刷新", "Refresh required")
-            }
-            ConnectionActivityStatus::Ready => text(language, "就绪", "Ready"),
-        };
-
-        v_flex()
-            .key_context("AstesiaWorkspace")
-            .on_action(cx.listener(Self::toggle_command_palette))
-            .on_action(cx.listener(Self::new_query_action))
-            .on_action(cx.listener(Self::close_active_tab_action))
-            .on_action(cx.listener(Self::next_tab_action))
-            .on_action(cx.listener(Self::previous_tab_action))
-            .on_action(cx.listener(Self::toggle_sidebar_action))
-            .on_action(cx.listener(Self::refresh_connections_action))
-            .relative()
-            .size_full()
-            .overflow_hidden()
-            .bg(colors.background)
-            .text_color(colors.text)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_stretch()
-                    .overflow_hidden()
-                    .when(sidebar_visible, |element| {
-                        element.child(self.connection_profiles.clone())
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .h_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(
-                                h_flex()
-                                    .h(px(40.0))
-                                    .flex_none()
-                                    .items_end()
-                                    .px_1()
-                                    .border_b_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.tab_bar_background)
-                                    .gap_1()
-                                    .children(self.tabs.tabs().iter().enumerate().map(
-                                        |(index, id)| {
-                                            let id = *id;
-                                            let is_active = id == active_tab;
-                                            let tab = self
-                                                .query_tabs
-                                                .iter()
-                                                .find(|tab| tab.id == id)
-                                                .expect("query tab model and views must agree");
-                                            let item = tab.item.read(cx);
-                                            let fallback = format!(
-                                                "{} {}",
-                                                text(language, "查询", "Query"),
-                                                index + 1
-                                            );
-                                            let label = item.document_label(&fallback);
-                                            h_flex()
-                                                .id(format!("query-tab-{index}"))
-                                                .role(gpui::Role::Button)
-                                                .tab_index(0)
-                                                .key_context("QueryTabRow")
-                                                .aria_label(label.clone())
-                                                .aria_toggled(if is_active {
-                                                    gpui::Toggled::True
-                                                } else {
-                                                    gpui::Toggled::False
-                                                })
-                                                .h(px(36.0))
-                                                .min_w(px(112.0))
-                                                .px_2()
-                                                .gap_1()
-                                                .items_center()
-                                                .rounded_t_md()
-                                                .border_1()
-                                                .border_b_0()
-                                                .border_color(colors.border)
-                                                .bg(if is_active {
-                                                    colors.tab_active_background
-                                                } else {
-                                                    colors.tab_inactive_background
-                                                })
-                                                .cursor_pointer()
-                                                .on_action(cx.listener(
-                                                    move |workspace, _: &menu::Confirm, window, cx| {
-                                                        workspace.activate_tab(id, window, cx);
-                                                    },
-                                                ))
-                                                .on_click(cx.listener(
-                                                    move |workspace, _, window, cx| {
-                                                        workspace.activate_tab(id, window, cx);
-                                                    },
-                                                ))
-                                                .child(
-                                                    Label::new(label)
-                                                    .size(LabelSize::Small)
-                                                    .weight(gpui::FontWeight::MEDIUM)
-                                                    .flex_1(),
-                                                )
-                                                .when(self.tabs.tabs().len() > 1, |element| {
-                                                    element.child(
-                                                        IconButton::new(
-                                                            format!("close-query-tab-{index}"),
-                                                            IconName::Close,
-                                                        )
-                                                        .icon_size(IconSize::XSmall)
-                                                        .on_click(cx.listener(
-                                                            move |workspace, _, window, cx| {
-                                                                workspace.close_tab(id, window, cx);
-                                                            },
-                                                        )),
-                                                    )
-                                                })
-                                        },
-                                    ))
-                                    .child(
-                                        IconButton::new("new-query-tab", IconName::Plus)
-                                            .icon_size(IconSize::Small)
-                                            .tooltip(move |_, cx| {
-                                                Tooltip::with_meta(
-                                                    text(language, "新建查询", "New Query"),
-                                                    None,
-                                                    "⌘N",
-                                                    cx,
-                                                )
-                                            })
-                                            .on_click(cx.listener(|workspace, _, window, cx| {
-                                                workspace.new_query_tab(window, cx);
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .w_full()
-                                    .min_h_0()
-                                    .min_w_0()
-                                    .bg(colors.background)
-                                    .child(active_item),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .h(px(32.0))
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .border_t_1()
-                    .border_color(colors.border)
-                    .bg(colors.status_bar_background)
-                    .child(div().size(px(8.0)).rounded_full().bg(status_indicator))
-                    .child(Label::new(status.summary).size(LabelSize::XSmall))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("open-command-palette", text(language, "命令", "Commands"))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .key_binding(zed_ui::KeyBinding::for_action(&ToggleCommandPalette, cx))
-                            .on_click(cx.listener(Self::open_palette_click)),
-                    )
-                    .child(
-                        Button::new("cycle-language", self.settings.read(cx).language().code())
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .on_click(cx.listener(Self::cycle_language)),
-                    )
-                    .child(
-                        Button::new("cycle-theme", theme_label(language, theme))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .on_click(cx.listener(Self::cycle_theme)),
-                    )
-                    .child(Label::new(session_label).size(LabelSize::XSmall))
-                    .child(Label::new(activity_label).size(LabelSize::XSmall)),
-            )
-            .child(self.modal_layer.clone())
-            .child(self.notifications.clone())
     }
 }

@@ -249,10 +249,13 @@ impl SqlDialect {
         columns: &[String],
         values: &[Value],
     ) -> SqlRenderResult<String> {
-        if columns.is_empty() {
-            return Err(SqlRenderError::InvalidInput(
-                "insert requires at least one column".to_string(),
-            ));
+        if columns.is_empty() && values.is_empty() {
+            let table = self.quote_table_ref(table)?;
+            return Ok(if self.db_type == DbType::MySQL {
+                format!("INSERT INTO {table} () VALUES ()")
+            } else {
+                format!("INSERT INTO {table} DEFAULT VALUES")
+            });
         }
         if columns.len() != values.len() {
             return Err(SqlRenderError::InvalidInput(format!(
@@ -679,6 +682,23 @@ mod tests {
 
         let postgres = TableRef::parse(DbType::PostgreSQL, "audit.events").unwrap();
         assert_eq!(postgres.schema_and_table("public"), ("audit", "events"));
+    }
+
+    #[test]
+    fn renders_engine_specific_default_value_inserts() {
+        let table = TableRef::unqualified("events");
+        assert_eq!(
+            SqlDialect::new(DbType::PostgreSQL)
+                .build_insert_row(&table, &[], &[])
+                .unwrap(),
+            "INSERT INTO \"events\" DEFAULT VALUES"
+        );
+        assert_eq!(
+            SqlDialect::new(DbType::MySQL)
+                .build_insert_row(&table, &[], &[])
+                .unwrap(),
+            "INSERT INTO `events` () VALUES ()"
+        );
     }
 
     #[test]

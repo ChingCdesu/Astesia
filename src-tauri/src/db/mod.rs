@@ -159,6 +159,21 @@ pub struct IndexInfo {
     pub is_primary: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstraintKind {
+    PrimaryKey,
+    Unique,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub kind: ConstraintKind,
+    pub columns: Vec<String>,
+    pub definition: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewInfo {
     pub name: String,
@@ -255,6 +270,13 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> anyhow::Result<Vec<IndexInfo>> {
         Err(UnsupportedFeature::new(self.db_type(), "indexes").into())
     }
+    async fn get_constraints(
+        &self,
+        _database: &str,
+        _table: &TableRef,
+    ) -> anyhow::Result<Vec<ConstraintInfo>> {
+        Err(UnsupportedFeature::new(self.db_type(), "constraints").into())
+    }
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult>;
     /// Transactional drivers override this to keep the batch on one connection.
     async fn execute_statements(
@@ -275,6 +297,13 @@ pub trait DatabaseDriver: Send + Sync {
             }
         }
         Ok(results)
+    }
+    async fn execute_mutation_batch(
+        &self,
+        _database: &str,
+        _statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        Err(UnsupportedFeature::new(self.db_type(), "transactional mutation batches").into())
     }
     async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
         let sql = SqlDialect::new(self.db_type()).build_explain_statement(statement)?;
