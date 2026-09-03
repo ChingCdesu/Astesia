@@ -1,6 +1,7 @@
 use gpui::{rgb, FontWeight};
 use zed_ui::{prelude::*, Tooltip};
 
+use super::engine_workflows::DraggedTableCopy;
 use super::presentation::grouped_profiles;
 use super::{ConnectionProfilesPanel, NoticeTone, PanelNotice, SIDEBAR_WIDTH};
 use crate::application::connection_workspace::{
@@ -304,6 +305,17 @@ impl ConnectionProfilesPanel {
                     let selected = self.selected_query_target.as_ref() == Some(&target);
                     let target_for_click = target.clone();
                     let target_for_action = target.clone();
+                    let target_for_drop = target.clone();
+                    let copied_table = self
+                        .copied_table
+                        .as_ref()
+                        .filter(|copy| {
+                            copy.source.db_type == target.db_type
+                                && target.db_type.capabilities().table_copy
+                                    != crate::db::TableCopyMode::None
+                        })
+                        .cloned();
+                    let paste_target = target.clone();
                     let database_operation_target = databases
                         .iter()
                         .find(|candidate| *candidate != database)
@@ -322,6 +334,28 @@ impl ConnectionProfilesPanel {
                             h_flex()
                                 .min_w_0()
                                 .gap_0p5()
+                                .drag_over::<DraggedTableCopy>({
+                                    let target = target.clone();
+                                    move |element, copy, _, cx| {
+                                        if copy.source.db_type == target.db_type
+                                            && target.db_type.capabilities().table_copy
+                                                != crate::db::TableCopyMode::None
+                                        {
+                                            element.bg(cx.theme().colors().drop_target_background)
+                                        } else {
+                                            element
+                                        }
+                                    }
+                                })
+                                .on_drop(cx.listener(
+                                    move |panel, copy: &DraggedTableCopy, _, cx| {
+                                        panel.request_dragged_table_copy(
+                                            copy,
+                                            target_for_drop.clone(),
+                                            cx,
+                                        );
+                                    },
+                                ))
                                 .child(
                                     h_flex()
                                         .id(format!("query-target-{}-{database}", profile.id))
@@ -373,6 +407,29 @@ impl ConnectionProfilesPanel {
                                                 .flex_1(),
                                         ),
                                 )
+                                .when_some(copied_table, |element, copy| {
+                                    element.child(
+                                        IconButton::new(
+                                            format!("paste-table-{}-{database}", profile.id),
+                                            IconName::ArrowRight,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(text(
+                                            language,
+                                            "粘贴表到此数据库",
+                                            "Paste table into this database",
+                                        )))
+                                        .on_click(
+                                            cx.listener(move |panel, _, _, cx| {
+                                                panel.request_dragged_table_copy(
+                                                    &copy,
+                                                    paste_target.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                })
                                 .when_some(rename_target, |element, rename_target| {
                                     element.when(
                                         object_kind_can_rename(

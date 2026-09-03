@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::db::{QueryResult, StatementResult, TableRef};
 
-use super::connections::ConnectionManager;
+use super::{connections::ConnectionManager, QueryTarget};
 
 #[derive(Clone)]
 pub struct QueryService {
@@ -26,6 +26,28 @@ impl QueryService {
             .execute_query(database, sql)
             .await
             .map_err(|error| format!("查询失败: {error}"))
+    }
+
+    pub(crate) async fn execute_target(
+        &self,
+        target: &QueryTarget,
+        sql: &str,
+    ) -> Result<QueryResult, String> {
+        let (handle, generation) = self.manager.driver_session(&target.connection_id).await?;
+        if generation != target.session_generation {
+            return Err(format!(
+                "Database Session changed before export (expected {}, found {generation})",
+                target.session_generation
+            ));
+        }
+        let driver = handle.lock_active().await?;
+        if driver.db_type() != target.db_type {
+            return Err("Database Session engine changed before export".to_string());
+        }
+        driver
+            .execute_query(&target.database, sql)
+            .await
+            .map_err(|error| format!("Export query failed: {error}"))
     }
 
     pub async fn execute_statements(

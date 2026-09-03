@@ -1,4 +1,5 @@
 mod catalog_view;
+mod engine_workflows;
 mod object_actions;
 mod presentation;
 mod view;
@@ -6,6 +7,7 @@ mod view;
 use std::sync::Arc;
 
 use gpui::{App, ClickEvent, Entity, EventEmitter, PromptButton, PromptLevel, Subscription, Task};
+use ui_input::InputField;
 use zed_ui::prelude::*;
 
 use crate::application::connection_workspace::{
@@ -17,9 +19,10 @@ use crate::application::{
     ProfileOperationCommand, ProfileOperationCompletion, ProfileOperationOutcome, QueryTarget,
 };
 use crate::connection_repository::SharedConnectionProfile;
-use crate::db::TableRef;
+use crate::db::{TableInfo, TableRef};
 use crate::platform::UiEvent;
 
+use self::engine_workflows::DraggedTableCopy;
 use self::presentation::repository_error_message;
 use super::engine_presentation::engine_label;
 use super::localization::text;
@@ -47,7 +50,13 @@ pub(super) struct ConnectionProfilesPanel {
     selected_query_target: Option<QueryTarget>,
     notice: Option<PanelNotice>,
     object_operation_in_progress: bool,
+    redis_search: Entity<InputField>,
+    redis_search_result: Option<(QueryTarget, Result<Vec<TableInfo>, String>)>,
+    redis_search_generation: u64,
+    redis_search_busy: bool,
+    copied_table: Option<DraggedTableCopy>,
     settings: Entity<ShellSettings>,
+    _redis_search_observation: Subscription,
     _settings_observation: Subscription,
     _application_events: Task<()>,
 }
@@ -62,6 +71,26 @@ pub(super) enum ConnectionProfilesEvent {
         table: TableRef,
     },
     TableDataRequested {
+        target: QueryTarget,
+        table: TableRef,
+    },
+    DocumentCollectionRequested {
+        target: QueryTarget,
+        collection: TableRef,
+    },
+    RedisKeyRequested {
+        target: QueryTarget,
+        key: String,
+    },
+    BackupRequested {
+        target: QueryTarget,
+        tables: Option<Vec<TableRef>>,
+    },
+    RestoreRequested {
+        target: QueryTarget,
+    },
+    CopyTableRequested {
+        source: QueryTarget,
         target: QueryTarget,
         table: TableRef,
     },
@@ -123,8 +152,19 @@ impl ConnectionProfilesPanel {
     pub(super) fn new(
         application: Arc<Application>,
         settings: Entity<ShellSettings>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let language = settings.read(cx).language();
+        let redis_search = cx.new(|cx| {
+            InputField::new(
+                window,
+                cx,
+                text(language, "搜索 Redis 键", "Search Redis keys"),
+            )
+            .label(text(language, "Redis 键搜索", "Redis key search"))
+        });
+        let redis_search_observation = cx.observe(&redis_search, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let mut application_events = application.subscribe_events();
         let application_event_task = cx.spawn(async move |panel, cx| loop {
@@ -147,7 +187,13 @@ impl ConnectionProfilesPanel {
             selected_query_target: None,
             notice: None,
             object_operation_in_progress: false,
+            redis_search,
+            redis_search_result: None,
+            redis_search_generation: 0,
+            redis_search_busy: false,
+            copied_table: None,
             settings,
+            _redis_search_observation: redis_search_observation,
             _settings_observation: settings_observation,
             _application_events: application_event_task,
         };
@@ -222,9 +268,35 @@ impl ConnectionProfilesPanel {
         }
     }
 
-    fn request_table_data(&mut self, target: QueryTarget, table: TableRef, cx: &mut Context<Self>) {
-        if target.db_type.capabilities().sql && self.state.query_target_is_live(&target) {
-            cx.emit(ConnectionProfilesEvent::TableDataRequested { target, table });
+    fn request_primary_data(
+        &mut self,
+        target: QueryTarget,
+        object: TableRef,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.query_target_is_live(&target) {
+            return;
+        }
+        match target.db_type {
+            crate::db::DbType::MongoDB => {
+                cx.emit(ConnectionProfilesEvent::DocumentCollectionRequested {
+                    target,
+                    collection: object,
+                });
+            }
+            crate::db::DbType::Redis => {
+                cx.emit(ConnectionProfilesEvent::RedisKeyRequested {
+                    target,
+                    key: object.name().to_string(),
+                });
+            }
+            _ if target.db_type.capabilities().sql => {
+                cx.emit(ConnectionProfilesEvent::TableDataRequested {
+                    target,
+                    table: object,
+                });
+            }
+            _ => {}
         }
     }
 

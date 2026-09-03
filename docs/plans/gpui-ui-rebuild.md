@@ -154,6 +154,8 @@ Exit condition: schema and editable-grid workflows match the Legacy Shell for ev
 
 ### 6. Port engine-specific and long-running workflows
 
+Status: Complete on 2026-09-03. See [Milestone 6 acceptance](gpui-milestone-6-acceptance.md).
+
 - Port MongoDB collection/document/filter workflows.
 - Port Redis key search, TTL, and string/hash/list/set/zset editing.
 - Port backup, restore, table copy, export, task progress, cancellation, and completion notifications.

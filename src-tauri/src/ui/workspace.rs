@@ -86,6 +86,7 @@ pub(super) fn bind_workspace_keys(cx: &mut App) {
 }
 
 mod item;
+mod operations;
 mod view;
 
 use item::WorkspaceItem;
@@ -170,7 +171,12 @@ impl AstesiaRoot {
                             });
                         }
                         let connection_profiles = cx.new(|cx| {
-                            ConnectionProfilesPanel::new(application.clone(), settings.clone(), cx)
+                            ConnectionProfilesPanel::new(
+                                application.clone(),
+                                settings.clone(),
+                                window,
+                                cx,
+                            )
                         });
                         let workspace = cx.new(|cx| {
                             AstesiaWorkspace::new(
@@ -257,8 +263,10 @@ pub(super) struct AstesiaWorkspace {
     _profiles_subscription: Subscription,
     _profiles_observation: Subscription,
     _settings_observation: Subscription,
+    _application_events: gpui::Task<()>,
     profile_form_subscription: Option<Subscription>,
     object_mutation_form_subscription: Option<Subscription>,
+    copy_table_form_subscription: Option<Subscription>,
     command_palette_subscription: Option<Subscription>,
 }
 
@@ -301,6 +309,41 @@ impl AstesiaWorkspace {
         );
         let profiles_observation = cx.observe(&connection_profiles, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
+        let mut application_events = application.subscribe_events();
+        let task_manager = application.tasks().clone();
+        let task_events = cx.spawn(async move |workspace, cx| loop {
+            match application_events.recv().await {
+                Ok(crate::platform::UiEvent::TaskCompleted { id }) => {
+                    let task = task_manager.get_task(&id).await;
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            let Some(task) = task else {
+                                return;
+                            };
+                            let tone = match task.status {
+                                crate::tasks::TaskStatus::Completed => NotificationTone::Info,
+                                crate::tasks::TaskStatus::Partial
+                                | crate::tasks::TaskStatus::Cancelled => NotificationTone::Warning,
+                                crate::tasks::TaskStatus::Failed => NotificationTone::Error,
+                                crate::tasks::TaskStatus::Pending
+                                | crate::tasks::TaskStatus::Running
+                                | crate::tasks::TaskStatus::Cancelling => return,
+                            };
+                            workspace.notifications.update(cx, |center, cx| {
+                                center.push(tone, format!("{}: {}", task.name, task.message), cx);
+                            });
+                            cx.notify();
+                        })
+                        .ok();
+                }
+                Ok(
+                    crate::platform::UiEvent::TaskProgress { .. }
+                    | crate::platform::UiEvent::McpConnectionsChanged(_),
+                ) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        });
         Self {
             application,
             connection_profiles,
@@ -312,8 +355,10 @@ impl AstesiaWorkspace {
             _profiles_subscription: profiles_subscription,
             _profiles_observation: profiles_observation,
             _settings_observation: settings_observation,
+            _application_events: task_events,
             profile_form_subscription: None,
             object_mutation_form_subscription: None,
+            copy_table_form_subscription: None,
             command_palette_subscription: None,
         }
     }
@@ -343,6 +388,36 @@ impl AstesiaWorkspace {
             }
             ConnectionProfilesEvent::TableDataRequested { target, table } => {
                 self.open_data_grid(target.clone(), table.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::DocumentCollectionRequested { target, collection } => {
+                self.open_document_collection(target.clone(), collection.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::RedisKeyRequested { target, key } => {
+                self.open_redis_key(target.clone(), key.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::BackupRequested { target, tables } => {
+                self.choose_backup_content(target.clone(), tables.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::RestoreRequested { target } => {
+                self.choose_restore_file(target.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::CopyTableRequested {
+                source,
+                target,
+                table,
+            } => {
+                self.open_copy_table_form(
+                    source.clone(),
+                    target.clone(),
+                    table.clone(),
+                    window,
+                    cx,
+                );
                 return;
             }
             ConnectionProfilesEvent::ObjectDefinitionRequested(object) => {

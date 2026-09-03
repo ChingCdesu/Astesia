@@ -788,30 +788,72 @@ impl DatabaseDriver for SqlServerDriver {
         let (schema, table_name) = table.schema_and_table("dbo");
         let sql = in_database_sql(
             database,
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, CHARACTER_MAXIMUM_LENGTH \
-             FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @P1 AND TABLE_SCHEMA = @P2 \
-             ORDER BY ORDINAL_POSITION",
+            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
+                    CAST(c.CHARACTER_MAXIMUM_LENGTH AS int), CAST(c.NUMERIC_PRECISION AS int), \
+                    CAST(c.NUMERIC_SCALE AS int), CAST(c.DATETIME_PRECISION AS int), \
+                    CAST(COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') AS int), \
+                    CAST(IDENT_SEED(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) AS bigint), \
+                    CAST(IDENT_INCR(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) AS bigint), \
+                    CAST(CASE WHEN EXISTS ( \
+                        SELECT 1 FROM sys.indexes i \
+                        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+                        JOIN sys.columns sc ON sc.object_id = ic.object_id AND sc.column_id = ic.column_id \
+                        WHERE i.is_primary_key = 1 \
+                          AND i.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) \
+                          AND sc.name = c.COLUMN_NAME \
+                    ) THEN 1 ELSE 0 END AS int) \
+             FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_NAME = @P1 AND c.TABLE_SCHEMA = @P2 \
+             ORDER BY c.ORDINAL_POSITION",
         )?;
         let stream = client.query(sql.as_str(), &[&table_name, &schema]).await?;
         let rows = stream.into_first_result().await?;
         let dialect = SqlDialect::new(DbType::SQLServer);
         let mut ddl = format!("CREATE TABLE {} (\n", dialect.quote_table_ref(table)?);
+        let mut primary_key_columns = Vec::new();
         let col_defs: Vec<String> = rows
             .iter()
             .map(|row| -> anyhow::Result<String> {
                 let name = row.try_get::<&str, _>(0).ok().flatten().unwrap_or("");
                 let dtype = row.try_get::<&str, _>(1).ok().flatten().unwrap_or("");
                 let nullable = row.try_get::<&str, _>(2).ok().flatten().unwrap_or("YES");
-                let null_str = if nullable == "NO" { " NOT NULL" } else { "" };
-                Ok(format!(
-                    "  {} {}{}",
-                    dialect.quote_identifier(name)?,
+                let default = row.try_get::<&str, _>(3).ok().flatten();
+                let character_length = row.try_get::<i32, _>(4).ok().flatten();
+                let precision = row.try_get::<i32, _>(5).ok().flatten();
+                let scale = row.try_get::<i32, _>(6).ok().flatten();
+                let datetime_precision = row.try_get::<i32, _>(7).ok().flatten();
+                let identity = row.try_get::<i32, _>(8).ok().flatten() == Some(1);
+                let identity_seed = row.try_get::<i64, _>(9).ok().flatten();
+                let identity_increment = row.try_get::<i64, _>(10).ok().flatten();
+                let primary_key = row.try_get::<i32, _>(11).ok().flatten() == Some(1);
+                let data_type = sql_server_column_type(
                     dtype,
-                    null_str
+                    character_length,
+                    precision,
+                    scale,
+                    datetime_precision,
+                );
+                let null_str = if nullable == "NO" { " NOT NULL" } else { "" };
+                let identity = identity_clause(identity, identity_seed, identity_increment);
+                let default = default
+                    .map(|default| format!(" DEFAULT {default}"))
+                    .unwrap_or_default();
+                if primary_key {
+                    primary_key_columns.push(dialect.quote_identifier(name)?);
+                }
+                Ok(format!(
+                    "  {} {data_type}{identity}{null_str}{default}",
+                    dialect.quote_identifier(name)?,
                 ))
             })
             .collect::<Result<_, _>>()?;
-        ddl.push_str(&col_defs.join(",\n"));
+        let mut definitions = col_defs;
+        if !primary_key_columns.is_empty() {
+            definitions.push(format!(
+                "  PRIMARY KEY ({})",
+                primary_key_columns.join(", ")
+            ));
+        }
+        ddl.push_str(&definitions.join(",\n"));
         ddl.push_str("\n);");
         Ok(ddl)
     }
@@ -821,9 +863,49 @@ impl DatabaseDriver for SqlServerDriver {
     }
 }
 
+fn sql_server_column_type(
+    data_type: &str,
+    character_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+    datetime_precision: Option<i32>,
+) -> String {
+    match data_type.to_ascii_lowercase().as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => {
+            match character_length {
+                Some(-1) => format!("{data_type}(MAX)"),
+                Some(length) => format!("{data_type}({length})"),
+                None => data_type.to_string(),
+            }
+        }
+        "decimal" | "numeric" => match (precision, scale) {
+            (Some(precision), Some(scale)) => format!("{data_type}({precision},{scale})"),
+            _ => data_type.to_string(),
+        },
+        "datetime2" | "datetimeoffset" | "time" => datetime_precision
+            .map(|precision| format!("{data_type}({precision})"))
+            .unwrap_or_else(|| data_type.to_string()),
+        _ => data_type.to_string(),
+    }
+}
+
+fn identity_clause(identity: bool, seed: Option<i64>, increment: Option<i64>) -> String {
+    if identity {
+        format!(
+            " IDENTITY({},{})",
+            seed.unwrap_or(1),
+            increment.unwrap_or(1)
+        )
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{in_database_sql, table_data_sql, use_database_sql};
+    use super::{
+        identity_clause, in_database_sql, sql_server_column_type, table_data_sql, use_database_sql,
+    };
     use crate::db::TableRef;
 
     #[test]
@@ -845,5 +927,27 @@ mod tests {
             in_database_sql("odd]database", "SELECT 1").unwrap(),
             "USE [odd]]database]; SELECT 1"
         );
+    }
+
+    #[test]
+    fn reconstructed_column_types_keep_size_precision_and_scale() {
+        assert_eq!(
+            sql_server_column_type("nvarchar", Some(255), None, None, None),
+            "nvarchar(255)"
+        );
+        assert_eq!(
+            sql_server_column_type("varchar", Some(-1), None, None, None),
+            "varchar(MAX)"
+        );
+        assert_eq!(
+            sql_server_column_type("decimal", None, Some(18), Some(4), None),
+            "decimal(18,4)"
+        );
+        assert_eq!(
+            sql_server_column_type("datetime2", None, None, None, Some(3)),
+            "datetime2(3)"
+        );
+        assert_eq!(identity_clause(true, Some(10), Some(5)), " IDENTITY(10,5)");
+        assert_eq!(identity_clause(false, Some(10), Some(5)), "");
     }
 }

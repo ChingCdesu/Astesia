@@ -6,6 +6,7 @@ use std::{
 use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
 
 use super::query_result_selection::QueryResultSelection;
+use super::redis_service::RedisCommand;
 use super::{query_file::QueryFileState, QueryFileCompletion, QueryFileError, QueryFileRequest};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +57,13 @@ impl QueryWorkspaceError {
         }
     }
 
+    fn redis_command(error: impl std::fmt::Display) -> Self {
+        Self {
+            code: "redis_command_invalid",
+            message: format!("Redis command is invalid: {error}"),
+        }
+    }
+
     fn unsupported_explain(db_type: DbType) -> Self {
         Self {
             code: "query_explain_unsupported",
@@ -80,7 +88,7 @@ impl QueryWorkspaceError {
     fn empty() -> Self {
         Self {
             code: "query_empty",
-            message: "没有可执行的 SQL 语句。".to_string(),
+            message: "没有可执行的查询或命令。".to_string(),
         }
     }
 
@@ -103,6 +111,10 @@ impl QueryWorkspaceError {
 pub(crate) enum QueryOperation {
     Statements(Vec<String>),
     Explain(String),
+    Redis {
+        source: String,
+        command: RedisCommand,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -274,9 +286,7 @@ impl QueryWorkspaceState {
         document: QueryDocument,
         scope: QueryExecutionScope,
     ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
-        let preparation = self
-            .prepare_execution(document, scope)
-            .map(|(target, statements)| (target, QueryOperation::Statements(statements)));
+        let preparation = self.prepare_execution(document, scope);
         self.begin_prepared(preparation)
     }
 
@@ -356,16 +366,22 @@ impl QueryWorkspaceState {
         &self,
         document: QueryDocument,
         scope: QueryExecutionScope,
-    ) -> Result<(QueryTarget, Vec<String>), QueryWorkspaceError> {
+    ) -> Result<(QueryTarget, QueryOperation), QueryWorkspaceError> {
         let target = self
             .target
             .clone()
             .ok_or_else(QueryWorkspaceError::target_required)?;
+        if target.db_type == DbType::Redis {
+            let source = select_redis_command(document)?;
+            let command =
+                RedisCommand::parse(&source).map_err(QueryWorkspaceError::redis_command)?;
+            return Ok((target, QueryOperation::Redis { source, command }));
+        }
         if !target.db_type.capabilities().sql {
             return Err(QueryWorkspaceError::unsupported_engine(target.db_type));
         }
         let statements = select_statements(target.db_type, document, scope)?;
-        Ok((target, statements))
+        Ok((target, QueryOperation::Statements(statements)))
     }
 
     fn prepare_explain(
@@ -388,6 +404,21 @@ impl QueryWorkspaceState {
             target,
             statements.pop().expect("one Explain statement was checked"),
         ))
+    }
+}
+
+fn select_redis_command(document: QueryDocument) -> Result<String, QueryWorkspaceError> {
+    validate_range(&document.text, &document.selection)?;
+    let source = if document.selection.is_empty() {
+        document.text
+    } else {
+        document.text[document.selection].to_string()
+    };
+    let source = source.trim().to_string();
+    if source.is_empty() {
+        Err(QueryWorkspaceError::empty())
+    } else {
+        Ok(source)
     }
 }
 
@@ -542,7 +573,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "query_explain_requires_one_statement");
 
-        state.set_target(Some(target("redis", 1, DbType::Redis)));
+        state.set_target(Some(target("mongo", 1, DbType::MongoDB)));
         let error = state
             .begin_explain(QueryDocument::new("GET key".to_string(), 0..0))
             .unwrap_err();
@@ -607,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_selection_and_non_sql_targets_fail_before_execution() {
+    fn invalid_selection_and_unsupported_targets_fail_before_execution() {
         let mut state = QueryWorkspaceState::default();
         state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
         let error = state
@@ -618,14 +649,42 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "query_selection_invalid");
 
-        state.set_target(Some(target("redis", 1, DbType::Redis)));
+        state.set_target(Some(target("mongo", 1, DbType::MongoDB)));
         let error = state
             .begin_execution(
-                QueryDocument::new("GET key".to_string(), 0..0),
+                QueryDocument::new("{}".to_string(), 0..0),
                 QueryExecutionScope::All,
             )
             .unwrap_err();
         assert_eq!(error.code, "query_engine_unsupported");
+    }
+
+    #[test]
+    fn redis_targets_prepare_one_raw_command_without_sql_parsing() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("redis", 1, DbType::Redis)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new(
+                    "HSET 'key with space' field \"value with space\"".to_string(),
+                    0..0,
+                ),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        assert!(matches!(
+            request.operation,
+            QueryOperation::Redis { source, .. }
+                if source == "HSET 'key with space' field \"value with space\""
+        ));
+
+        let error = state
+            .begin_execution(
+                QueryDocument::new("SET key 'unterminated".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "redis_command_invalid");
     }
 
     #[test]

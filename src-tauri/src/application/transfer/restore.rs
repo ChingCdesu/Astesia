@@ -1,3 +1,4 @@
+use crate::application::QueryTarget;
 use crate::db::{SqlScript, UnsupportedFeature};
 use crate::tasks::{NewTask, TaskOutcome};
 
@@ -12,14 +13,14 @@ fn restore_outcome(effects: TransferEffects) -> TaskOutcome {
 impl TransferService {
     pub async fn start_restore(
         &self,
-        connection_id: String,
-        database: String,
+        target: QueryTarget,
         file_path: String,
     ) -> Result<String, String> {
         let sql_content =
             std::fs::read_to_string(&file_path).map_err(|e| format!("读取文件失败: {}", e))?;
 
-        let driver_handle = self.connections.driver(&connection_id).await?;
+        let database = target.database.clone();
+        let driver_handle = self.driver_for_target(&target).await?;
         let db_type = {
             let driver = driver_handle.lock_active().await?;
             driver.db_type()
@@ -60,7 +61,7 @@ impl TransferService {
                                 effects.record_applied(1);
                             }
                             Err(e) => {
-                                effects.record_failure(1, "SQL 语句执行失败");
+                                effects.record_failure(1, format!("SQL 语句执行失败: {e}"));
                                 log::warn!("Restore statement failed: {}", e);
                             }
                         }

@@ -252,6 +252,22 @@ impl Render for AstesiaWorkspace {
                     .child(Label::new(status.summary).size(LabelSize::XSmall))
                     .child(div().flex_1())
                     .child(
+                        Button::new("open-task-center", text(language, "任务", "Tasks"))
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Transparent)
+                            .on_click(cx.listener(|workspace, _, window, cx| {
+                                workspace.open_task_center(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("open-mcp-service", "MCP")
+                            .size(ButtonSize::Compact)
+                            .style(ButtonStyle::Transparent)
+                            .on_click(cx.listener(|workspace, _, window, cx| {
+                                workspace.open_mcp_service(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("open-command-palette", text(language, "命令", "Commands"))
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Transparent)
