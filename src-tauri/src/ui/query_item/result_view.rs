@@ -194,16 +194,11 @@ impl QueryItem {
         }
         let Some(result) = self.state.active_result() else {
             let message = match self.state.target() {
-                Some(target)
-                    if target.db_type.capabilities().sql
-                        || target.db_type == crate::db::DbType::Redis =>
-                {
-                    text(
-                        language,
-                        "执行查询后，结果会显示在这里",
-                        "Query results will appear here",
-                    )
-                }
+                Some(target) if supports_query_execution(target.db_type) => text(
+                    language,
+                    "执行查询后，结果会显示在这里",
+                    "Query results will appear here",
+                ),
                 Some(_) => text(
                     language,
                     "当前引擎不支持 SQL 查询",

@@ -62,7 +62,7 @@ impl TaskCenterItem {
         let active = self
             .tasks
             .iter()
-            .filter(|task| !is_terminal(&task.status))
+            .filter(|task| !task.status.is_terminal())
             .count();
         if active == 0 {
             "Tasks".to_string()
@@ -160,7 +160,7 @@ impl Render for TaskCenterItem {
                 .overflow_y_scroll()
                 .children(self.tasks.iter().enumerate().map(|(index, task)| {
                     let id = task.id.clone();
-                    let terminal = is_terminal(&task.status);
+                    let terminal = task.status.is_terminal();
                     let progress = (task.progress.clamp(0.0, 1.0) * 100.0).round() as u32;
                     v_flex()
                         .id(("background-task-row", index))
@@ -268,13 +268,6 @@ impl Render for TaskCenterItem {
             })
             .child(content)
     }
-}
-
-fn is_terminal(status: &TaskStatus) -> bool {
-    matches!(
-        status,
-        TaskStatus::Completed | TaskStatus::Partial | TaskStatus::Failed | TaskStatus::Cancelled
-    )
 }
 
 fn status_label(status: &TaskStatus, language: crate::platform::UiLanguage) -> &'static str {

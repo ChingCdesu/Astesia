@@ -213,7 +213,6 @@ impl DatabaseDriver for RedisDriver {
             .await?;
         if key_type == "none" {
             return Ok(RedisKeySnapshot {
-                key: key.to_string(),
                 ttl_seconds: None,
                 value: RedisValue::Missing,
             });
@@ -263,11 +262,7 @@ impl DatabaseDriver for RedisDriver {
             ),
             other => anyhow::bail!("Unsupported Redis key type {other}"),
         };
-        Ok(RedisKeySnapshot {
-            key: key.to_string(),
-            ttl_seconds,
-            value,
-        })
+        Ok(RedisKeySnapshot { ttl_seconds, value })
     }
 
     async fn mutate_redis_key(

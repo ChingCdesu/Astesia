@@ -34,9 +34,7 @@ pub(crate) use connection_workspace::{
     CatalogKind, CatalogLoadResult, CatalogSection, DatabaseCatalogSnapshot,
 };
 pub use connections::ConnectionOutcome;
-pub(crate) use document_service::{
-    DocumentLoadRequest, DocumentQuery, DocumentService, DocumentSession, DocumentSessionStatus,
-};
+pub(crate) use document_service::{DocumentService, DocumentSession, DocumentSessionStatus};
 pub use export_service::{
     CsvOptions, ExportFormat, ExportService, ExportSource, JsonLayout, JsonOptions, XlsxOptions,
 };

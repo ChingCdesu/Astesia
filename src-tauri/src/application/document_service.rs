@@ -9,7 +9,6 @@ pub(crate) struct DocumentQuery {
     pub(crate) page: u32,
     pub(crate) page_size: u32,
     pub(crate) filter: Option<Value>,
-    pub(crate) filter_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +74,6 @@ impl DocumentSession {
                 page: 1,
                 page_size,
                 filter: None,
-                filter_text: String::new(),
             },
             next_generation: 0,
             state: DocumentState::Idle,
@@ -171,7 +169,6 @@ impl DocumentSession {
             return Ok(false);
         }
         self.query.filter = filter;
-        self.query.filter_text = filter_text;
         self.query.page = 1;
         Ok(true)
     }
