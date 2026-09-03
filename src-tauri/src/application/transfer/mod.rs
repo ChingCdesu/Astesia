@@ -137,6 +137,7 @@ impl TransferEffects {
 }
 
 use crate::tasks::{TaskManager, TaskOutcome};
+use crate::{application::QueryTarget, connection_runtime::DriverHandle};
 
 use super::connections::ConnectionManager;
 
@@ -149,6 +150,24 @@ pub struct TransferService {
 impl TransferService {
     pub(super) fn new(connections: ConnectionManager, tasks: TaskManager) -> Self {
         Self { connections, tasks }
+    }
+
+    async fn driver_for_target(&self, target: &QueryTarget) -> Result<DriverHandle, String> {
+        let (driver, generation) = self
+            .connections
+            .driver_session(&target.connection_id)
+            .await?;
+        if generation != target.session_generation {
+            return Err(format!(
+                "Database Session changed (expected {}, found {generation})",
+                target.session_generation
+            ));
+        }
+        let db_type = driver.lock_active().await?.db_type();
+        if db_type != target.db_type {
+            return Err("Database Session engine changed".to_string());
+        }
+        Ok(driver)
     }
 }
 

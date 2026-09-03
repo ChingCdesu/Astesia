@@ -7,8 +7,8 @@ use mongodb::{
 use std::time::Instant;
 
 use super::{
-    bytes_to_hex, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, IndexInfo, QueryResult,
-    TableInfo, TableRef,
+    bytes_to_hex, ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, DocumentPage, IndexInfo,
+    QueryResult, TableInfo, TableRef,
 };
 
 pub struct MongoDriver {
@@ -276,6 +276,46 @@ impl DatabaseDriver for MongoDriver {
         }
         let elapsed = start.elapsed().as_millis() as u64;
         self.docs_to_result(docs, elapsed)
+    }
+
+    async fn get_documents(
+        &self,
+        database: &str,
+        collection: &TableRef,
+        filter: Option<serde_json::Value>,
+        page: u32,
+        page_size: u32,
+    ) -> anyhow::Result<DocumentPage> {
+        anyhow::ensure!(page > 0, "MongoDB page numbers start at 1");
+        anyhow::ensure!(page_size > 0, "MongoDB page size must be positive");
+        let client = self.client()?;
+        let collection = client
+            .database(database)
+            .collection::<mongodb::bson::Document>(collection.name());
+        let filter = match filter {
+            None => mongodb::bson::doc! {},
+            Some(serde_json::Value::Object(fields)) => {
+                mongodb::bson::to_document(&serde_json::Value::Object(fields))?
+            }
+            Some(_) => anyhow::bail!("MongoDB filter must be a JSON object"),
+        };
+        let total_documents = collection.count_documents(filter.clone()).await?;
+        let skip = u64::from(page - 1)
+            .checked_mul(u64::from(page_size))
+            .ok_or_else(|| anyhow::anyhow!("MongoDB page offset is too large"))?;
+        let options = mongodb::options::FindOptions::builder()
+            .skip(skip)
+            .limit(i64::from(page_size))
+            .build();
+        let mut cursor = collection.find(filter).with_options(options).await?;
+        let mut documents = Vec::new();
+        while let Some(document) = cursor.try_next().await? {
+            documents.push(mongodb::bson::Bson::Document(document).into_relaxed_extjson());
+        }
+        Ok(DocumentPage {
+            documents,
+            total_documents,
+        })
     }
 
     fn db_type(&self) -> DbType {

@@ -19,7 +19,7 @@ use crate::application::{
     QueryExecutionScope, QueryFileCompletion, QueryFileError, QueryFileRequest, QueryOperation,
     QueryTarget, QueryWorkspaceState,
 };
-use crate::db::{ExplainMode, StatementResult};
+use crate::db::{DbType, ExplainMode, StatementResult};
 
 use super::localization::text;
 use super::shell::ShellSettings;
@@ -166,7 +166,12 @@ impl QueryItem {
         cx: &mut Context<Self>,
     ) {
         let should_focus = target.is_some();
-        self.completion.set_target(target.clone());
+        self.completion.set_target(
+            target
+                .as_ref()
+                .filter(|target| target.db_type.capabilities().sql)
+                .cloned(),
+        );
         if self.state.set_target(target) {
             cx.notify();
         }
@@ -554,6 +559,7 @@ impl QueryItem {
         let application = self.application.clone();
         let connection_id = request.target.connection_id.clone();
         let database = request.target.database.clone();
+        let redis_target = request.target.clone();
         let operation = request.operation.clone();
         let language = self.settings.read(cx).language();
         let execution = gpui_tokio::Tokio::spawn(cx, async move {
@@ -569,6 +575,11 @@ impl QueryItem {
                     .explain(&connection_id, &database, statement)
                     .await
                     .map(|result| vec![result]),
+                QueryOperation::Redis { source, command } => application
+                    .redis()
+                    .execute(&redis_target, command)
+                    .await
+                    .map(|result| vec![StatementResult::from_query_result(source, result)]),
             }
         });
         cx.spawn(async move |item, cx| {
@@ -628,7 +639,9 @@ impl Render for QueryItem {
             )
         });
         let target = self.state.target();
-        let can_execute = target.is_some_and(|target| target.db_type.capabilities().sql);
+        let can_execute = target.is_some_and(|target| {
+            target.db_type.capabilities().sql || target.db_type == DbType::Redis
+        });
         let can_explain =
             target.is_some_and(|target| target.db_type.capabilities().explain != ExplainMode::None);
         let target_label = target

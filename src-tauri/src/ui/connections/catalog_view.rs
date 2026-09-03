@@ -1,6 +1,7 @@
 use gpui::{rgb, FontWeight};
 use zed_ui::{prelude::*, Tooltip};
 
+use super::engine_workflows::{DraggedTableCopy, DraggedTableCopyPreview};
 use super::ConnectionProfilesPanel;
 use crate::application::connection_workspace::{
     CatalogSection, DatabaseCatalogSnapshot, ObjectListState,
@@ -68,7 +69,13 @@ impl ConnectionProfilesPanel {
                 text(language, "未发现表", "No tables found"),
             ),
         };
-        let primary_rows = match &catalog.tables {
+        let primary_section = self
+            .redis_search_result
+            .as_ref()
+            .filter(|(search_target, _)| search_target == target)
+            .map(|(_, result)| CatalogSection::from_result(result.clone()))
+            .unwrap_or_else(|| catalog.tables.clone());
+        let primary_rows = match &primary_section {
             CatalogSection::Unsupported => Vec::new(),
             CatalogSection::Loading => vec![
                 self.catalog_section_heading_with_create(
@@ -117,9 +124,23 @@ impl ConnectionProfilesPanel {
                         let rename_name = name.clone();
                         let drop_target = target.clone();
                         let drop_name = name.clone();
+                        let copy_target = target.clone();
+                        let copy_table = object.reference.clone();
+                        let dragged_table = DraggedTableCopy {
+                            source: target.clone(),
+                            table: object.reference.clone(),
+                        };
+                        let drag_label = name.clone();
+                        let backup_target = target.clone();
+                        let backup_table = object.reference.clone();
                         let structure_label = text(language, "查看表结构", "View table structure");
                         let data_name = name.clone();
                         let supports_sql = target.db_type.capabilities().sql;
+                        let supports_browse = supports_sql
+                            || matches!(
+                                target.db_type,
+                                crate::db::DbType::MongoDB | crate::db::DbType::Redis
+                            );
                         h_flex()
                             .id(format!(
                                 "schema-object-{}-{}-{index}",
@@ -127,7 +148,7 @@ impl ConnectionProfilesPanel {
                             ))
                             .min_w_0()
                             .gap_1p5()
-                            .when(supports_sql, |element| {
+                            .when(supports_browse, |element| {
                                 element.child(
                                     h_flex()
                                         .id(format!("browse-table-data-{index}"))
@@ -155,7 +176,7 @@ impl ConnectionProfilesPanel {
                                         })
                                         .on_action(cx.listener(
                                             move |panel, _: &menu::Confirm, _, cx| {
-                                                panel.request_table_data(
+                                                panel.request_primary_data(
                                                     target_for_action.clone(),
                                                     table_for_action.clone(),
                                                     cx,
@@ -163,7 +184,7 @@ impl ConnectionProfilesPanel {
                                             },
                                         ))
                                         .on_click(cx.listener(move |panel, _, _, cx| {
-                                            panel.request_table_data(
+                                            panel.request_primary_data(
                                                 target_for_click.clone(),
                                                 table_for_click.clone(),
                                                 cx,
@@ -185,7 +206,7 @@ impl ConnectionProfilesPanel {
                                         }),
                                 )
                             })
-                            .when(!supports_sql, |element| {
+                            .when(!supports_browse, |element| {
                                 element
                                     .px_1()
                                     .py_0p5()
@@ -217,6 +238,56 @@ impl ConnectionProfilesPanel {
                                             panel.request_table_structure(
                                                 structure_target.clone(),
                                                 structure_table.clone(),
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(
+                                target.db_type.capabilities().table_copy
+                                    != crate::db::TableCopyMode::None,
+                                |element| {
+                                    element.child(
+                                        IconButton::new(
+                                            format!("copy-table-{index}"),
+                                            IconName::Copy,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(text(
+                                            language,
+                                            "复制表",
+                                            "Copy table",
+                                        )))
+                                        .on_click(
+                                            cx.listener(move |panel, _, _, cx| {
+                                                panel.copy_table(
+                                                    copy_target.clone(),
+                                                    copy_table.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                },
+                            )
+                            .when(target.db_type.capabilities().backup, |element| {
+                                element.child(
+                                    IconButton::new(
+                                        format!("backup-table-{index}"),
+                                        IconName::Download,
+                                    )
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(Tooltip::text(text(
+                                        language,
+                                        "备份此表",
+                                        "Back up this table",
+                                    )))
+                                    .on_click(cx.listener(
+                                        move |panel, _, _, cx| {
+                                            panel.request_backup(
+                                                backup_target.clone(),
+                                                Some(vec![backup_table.clone()]),
                                                 cx,
                                             );
                                         },
@@ -281,6 +352,17 @@ impl ConnectionProfilesPanel {
                                     )
                                 },
                             )
+                            .when(
+                                target.db_type.capabilities().table_copy
+                                    != crate::db::TableCopyMode::None,
+                                |element| {
+                                    element.on_drag(dragged_table, move |_, _, _, cx| {
+                                        cx.new(|_| DraggedTableCopyPreview {
+                                            label: drag_label.clone(),
+                                        })
+                                    })
+                                },
+                            )
                             .into_any_element()
                     }));
                     rows
@@ -316,6 +398,46 @@ impl ConnectionProfilesPanel {
                     .child(
                         h_flex()
                             .gap_0p5()
+                            .when(target.db_type.capabilities().backup, |element| {
+                                let backup_target = target.clone();
+                                element.child(
+                                    IconButton::new(
+                                        format!("backup-database-{}", target.database),
+                                        IconName::Download,
+                                    )
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(Tooltip::text(text(
+                                        language,
+                                        "备份数据库",
+                                        "Back up database",
+                                    )))
+                                    .on_click(cx.listener(
+                                        move |panel, _, _, cx| {
+                                            panel.request_backup(backup_target.clone(), None, cx);
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(target.db_type.capabilities().restore, |element| {
+                                let restore_target = target.clone();
+                                element.child(
+                                    IconButton::new(
+                                        format!("restore-database-{}", target.database),
+                                        IconName::ArrowUp,
+                                    )
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(Tooltip::text(text(
+                                        language,
+                                        "恢复数据库",
+                                        "Restore database",
+                                    )))
+                                    .on_click(cx.listener(
+                                        move |panel, _, _, cx| {
+                                            panel.request_restore(restore_target.clone(), cx);
+                                        },
+                                    )),
+                                )
+                            })
                             .when(
                                 target.db_type.capabilities().database_management,
                                 |element| {
@@ -371,6 +493,34 @@ impl ConnectionProfilesPanel {
                             ),
                     ),
             )
+            .when(target.db_type == crate::db::DbType::Redis, |element| {
+                let search_target = target.clone();
+                element.child(
+                    h_flex()
+                        .gap_1()
+                        .pr_1()
+                        .child(div().flex_1().child(self.redis_search.clone()))
+                        .child(
+                            Button::new(
+                                format!("search-redis-keys-{}", target.database),
+                                text(language, "扫描", "Scan"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .loading(self.redis_search_busy)
+                            .disabled(self.redis_search_busy)
+                            .on_click(cx.listener(
+                                move |panel, event, window, cx| {
+                                    panel.search_redis_keys(
+                                        search_target.clone(),
+                                        event,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        ),
+                )
+            })
             .children(primary_rows)
             .children(self.render_mutable_catalog_text_section(
                 target,

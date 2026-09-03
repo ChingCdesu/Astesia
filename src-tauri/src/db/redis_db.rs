@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use super::{
-    ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, QueryResult, TableInfo, TableRef,
+    ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, QueryResult, RedisKeySnapshot,
+    RedisListSide, RedisMutation, RedisValue, TableInfo, TableRef,
 };
 
 const SCAN_BATCH_SIZE: usize = 500;
@@ -90,25 +91,7 @@ impl DatabaseDriver for RedisDriver {
 
     async fn get_tables(&self, database: &str) -> anyhow::Result<Vec<TableInfo>> {
         let mut conn = self.selected_connection(database).await?;
-        let mut keys = HashSet::new();
-        let mut cursor = 0_u64;
-        loop {
-            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("*")
-                .arg("COUNT")
-                .arg(SCAN_BATCH_SIZE)
-                .query_async(&mut conn)
-                .await?;
-            keys.extend(batch);
-            if next_cursor == 0 {
-                break;
-            }
-            cursor = next_cursor;
-        }
-        let mut keys = keys.into_iter().collect::<Vec<_>>();
-        keys.sort_unstable();
+        let keys = scan_keys(&mut conn, "*").await?;
         Ok(keys
             .into_iter()
             .map(|name| TableInfo {
@@ -215,6 +198,170 @@ impl DatabaseDriver for RedisDriver {
             .query_async::<u64>(&mut connection)
             .await?;
         Ok(deleted)
+    }
+
+    async fn scan_redis_keys(&self, database: &str, pattern: &str) -> anyhow::Result<Vec<String>> {
+        let mut conn = self.selected_connection(database).await?;
+        scan_keys(&mut conn, pattern).await
+    }
+
+    async fn get_redis_key(&self, database: &str, key: &str) -> anyhow::Result<RedisKeySnapshot> {
+        let mut connection = self.selected_connection(database).await?;
+        let key_type: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(&mut connection)
+            .await?;
+        if key_type == "none" {
+            return Ok(RedisKeySnapshot {
+                key: key.to_string(),
+                ttl_seconds: None,
+                value: RedisValue::Missing,
+            });
+        }
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query_async(&mut connection)
+            .await?;
+        let ttl_seconds = u64::try_from(ttl).ok();
+        let value = match key_type.as_str() {
+            "string" => RedisValue::String(
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?,
+            ),
+            "hash" => RedisValue::Hash(
+                redis::cmd("HGETALL")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?,
+            ),
+            "list" => RedisValue::List(
+                redis::cmd("LRANGE")
+                    .arg(key)
+                    .arg(0)
+                    .arg(-1)
+                    .query_async(&mut connection)
+                    .await?,
+            ),
+            "set" => {
+                let mut values: Vec<String> = redis::cmd("SMEMBERS")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?;
+                values.sort();
+                RedisValue::Set(values)
+            }
+            "zset" => RedisValue::SortedSet(
+                redis::cmd("ZRANGE")
+                    .arg(key)
+                    .arg(0)
+                    .arg(-1)
+                    .arg("WITHSCORES")
+                    .query_async(&mut connection)
+                    .await?,
+            ),
+            other => anyhow::bail!("Unsupported Redis key type {other}"),
+        };
+        Ok(RedisKeySnapshot {
+            key: key.to_string(),
+            ttl_seconds,
+            value,
+        })
+    }
+
+    async fn mutate_redis_key(
+        &self,
+        database: &str,
+        key: &str,
+        mutation: RedisMutation,
+    ) -> anyhow::Result<u64> {
+        let mut connection = self.selected_connection(database).await?;
+        match mutation {
+            RedisMutation::SetString { value, ttl_seconds } => {
+                set_key_command(key, &value, ttl_seconds)
+                    .query_async::<()>(&mut connection)
+                    .await?;
+                Ok(1)
+            }
+            RedisMutation::HashSet { field, value } => redis::cmd("HSET")
+                .arg(key)
+                .arg(field)
+                .arg(value)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::HashDelete { field } => redis::cmd("HDEL")
+                .arg(key)
+                .arg(field)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::ListPush { side, value } => redis::cmd(match side {
+                RedisListSide::Left => "LPUSH",
+                RedisListSide::Right => "RPUSH",
+            })
+            .arg(key)
+            .arg(value)
+            .query_async(&mut connection)
+            .await
+            .map_err(Into::into),
+            RedisMutation::ListRemove { count, value } => redis::cmd("LREM")
+                .arg(key)
+                .arg(count)
+                .arg(value)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::SetAdd { member } => redis::cmd("SADD")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::SetRemove { member } => redis::cmd("SREM")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::SortedSetAdd { member, score } => redis::cmd("ZADD")
+                .arg(key)
+                .arg(score)
+                .arg(member)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::SortedSetRemove { member } => redis::cmd("ZREM")
+                .arg(key)
+                .arg(member)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+            RedisMutation::Delete => delete_key_command(key)
+                .query_async(&mut connection)
+                .await
+                .map_err(Into::into),
+        }
+    }
+
+    async fn execute_redis_command(
+        &self,
+        database: &str,
+        arguments: Vec<String>,
+    ) -> anyhow::Result<QueryResult> {
+        let mut connection = self.selected_connection(database).await?;
+        let Some((name, arguments)) = arguments.split_first() else {
+            return Ok(QueryResult::default());
+        };
+        let started = Instant::now();
+        let mut command = redis::cmd(name);
+        command.arg(arguments);
+        let value: redis::Value = command.query_async(&mut connection).await?;
+        Ok(redis_command_result(
+            value,
+            started.elapsed().as_millis() as u64,
+        ))
     }
 
     async fn get_table_data(
@@ -359,6 +506,48 @@ fn delete_key_command(key: &str) -> redis::Cmd {
     let mut command = redis::cmd("DEL");
     command.arg(key);
     command
+}
+
+async fn scan_keys(
+    connection: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut keys = HashSet::new();
+    let mut cursor = 0_u64;
+    loop {
+        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(SCAN_BATCH_SIZE)
+            .query_async(connection)
+            .await?;
+        keys.extend(batch);
+        if next_cursor == 0 {
+            break;
+        }
+        cursor = next_cursor;
+    }
+    let mut keys = keys.into_iter().collect::<Vec<_>>();
+    keys.sort_unstable();
+    Ok(keys)
+}
+
+fn redis_command_result(value: redis::Value, execution_time_ms: u64) -> QueryResult {
+    QueryResult {
+        columns: vec![ColumnInfo {
+            name: "result".to_string(),
+            data_type: "Redis".to_string(),
+            nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            comment: None,
+        }],
+        rows: vec![vec![redis_value_to_json(&value)]],
+        affected_rows: 0,
+        execution_time_ms,
+    }
 }
 
 fn redis_value_to_json(value: &redis::Value) -> serde_json::Value {

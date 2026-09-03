@@ -227,6 +227,72 @@ pub struct UserInfo {
     pub host: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DocumentPage {
+    pub(crate) documents: Vec<serde_json::Value>,
+    pub(crate) total_documents: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedisListSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RedisValue {
+    Missing,
+    String(String),
+    Hash(Vec<(String, String)>),
+    List(Vec<String>),
+    Set(Vec<String>),
+    SortedSet(Vec<(String, f64)>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RedisKeySnapshot {
+    pub(crate) key: String,
+    pub(crate) ttl_seconds: Option<u64>,
+    pub(crate) value: RedisValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RedisMutation {
+    SetString {
+        value: String,
+        ttl_seconds: Option<u64>,
+    },
+    HashSet {
+        field: String,
+        value: String,
+    },
+    HashDelete {
+        field: String,
+    },
+    ListPush {
+        side: RedisListSide,
+        value: String,
+    },
+    ListRemove {
+        count: i64,
+        value: String,
+    },
+    SetAdd {
+        member: String,
+    },
+    SetRemove {
+        member: String,
+    },
+    SortedSetAdd {
+        member: String,
+        score: f64,
+    },
+    SortedSetRemove {
+        member: String,
+    },
+    Delete,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsupportedFeature {
     pub engine: DbType,
@@ -327,6 +393,41 @@ pub trait DatabaseDriver: Send + Sync {
     }
     async fn delete_key(&self, _database: &str, _key: &str) -> anyhow::Result<u64> {
         Err(UnsupportedFeature::new(self.db_type(), "delete key").into())
+    }
+    async fn get_documents(
+        &self,
+        _database: &str,
+        _collection: &TableRef,
+        _filter: Option<serde_json::Value>,
+        _page: u32,
+        _page_size: u32,
+    ) -> anyhow::Result<DocumentPage> {
+        Err(UnsupportedFeature::new(self.db_type(), "document browsing").into())
+    }
+    async fn scan_redis_keys(
+        &self,
+        _database: &str,
+        _pattern: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        Err(UnsupportedFeature::new(self.db_type(), "Redis key scanning").into())
+    }
+    async fn get_redis_key(&self, _database: &str, _key: &str) -> anyhow::Result<RedisKeySnapshot> {
+        Err(UnsupportedFeature::new(self.db_type(), "Redis key inspection").into())
+    }
+    async fn mutate_redis_key(
+        &self,
+        _database: &str,
+        _key: &str,
+        _mutation: RedisMutation,
+    ) -> anyhow::Result<u64> {
+        Err(UnsupportedFeature::new(self.db_type(), "Redis key mutation").into())
+    }
+    async fn execute_redis_command(
+        &self,
+        _database: &str,
+        _arguments: Vec<String>,
+    ) -> anyhow::Result<QueryResult> {
+        Err(UnsupportedFeature::new(self.db_type(), "Redis commands").into())
     }
     fn db_type(&self) -> DbType;
     async fn get_views(&self, _database: &str) -> anyhow::Result<Vec<ViewInfo>> {

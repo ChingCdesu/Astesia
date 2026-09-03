@@ -223,7 +223,7 @@ impl TaskManager {
             if entry.is_terminal() || entry.task.status == TaskStatus::Cancelling {
                 return;
             }
-            entry.task.progress = progress.clamp(0.0, 1.0);
+            entry.task.progress = entry.task.progress.max(progress.clamp(0.0, 1.0));
             entry.task.message = message;
             UiEvent::TaskProgress {
                 id: id.to_string(),
@@ -334,6 +334,38 @@ mod tests {
         assert_eq!(task.progress, 1.0);
         assert_eq!(task.message, "4 succeeded, 1 failed");
         assert!(task.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn progress_events_never_move_backwards() {
+        let events = UiEventBus::new();
+        let mut receiver = events.subscribe();
+        let manager = TaskManager::new(Arc::new(events));
+
+        let id = manager
+            .spawn(
+                NewTask {
+                    name: "Backup".to_string(),
+                    initial_message: "Starting".to_string(),
+                },
+                |task| async move {
+                    task.progress(0.7, "Later").await;
+                    task.progress(0.2, "Delayed update").await;
+                    TaskOutcome::Completed("Done".to_string())
+                },
+            )
+            .await;
+
+        let _ = receiver.recv().await.expect("initial event");
+        let _ = receiver.recv().await.expect("first progress event");
+        assert_eq!(
+            receiver.recv().await.expect("monotonic progress event"),
+            UiEvent::TaskProgress {
+                id,
+                progress: 0.7,
+                message: "Delayed update".to_string(),
+            }
+        );
     }
 
     #[tokio::test]

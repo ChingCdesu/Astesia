@@ -380,18 +380,13 @@ impl Render for DataGridItem {
                             .disabled(!selection_available)
                             .on_click(cx.listener(Self::copy_selection_with_headers_click)),
                         )
-                        .when(self.state.target().db_type == DbType::ClickHouse, |bar| {
-                            bar.child(
-                                Button::new(
-                                    "export-clickhouse-grid-csv",
-                                    text(language, "导出 CSV", "Export CSV"),
-                                )
+                        .child(
+                            Button::new("export-grid-data", text(language, "导出", "Export"))
                                 .size(ButtonSize::Compact)
                                 .loading(export_in_progress)
                                 .disabled(export_in_progress || page.is_none())
-                                .on_click(cx.listener(Self::export_clickhouse_csv)),
-                            )
-                        })
+                                .on_click(cx.listener(Self::export_data)),
+                        )
                         .when(editable, |bar| {
                             bar.child(
                                 Button::new(

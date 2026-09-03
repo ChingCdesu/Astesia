@@ -2,7 +2,7 @@ mod execute;
 mod plan;
 mod render;
 
-use crate::{db::TableRef, tasks::NewTask};
+use crate::{application::QueryTarget, db::TableRef, tasks::NewTask};
 
 use self::{execute::execute_backup, plan::BackupPlan};
 use super::{BackupContent, TransferService};
@@ -34,14 +34,13 @@ pub enum DropTableMode {
 impl TransferService {
     pub async fn start_backup(
         &self,
-        connection_id: String,
-        database: String,
+        target: QueryTarget,
         options: BackupOptions,
     ) -> Result<String, String> {
         options.validate()?;
 
-        let driver = self.connections.driver(&connection_id).await?;
-        let plan = BackupPlan::discover(&driver, database, options).await?;
+        let driver = self.driver_for_target(&target).await?;
+        let plan = BackupPlan::discover(&driver, target.database, options).await?;
         let task_name = format!("备份 {}", plan.database);
 
         let task_id = self

@@ -2,6 +2,7 @@ mod catalog_service;
 mod connection_service;
 pub(crate) mod connection_workspace;
 mod connections;
+mod document_service;
 #[cfg(test)]
 mod engine_smoke_tests;
 mod export_service;
@@ -18,6 +19,7 @@ mod query_file;
 mod query_result_selection;
 mod query_service;
 mod query_workspace;
+mod redis_service;
 mod table_structure;
 mod transfer;
 
@@ -32,6 +34,9 @@ pub(crate) use connection_workspace::{
     CatalogKind, CatalogLoadResult, CatalogSection, DatabaseCatalogSnapshot,
 };
 pub use connections::ConnectionOutcome;
+pub(crate) use document_service::{
+    DocumentLoadRequest, DocumentQuery, DocumentService, DocumentSession, DocumentSessionStatus,
+};
 pub use export_service::{
     CsvOptions, ExportFormat, ExportService, ExportSource, JsonLayout, JsonOptions, XlsxOptions,
 };
@@ -62,6 +67,9 @@ pub(crate) use query_file::{QueryFileCompletion, QueryFileError, QueryFileReques
 pub use query_service::QueryService;
 pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
 pub(crate) use query_workspace::{QueryExecutionRequest, QueryOperation, QueryWorkspaceState};
+pub(crate) use redis_service::{
+    RedisCommand, RedisKeySnapshot, RedisListSide, RedisMutation, RedisService, RedisValue,
+};
 pub(crate) use table_structure::{
     TableStructureLoadError, TableStructureSnapshot, TableStructureState, TableStructureStatus,
 };
@@ -74,7 +82,7 @@ use crate::connection_repository::{
 };
 use crate::mcp_runtime::McpRuntime;
 use crate::mcp_sync_server::McpSyncRegistry;
-use crate::platform::{SidecarHostHandle, UiEvent, UiEventBus};
+use crate::platform::{ProcessSidecarHost, SidecarHostHandle, UiEvent, UiEventBus};
 use crate::tasks::TaskManager;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -82,6 +90,7 @@ use tokio::sync::broadcast;
 pub struct Application {
     catalog: CatalogService,
     connections: ConnectionService,
+    documents: DocumentService,
     exports: ExportService,
     grids: GridService,
     mutations: MutationService,
@@ -89,6 +98,7 @@ pub struct Application {
     performance: PerformanceService,
     query_completions: QueryCompletionService,
     queries: QueryService,
+    redis: RedisService,
     transfers: TransferService,
     mcp: Option<McpRuntime>,
     task_manager: TaskManager,
@@ -101,8 +111,10 @@ impl Application {
     }
 
     pub fn new() -> Result<Self, ConnectionRepositoryError> {
-        Ok(Self::with_repository(
-            SharedConnectionRepository::new_default()?,
+        let repository = SharedConnectionRepository::new_default()?;
+        Ok(Self::with_repository_and_sidecar(
+            repository,
+            Arc::new(ProcessSidecarHost::discover()),
         ))
     }
 
@@ -132,13 +144,15 @@ impl Application {
         Self {
             catalog,
             connections: ConnectionService::new(connection_manager.clone(), mcp_registry),
-            exports: ExportService::new(queries.clone()),
+            documents: DocumentService::new(connection_manager.clone()),
+            exports: ExportService::new(queries.clone(), task_manager.clone()),
             grids: GridService::new(connection_manager.clone()),
             mutations: MutationService::new(connection_manager.clone()),
             objects: ObjectService::new(connection_manager.clone()),
             performance: PerformanceService::new(connection_manager.clone()),
             query_completions,
             queries,
+            redis: RedisService::new(connection_manager.clone()),
             transfers: TransferService::new(connection_manager, task_manager.clone()),
             mcp,
             task_manager,
@@ -158,8 +172,16 @@ impl Application {
         &self.exports
     }
 
+    pub(crate) fn documents(&self) -> &DocumentService {
+        &self.documents
+    }
+
     pub fn queries(&self) -> &QueryService {
         &self.queries
+    }
+
+    pub(crate) fn redis(&self) -> &RedisService {
+        &self.redis
     }
 
     pub(crate) fn grids(&self) -> &GridService {

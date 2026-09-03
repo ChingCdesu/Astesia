@@ -204,20 +204,6 @@ impl BackupRenderer {
 
     fn reset_auto_increment_statements(&self, table: &BackupTable) -> SqlRenderResult<Vec<String>> {
         match self.db_type {
-            DbType::MySQL => {
-                let quoted_table = self.quote_export_identifier(table.reference.name())?;
-                let alter_prefix = self.dialect.literal(&serde_json::Value::String(format!(
-                    "ALTER TABLE {quoted_table} AUTO_INCREMENT = "
-                )))?;
-                Ok(vec![format!(
-                    "-- Reset auto-increment for {quoted_table}\n\
-                     SET @max_id = (SELECT COALESCE(MAX(id), 0) FROM {quoted_table});\n\
-                     SET @sql = CONCAT({alter_prefix}, @max_id + 1);\n\
-                     PREPARE stmt FROM @sql;\n\
-                     EXECUTE stmt;\n\
-                     DEALLOCATE PREPARE stmt;"
-                )])
-            }
             DbType::PostgreSQL => {
                 let qualified_table = self.quote_postgres_table(table)?;
                 let select_template = format!("SELECT COALESCE(MAX(%I), 0) FROM {qualified_table}")

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use editor::{Editor, EditorEvent};
 use gpui::{
@@ -11,14 +11,14 @@ use serde_json::Value;
 use zed_ui::{prelude::*, Indicator, Tooltip};
 
 use crate::application::{
-    Application, CsvOptions, ExportFormat, ExportSource, GridCell, GridCellInputError,
-    GridCellSelection, GridColumn, GridColumnKind, GridEditability, GridPage, GridRowSelectionMode,
-    GridSaveFailure, GridSaveOutcome, GridSession, GridSessionError, GridSessionStatus, GridSort,
-    GridSortDirection, QueryTarget, DEFAULT_GRID_PAGE_SIZE,
+    Application, GridCell, GridCellInputError, GridCellSelection, GridColumn, GridColumnKind,
+    GridEditability, GridPage, GridRowSelectionMode, GridSaveFailure, GridSaveOutcome, GridSession,
+    GridSessionError, GridSessionStatus, GridSort, GridSortDirection, QueryTarget,
+    DEFAULT_GRID_PAGE_SIZE,
 };
 #[cfg(test)]
 use crate::db::ColumnInfo;
-use crate::db::{DbType, TableRef};
+use crate::db::TableRef;
 use crate::platform::UiLanguage;
 
 use super::localization::text;
@@ -164,6 +164,13 @@ impl GridNotice {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GridExportFormat {
+    Csv,
+    Json,
+    Xlsx,
+}
+
 pub(super) struct DataGridItem {
     application: Arc<Application>,
     state: GridSession,
@@ -259,6 +266,7 @@ impl DataGridItem {
 }
 
 mod editing;
+mod export;
 mod grid_view;
 mod interactions;
 mod presentation;

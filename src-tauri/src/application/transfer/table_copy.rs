@@ -1,3 +1,4 @@
+use crate::application::QueryTarget;
 use crate::connection_runtime::DriverHandle;
 use crate::db::{DbType, SqlDialect, TableCopyMode, TableRef, UnsupportedFeature};
 use crate::tasks::{NewTask, TaskContext, TaskOutcome};
@@ -17,17 +18,13 @@ fn copy_outcome(effects: TransferEffects) -> TaskOutcome {
 impl TransferService {
     pub async fn start_table_copy(
         &self,
-        source_connection_id: String,
-        source_database: String,
+        source_target: QueryTarget,
         source_table: TableRef,
-        target_connection_id: String,
-        target_database: String,
+        target_target: QueryTarget,
         options: CopyOptions,
     ) -> Result<String, String> {
-        let (source_driver_handle, target_driver_handle) = self
-            .connections
-            .driver_pair(&source_connection_id, &target_connection_id)
-            .await?;
+        let source_driver_handle = self.driver_for_target(&source_target).await?;
+        let target_driver_handle = self.driver_for_target(&target_target).await?;
 
         // Source and target may share a driver, so never hold both guards at once.
         let db_type = {
@@ -51,10 +48,10 @@ impl TransferService {
         let task_name = format!("复制表 {} → {}", source_table, options.new_table_name);
         let job = TableCopyJob {
             source_driver: source_driver_handle,
-            source_database,
+            source_database: source_target.database,
             source_table,
             target_driver: target_driver_handle,
-            target_database,
+            target_database: target_target.database,
             db_type,
             options,
         };

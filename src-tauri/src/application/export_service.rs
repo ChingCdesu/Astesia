@@ -1,7 +1,9 @@
 use rust_xlsxwriter::{Format, Workbook};
 use serde_json::Value;
 
-use super::QueryService;
+use crate::tasks::{NewTask, TaskManager, TaskOutcome};
+
+use super::{QueryService, QueryTarget};
 
 /// Where the rows to export come from.
 ///
@@ -56,11 +58,58 @@ pub enum ExportFormat {
 #[derive(Clone)]
 pub struct ExportService {
     queries: QueryService,
+    tasks: TaskManager,
 }
 
 impl ExportService {
-    pub(super) fn new(queries: QueryService) -> Self {
-        Self { queries }
+    pub(super) fn new(queries: QueryService, tasks: TaskManager) -> Self {
+        Self { queries, tasks }
+    }
+
+    pub(crate) async fn start_export(
+        &self,
+        target: QueryTarget,
+        source: ExportSource,
+        format: ExportFormat,
+        output_path: String,
+    ) -> Result<String, String> {
+        let service = self.clone();
+        let name = std::path::Path::new(&output_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("export")
+            .to_string();
+        Ok(self
+            .tasks
+            .spawn(
+                NewTask {
+                    name: format!("Export {name}"),
+                    initial_message: "Preparing export...".to_string(),
+                },
+                move |task| async move {
+                    if task.is_cancelled() {
+                        return TaskOutcome::Cancelled("Export cancelled".to_string());
+                    }
+                    task.progress(0.1, "Loading export rows...").await;
+                    let rows = match service.materialize_target(&target, source).await {
+                        Ok(rows) => rows,
+                        Err(error) => return TaskOutcome::Failed(error),
+                    };
+                    if task.is_cancelled() {
+                        return TaskOutcome::Cancelled(
+                            "Export cancelled before the output file was written".to_string(),
+                        );
+                    }
+                    let count = rows.1.len();
+                    task.progress(0.7, format!("Writing {count} row(s)..."))
+                        .await;
+                    match write_export(rows.0, rows.1, format, output_path).await {
+                        Ok(()) => TaskOutcome::Completed(format!("Exported {count} row(s)")),
+                        Err(error) => TaskOutcome::Failed(error),
+                    }
+                },
+            )
+            .await)
     }
 
     pub async fn export(
@@ -85,26 +134,54 @@ impl ExportService {
         };
 
         let count = rows.len();
-
-        // Serialization + file IO is CPU/IO bound — keep it off the async runtime.
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            match format {
-                ExportFormat::Csv(options) => {
-                    let body = write_csv(&headers, &rows, &options);
-                    std::fs::write(&output_path, body).map_err(|e| format!("写入文件失败: {}", e))
-                }
-                ExportFormat::Json(options) => {
-                    let body = write_json(&headers, &rows, &options)?;
-                    std::fs::write(&output_path, body).map_err(|e| format!("写入文件失败: {}", e))
-                }
-                ExportFormat::Xlsx(options) => write_xlsx(&headers, &rows, &options, &output_path),
-            }
-        })
-        .await
-        .map_err(|e| format!("导出任务失败: {}", e))??;
-
+        write_export(headers, rows, format, output_path).await?;
         Ok(count)
     }
+
+    async fn materialize_target(
+        &self,
+        target: &QueryTarget,
+        source: ExportSource,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>), String> {
+        match source {
+            ExportSource::Rows { columns, rows } => Ok((columns, rows)),
+            ExportSource::Sql { sql } => {
+                let result = self.queries.execute_target(target, &sql).await?;
+                Ok((
+                    result
+                        .columns
+                        .into_iter()
+                        .map(|column| column.name)
+                        .collect(),
+                    result.rows,
+                ))
+            }
+        }
+    }
+}
+
+async fn write_export(
+    headers: Vec<String>,
+    rows: Vec<Vec<Value>>,
+    format: ExportFormat,
+    output_path: String,
+) -> Result<(), String> {
+    // Serialization + file IO is CPU/IO bound — keep it off the async runtime.
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        match format {
+            ExportFormat::Csv(options) => {
+                let body = write_csv(&headers, &rows, &options);
+                std::fs::write(&output_path, body).map_err(|e| format!("写入文件失败: {}", e))
+            }
+            ExportFormat::Json(options) => {
+                let body = write_json(&headers, &rows, &options)?;
+                std::fs::write(&output_path, body).map_err(|e| format!("写入文件失败: {}", e))
+            }
+            ExportFormat::Xlsx(options) => write_xlsx(&headers, &rows, &options, &output_path),
+        }
+    })
+    .await
+    .map_err(|e| format!("导出任务失败: {}", e))?
 }
 
 fn csv_escape(s: &str, opts: &CsvOptions) -> String {

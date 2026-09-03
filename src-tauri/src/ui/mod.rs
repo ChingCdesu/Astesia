@@ -1,17 +1,22 @@
 mod command_palette;
 mod connection_profile_form;
 mod connections;
+mod copy_table_form;
 mod data_grid_item;
+mod document_item;
 mod engine_presentation;
 mod localization;
+mod mcp_service_item;
 mod object_definition_item;
 mod object_mutation_form;
 mod query_item;
+mod redis_item;
 mod shell;
 mod sql_completion;
 mod sql_language;
 mod table_structure_item;
 mod tabs;
+mod task_center_item;
 mod workspace;
 
 use std::sync::Arc;
