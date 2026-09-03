@@ -557,9 +557,7 @@ impl QueryItem {
         cx.notify();
 
         let application = self.application.clone();
-        let connection_id = request.target.connection_id.clone();
-        let database = request.target.database.clone();
-        let redis_target = request.target.clone();
+        let target = request.target.clone();
         let operation = request.operation.clone();
         let language = self.settings.read(cx).language();
         let execution = gpui_tokio::Tokio::spawn(cx, async move {
@@ -567,17 +565,17 @@ impl QueryItem {
                 QueryOperation::Statements(statements) => {
                     application
                         .queries()
-                        .execute_statements(&connection_id, &database, statements)
+                        .execute_statements(&target.connection_id, &target.database, statements)
                         .await
                 }
                 QueryOperation::Explain(statement) => application
                     .queries()
-                    .explain(&connection_id, &database, statement)
+                    .explain(&target.connection_id, &target.database, statement)
                     .await
                     .map(|result| vec![result]),
                 QueryOperation::Redis { source, command } => application
                     .redis()
-                    .execute(&redis_target, command)
+                    .execute(&target, command)
                     .await
                     .map(|result| vec![StatementResult::from_query_result(source, result)]),
             }
@@ -639,9 +637,7 @@ impl Render for QueryItem {
             )
         });
         let target = self.state.target();
-        let can_execute = target.is_some_and(|target| {
-            target.db_type.capabilities().sql || target.db_type == DbType::Redis
-        });
+        let can_execute = target.is_some_and(|target| supports_query_execution(target.db_type));
         let can_explain =
             target.is_some_and(|target| target.db_type.capabilities().explain != ExplainMode::None);
         let target_label = target
@@ -838,6 +834,10 @@ impl Render for QueryItem {
         BufferSearchBar::register(&mut search_actions);
         search_actions.into_div().size_full().child(content)
     }
+}
+
+fn supports_query_execution(db_type: DbType) -> bool {
+    db_type.capabilities().sql || db_type == DbType::Redis
 }
 
 fn centered_message(message: &str, cx: &mut Context<QueryItem>) -> AnyElement {

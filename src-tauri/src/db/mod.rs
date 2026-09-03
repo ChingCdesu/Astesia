@@ -251,7 +251,6 @@ pub(crate) enum RedisValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RedisKeySnapshot {
-    pub(crate) key: String,
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) value: RedisValue,
 }

@@ -124,12 +124,7 @@ impl ExportService {
             ExportSource::Rows { columns, rows } => (columns, rows),
             ExportSource::Sql { sql } => {
                 let result = self.queries.execute(connection_id, database, &sql).await?;
-                let headers = result
-                    .columns
-                    .into_iter()
-                    .map(|column| column.name)
-                    .collect();
-                (headers, result.rows)
+                into_export_rows(result)
             }
         };
 
@@ -146,18 +141,20 @@ impl ExportService {
         match source {
             ExportSource::Rows { columns, rows } => Ok((columns, rows)),
             ExportSource::Sql { sql } => {
-                let result = self.queries.execute_target(target, &sql).await?;
-                Ok((
-                    result
-                        .columns
-                        .into_iter()
-                        .map(|column| column.name)
-                        .collect(),
-                    result.rows,
-                ))
+                let result = self.queries.execute_export_query(target, &sql).await?;
+                Ok(into_export_rows(result))
             }
         }
     }
+}
+
+fn into_export_rows(result: crate::db::QueryResult) -> (Vec<String>, Vec<Vec<Value>>) {
+    let headers = result
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    (headers, result.rows)
 }
 
 async fn write_export(

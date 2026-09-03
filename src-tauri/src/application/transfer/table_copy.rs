@@ -18,13 +18,13 @@ fn copy_outcome(effects: TransferEffects) -> TaskOutcome {
 impl TransferService {
     pub async fn start_table_copy(
         &self,
-        source_target: QueryTarget,
+        source: QueryTarget,
         source_table: TableRef,
-        target_target: QueryTarget,
+        target: QueryTarget,
         options: CopyOptions,
     ) -> Result<String, String> {
-        let source_driver_handle = self.driver_for_target(&source_target).await?;
-        let target_driver_handle = self.driver_for_target(&target_target).await?;
+        let source_driver_handle = self.driver_for_target(&source).await?;
+        let target_driver_handle = self.driver_for_target(&target).await?;
 
         // Source and target may share a driver, so never hold both guards at once.
         let db_type = {
@@ -48,10 +48,10 @@ impl TransferService {
         let task_name = format!("复制表 {} → {}", source_table, options.new_table_name);
         let job = TableCopyJob {
             source_driver: source_driver_handle,
-            source_database: source_target.database,
+            source_database: source.database,
             source_table,
             target_driver: target_driver_handle,
-            target_database: target_target.database,
+            target_database: target.database,
             db_type,
             options,
         };

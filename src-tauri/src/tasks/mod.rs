@@ -30,6 +30,15 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl TaskStatus {
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Partial | Self::Failed | Self::Cancelled
+        )
+    }
+}
+
 pub(crate) struct NewTask {
     pub name: String,
     pub initial_message: String,

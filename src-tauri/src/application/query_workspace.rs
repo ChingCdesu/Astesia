@@ -6,8 +6,9 @@ use std::{
 use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
 
 use super::query_result_selection::QueryResultSelection;
-use super::redis_service::RedisCommand;
-use super::{query_file::QueryFileState, QueryFileCompletion, QueryFileError, QueryFileRequest};
+use super::{
+    query_file::QueryFileState, QueryFileCompletion, QueryFileError, QueryFileRequest, RedisCommand,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryTarget {

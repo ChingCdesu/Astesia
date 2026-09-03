@@ -28,7 +28,7 @@ impl QueryService {
             .map_err(|error| format!("查询失败: {error}"))
     }
 
-    pub(crate) async fn execute_target(
+    pub(crate) async fn execute_export_query(
         &self,
         target: &QueryTarget,
         sql: &str,

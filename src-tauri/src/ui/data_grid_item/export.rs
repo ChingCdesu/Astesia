@@ -103,12 +103,7 @@ impl DataGridItem {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let extension = match format {
-            GridExportFormat::Csv => "csv",
-            GridExportFormat::Json => "json",
-            GridExportFormat::Xlsx => "xlsx",
-        };
-        let default_name = format!("{}.{}", self.state.table().name(), extension);
+        let default_name = format!("{}.{}", self.state.table().name(), format.extension());
         let prompt = cx.prompt_for_new_path(&PathBuf::default(), Some(&default_name));
         cx.spawn_in(window, async move |item, cx| {
             let response = prompt.await;
@@ -165,24 +160,7 @@ impl DataGridItem {
             };
             ExportSource::Rows { columns, rows }
         };
-        let export_format = match format {
-            GridExportFormat::Csv => ExportFormat::Csv(CsvOptions {
-                delimiter: ",".to_string(),
-                include_header: true,
-                quote_all: false,
-                null_value: "\\N".to_string(),
-                crlf: false,
-                bom: false,
-            }),
-            GridExportFormat::Json => ExportFormat::Json(JsonOptions {
-                layout: JsonLayout::Objects,
-                pretty: true,
-            }),
-            GridExportFormat::Xlsx => ExportFormat::Xlsx(XlsxOptions {
-                include_header: true,
-                sheet_name: self.state.table().name().to_string(),
-            }),
-        };
+        let export_format = format.export_format(self.state.table().name());
         if self.export_in_progress {
             return;
         }
@@ -222,6 +200,37 @@ impl DataGridItem {
             .ok();
         })
         .detach();
+    }
+}
+
+impl GridExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+            Self::Xlsx => "xlsx",
+        }
+    }
+
+    fn export_format(self, sheet_name: &str) -> ExportFormat {
+        match self {
+            Self::Csv => ExportFormat::Csv(CsvOptions {
+                delimiter: ",".to_string(),
+                include_header: true,
+                quote_all: false,
+                null_value: "\\N".to_string(),
+                crlf: false,
+                bom: false,
+            }),
+            Self::Json => ExportFormat::Json(JsonOptions {
+                layout: JsonLayout::Objects,
+                pretty: true,
+            }),
+            Self::Xlsx => ExportFormat::Xlsx(XlsxOptions {
+                include_header: true,
+                sheet_name: sheet_name.to_string(),
+            }),
+        }
     }
 }
 
