@@ -398,6 +398,53 @@ impl ConnectionProfilesPanel {
                     .child(
                         h_flex()
                             .gap_0p5()
+                            .when(target.db_type.capabilities().foreign_keys, |element| {
+                                let er_target = target.clone();
+                                element.child(
+                                    IconButton::new(
+                                        format!("er-diagram-database-{}", target.database),
+                                        IconName::GitGraph,
+                                    )
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(Tooltip::text(text(
+                                        language,
+                                        "实体关系图",
+                                        "Entity relationship diagram",
+                                    )))
+                                    .on_click(cx.listener(
+                                        move |panel, _, _, cx| {
+                                            panel.request_er_diagram(er_target.clone(), cx);
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(
+                                target.db_type.capabilities().performance
+                                    == crate::db::PerformanceMode::Native,
+                                |element| {
+                                    let performance_target = target.clone();
+                                    element.child(
+                                        IconButton::new(
+                                            format!("performance-database-{}", target.database),
+                                            IconName::DatabaseZap,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(text(
+                                            language,
+                                            "性能监控",
+                                            "Performance monitor",
+                                        )))
+                                        .on_click(
+                                            cx.listener(move |panel, _, _, cx| {
+                                                panel.request_performance(
+                                                    performance_target.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                },
+                            )
                             .when(target.db_type.capabilities().backup, |element| {
                                 let backup_target = target.clone();
                                 element.child(

@@ -1,16 +1,19 @@
 mod catalog_service;
+mod chart;
 mod connection_service;
 pub(crate) mod connection_workspace;
 mod connections;
 mod document_service;
 #[cfg(test)]
 mod engine_smoke_tests;
+mod er_diagram;
 mod export_service;
 mod grid_service;
 mod grid_session;
 mod grid_value;
 mod mutation_service;
 mod object_service;
+mod performance_dashboard;
 mod performance_service;
 mod performance_snapshot;
 mod profile_editor;
@@ -25,6 +28,7 @@ mod transfer;
 
 pub use crate::connection_repository::NativeStateProbe;
 pub use catalog_service::CatalogService;
+pub(crate) use chart::{ChartDataError, ChartModel, ChartSeries, ChartService, ChartType};
 pub use connection_service::{
     ConnectionProfileSnapshot, ConnectionService, ConnectionWorkspaceSnapshot,
     DatabaseSessionSnapshot, LoadedDatabases, ProfileOperationCommand, ProfileOperationCompletion,
@@ -35,6 +39,9 @@ pub(crate) use connection_workspace::{
 };
 pub use connections::ConnectionOutcome;
 pub(crate) use document_service::{DocumentService, DocumentSession, DocumentSessionStatus};
+pub(crate) use er_diagram::{
+    ErBounds, ErDiagramService, ErDiagramState, ErLayout, ErLoadError, ErPoint, ErSchema, ErStatus,
+};
 pub use export_service::{
     CsvOptions, ExportFormat, ExportService, ExportSource, JsonLayout, JsonOptions, XlsxOptions,
 };
@@ -52,10 +59,13 @@ pub(crate) use object_service::{
     DatabaseObjectKind, DropObjectTarget, ObjectMutation, ObjectMutationError, ObjectService,
     TableColumnSpec, TriggerEvent, TriggerTiming,
 };
+pub(crate) use performance_dashboard::{
+    PerformanceDashboardState, PerformanceLoadApply, PerformanceRefreshInterval,
+};
 pub use performance_service::PerformanceService;
 pub use performance_snapshot::{
-    ClickHouseMetrics, MySqlMetrics, PerformanceSnapshot, PostgresMetrics, RedisMetrics,
-    SqlServerMetrics, SqliteMetrics,
+    ClickHouseMetrics, MongoMetrics, MySqlMetrics, PerformanceSnapshot, PostgresMetrics,
+    RedisMetrics, SqlServerMetrics, SqliteMetrics,
 };
 pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
 pub(crate) use query_completion::{
@@ -87,8 +97,10 @@ use tokio::sync::broadcast;
 
 pub struct Application {
     catalog: CatalogService,
+    charts: ChartService,
     connections: ConnectionService,
     documents: DocumentService,
+    er_diagrams: ErDiagramService,
     exports: ExportService,
     grids: GridService,
     mutations: MutationService,
@@ -139,12 +151,15 @@ impl Application {
         let catalog = CatalogService::new(connection_manager.clone());
         let query_completions = QueryCompletionService::new(catalog.clone());
         let mcp = sidecar_host.map(|host| McpRuntime::new(host, mcp_registry.clone()));
+        let grids = GridService::new(connection_manager.clone());
         Self {
             catalog,
+            charts: ChartService::new(grids.clone()),
             connections: ConnectionService::new(connection_manager.clone(), mcp_registry),
             documents: DocumentService::new(connection_manager.clone()),
+            er_diagrams: ErDiagramService::new(connection_manager.clone()),
             exports: ExportService::new(queries.clone(), task_manager.clone()),
-            grids: GridService::new(connection_manager.clone()),
+            grids,
             mutations: MutationService::new(connection_manager.clone()),
             objects: ObjectService::new(connection_manager.clone()),
             performance: PerformanceService::new(connection_manager.clone()),
@@ -166,12 +181,20 @@ impl Application {
         &self.catalog
     }
 
+    pub(crate) fn charts(&self) -> &ChartService {
+        &self.charts
+    }
+
     pub fn exports(&self) -> &ExportService {
         &self.exports
     }
 
     pub(crate) fn documents(&self) -> &DocumentService {
         &self.documents
+    }
+
+    pub(crate) fn er_diagrams(&self) -> &ErDiagramService {
+        &self.er_diagrams
     }
 
     pub fn queries(&self) -> &QueryService {

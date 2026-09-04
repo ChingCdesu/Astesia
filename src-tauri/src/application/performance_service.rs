@@ -1,8 +1,9 @@
 use crate::db::{DatabaseDriver, DbType, PerformanceMode, SqlDialect};
 
 use super::{
-    connections::ConnectionManager, ClickHouseMetrics, MySqlMetrics, PerformanceSnapshot,
-    PostgresMetrics, RedisMetrics, SqlServerMetrics, SqliteMetrics,
+    connections::ConnectionManager, ClickHouseMetrics, MongoMetrics, MySqlMetrics,
+    PerformanceSnapshot, PostgresMetrics, QueryTarget, RedisMetrics, SqlServerMetrics,
+    SqliteMetrics,
 };
 
 #[derive(Clone)]
@@ -15,41 +16,97 @@ impl PerformanceService {
         Self { manager }
     }
 
-    pub async fn metrics(
-        &self,
-        connection_id: &str,
-        database: &str,
-    ) -> Result<PerformanceSnapshot, String> {
-        let handle = self.manager.driver(connection_id).await?;
+    pub async fn metrics(&self, target: &QueryTarget) -> Result<PerformanceSnapshot, String> {
+        let (handle, generation) = self.manager.driver_session(&target.connection_id).await?;
+        if generation != target.session_generation {
+            return Err(format!(
+                "Database Session changed before performance refresh (expected {}, found {generation})",
+                target.session_generation
+            ));
+        }
         let driver = handle.lock_active().await?;
         let driver = &*driver;
         let db_type = driver.db_type();
+        if db_type != target.db_type {
+            return Err("Database Session engine changed before performance refresh".to_string());
+        }
         if db_type.capabilities().performance == PerformanceMode::Unavailable {
             return Ok(PerformanceSnapshot::Unavailable { engine: db_type });
         }
 
         match db_type {
-            DbType::MySQL => get_mysql_metrics(driver, database)
+            DbType::MySQL => get_mysql_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::MySql),
-            DbType::PostgreSQL => get_postgres_metrics(driver, database)
+            DbType::PostgreSQL => get_postgres_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::PostgreSql),
-            DbType::SQLite => get_sqlite_metrics(driver, database)
+            DbType::SQLite => get_sqlite_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::SQLite),
-            DbType::SQLServer => get_sqlserver_metrics(driver, database)
+            DbType::SQLServer => get_sqlserver_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::SqlServer),
-            DbType::MongoDB => Ok(PerformanceSnapshot::Unavailable { engine: db_type }),
-            DbType::Redis => get_redis_metrics(driver, database)
+            DbType::MongoDB => get_mongodb_metrics(driver, &target.database)
+                .await
+                .map(PerformanceSnapshot::MongoDB),
+            DbType::Redis => get_redis_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::Redis),
-            DbType::ClickHouse => get_clickhouse_metrics(driver, database)
+            DbType::ClickHouse => get_clickhouse_metrics(driver, &target.database)
                 .await
                 .map(PerformanceSnapshot::ClickHouse),
         }
     }
+}
+
+async fn get_mongodb_metrics(
+    driver: &dyn DatabaseDriver,
+    database: &str,
+) -> Result<MongoMetrics, String> {
+    let status = driver
+        .get_mongodb_server_status(database)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(mongodb_metrics(&status))
+}
+
+fn mongodb_metrics(status: &serde_json::Value) -> MongoMetrics {
+    MongoMetrics {
+        connections: nested_u64(status, &["connections", "current"]),
+        resident_memory_mb: nested_f64(status, &["mem", "resident"]),
+        virtual_memory_mb: nested_f64(status, &["mem", "virtual"]),
+        network_bytes_in: nested_u64(status, &["network", "bytesIn"]),
+        network_bytes_out: nested_u64(status, &["network", "bytesOut"]),
+        insert_operations: nested_u64(status, &["opcounters", "insert"]),
+        query_operations: nested_u64(status, &["opcounters", "query"]),
+        update_operations: nested_u64(status, &["opcounters", "update"]),
+        delete_operations: nested_u64(status, &["opcounters", "delete"]),
+        uptime_seconds: nested_u64(status, &["uptime"]),
+    }
+}
+
+fn nested_u64(value: &serde_json::Value, path: &[&str]) -> u64 {
+    nested_number(value, path)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
+        .unwrap_or(0)
+}
+
+fn nested_f64(value: &serde_json::Value, path: &[&str]) -> f64 {
+    nested_number(value, path).unwrap_or(0.0)
+}
+
+fn nested_number(value: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    let value = path.iter().try_fold(value, |value, key| value.get(*key))?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .or_else(|| {
+            ["$numberInt", "$numberLong", "$numberDouble"]
+                .iter()
+                .find_map(|key| value.get(*key)?.as_str()?.parse().ok())
+        })
 }
 
 async fn get_clickhouse_metrics(
@@ -478,4 +535,54 @@ async fn get_redis_metrics(
         connected_replicas: get_u64("connected_slaves"),
         version: get_str("redis_version"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn mongodb_server_status_maps_native_and_extended_numbers() {
+        let metrics = mongodb_metrics(&json!({
+            "connections": { "current": 12 },
+            "mem": { "resident": 84.5, "virtual": 512 },
+            "network": {
+                "bytesIn": { "$numberLong": "2048" },
+                "bytesOut": 4096
+            },
+            "opcounters": {
+                "insert": 7,
+                "query": { "$numberInt": "11" },
+                "update": 3,
+                "delete": 2
+            },
+            "uptime": { "$numberDouble": "3600" }
+        }));
+
+        assert_eq!(metrics.connections, 12);
+        assert_eq!(metrics.resident_memory_mb, 84.5);
+        assert_eq!(metrics.virtual_memory_mb, 512.0);
+        assert_eq!(metrics.network_bytes_in, 2048);
+        assert_eq!(metrics.network_bytes_out, 4096);
+        assert_eq!(metrics.insert_operations, 7);
+        assert_eq!(metrics.query_operations, 11);
+        assert_eq!(metrics.update_operations, 3);
+        assert_eq!(metrics.delete_operations, 2);
+        assert_eq!(metrics.uptime_seconds, 3600);
+    }
+
+    #[test]
+    fn mongodb_server_status_defaults_missing_or_invalid_metrics_to_zero() {
+        let metrics = mongodb_metrics(&json!({
+            "connections": { "current": -1 },
+            "mem": { "resident": "not-a-number" }
+        }));
+
+        assert_eq!(metrics.connections, 0);
+        assert_eq!(metrics.resident_memory_mb, 0.0);
+        assert_eq!(metrics.network_bytes_in, 0);
+        assert_eq!(metrics.query_operations, 0);
+    }
 }

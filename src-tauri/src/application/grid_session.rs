@@ -97,6 +97,24 @@ pub(crate) struct GridLoadRequest {
 }
 
 impl GridLoadRequest {
+    pub(crate) fn for_chart_page(
+        target: QueryTarget,
+        table: TableRef,
+        query: GridQuery,
+        page: u32,
+        page_size: u32,
+    ) -> Self {
+        let mut query = query;
+        query.page = page;
+        query.page_size = page_size;
+        Self {
+            generation: u64::from(page),
+            target,
+            table,
+            query,
+        }
+    }
+
     pub(crate) fn target(&self) -> &QueryTarget {
         &self.target
     }

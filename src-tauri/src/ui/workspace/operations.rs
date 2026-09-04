@@ -9,8 +9,10 @@ use super::{AstesiaWorkspace, WorkspaceItem, WorkspaceTab};
 use crate::ui::{
     copy_table_form::{CopyTableForm, TransferTaskStarted},
     document_item::DocumentItem,
+    er_diagram_item::ErDiagramItem,
     localization::text,
     mcp_service_item::McpServiceItem,
+    performance_item::PerformanceItem,
     redis_item::{RedisItem, RedisKeyDeleted},
     shell::NotificationTone,
     task_center_item::TaskCenterItem,
@@ -137,6 +139,56 @@ impl AstesiaWorkspace {
                 item,
                 _observation: observation,
             },
+        });
+        self.focus_active_item(window, cx);
+    }
+
+    pub(super) fn open_performance(
+        &mut self,
+        target: QueryTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.item.matches_performance(&target, cx))
+        {
+            self.activate_tab(existing.id, window, cx);
+            return;
+        }
+        let item = cx.new(|cx| {
+            PerformanceItem::new(self.application.clone(), target, self.settings.clone(), cx)
+        });
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            item: WorkspaceItem::Performance(item),
+        });
+        self.focus_active_item(window, cx);
+    }
+
+    pub(super) fn open_er_diagram(
+        &mut self,
+        target: QueryTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.item.matches_er_diagram(&target, cx))
+        {
+            self.activate_tab(existing.id, window, cx);
+            return;
+        }
+        let item = cx.new(|cx| {
+            ErDiagramItem::new(self.application.clone(), target, self.settings.clone(), cx)
+        });
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            item: WorkspaceItem::ErDiagram(item),
         });
         self.focus_active_item(window, cx);
     }

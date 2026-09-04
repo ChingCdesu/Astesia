@@ -318,6 +318,15 @@ impl DatabaseDriver for MongoDriver {
         })
     }
 
+    async fn get_mongodb_server_status(&self, database: &str) -> anyhow::Result<serde_json::Value> {
+        let status = self
+            .client()?
+            .database(database)
+            .run_command(mongodb::bson::doc! { "serverStatus": 1 })
+            .await?;
+        Ok(mongodb::bson::Bson::Document(status).into_relaxed_extjson())
+    }
+
     fn db_type(&self) -> DbType {
         DbType::MongoDB
     }

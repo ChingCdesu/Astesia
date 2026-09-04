@@ -15,12 +15,13 @@ use workspace::ToolbarItemView as _;
 use zed_ui::prelude::*;
 
 use crate::application::{
-    Application, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionRequest,
+    Application, ChartModel, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionRequest,
     QueryExecutionScope, QueryFileCompletion, QueryFileError, QueryFileRequest, QueryOperation,
     QueryTarget, QueryWorkspaceState,
 };
 use crate::db::{DbType, ExplainMode, StatementResult};
 
+use super::chart_view::ChartView;
 use super::localization::text;
 use super::shell::ShellSettings;
 use super::sql_completion::{self, SqlCompletionHandle};
@@ -105,6 +106,8 @@ pub(super) struct QueryItem {
     result_focus: FocusHandle,
     completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
+    chart: Option<Entity<ChartView>>,
+    showing_chart: bool,
     file_prompt_active: bool,
     settings: Entity<ShellSettings>,
     _editor_subscription: Subscription,
@@ -151,6 +154,8 @@ impl QueryItem {
             result_focus: cx.focus_handle(),
             completion,
             state: QueryWorkspaceState::new(initial_text),
+            chart: None,
+            showing_chart: false,
             file_prompt_active: false,
             settings,
             _editor_subscription: editor_subscription,
@@ -173,11 +178,53 @@ impl QueryItem {
                 .cloned(),
         );
         if self.state.set_target(target) {
+            self.chart = None;
+            self.showing_chart = false;
             cx.notify();
         }
         if should_focus {
             window.focus(&self.editor.read(cx).focus_handle(cx), cx);
         }
+    }
+
+    fn sync_chart(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.state.active_result().filter(|result| result.success) else {
+            self.chart = None;
+            self.showing_chart = false;
+            return;
+        };
+        let columns = result.columns.clone();
+        let names = columns.iter().map(|column| column.name.clone()).collect();
+        let rows = result.rows.clone();
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, cx| chart.replace_data(names, &rows, cx));
+        } else {
+            let model = ChartModel::new(&columns, &rows);
+            self.chart = Some(cx.new(|cx| ChartView::new(model, self.settings.clone(), cx)));
+        }
+    }
+
+    fn toggle_chart(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chart.is_none() {
+            self.sync_chart(cx);
+        }
+        self.showing_chart = self.chart.is_some() && !self.showing_chart;
+        if self.showing_chart {
+            if let Some(chart) = &self.chart {
+                window.focus(&chart.read(cx).focus_handle(cx), cx);
+            }
+        } else {
+            window.focus(&self.result_focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn refresh_chart(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.showing_chart {
+            return false;
+        }
+        self.sync_chart(cx);
+        true
     }
 
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -242,6 +289,8 @@ impl QueryItem {
 
     fn clear_target(&mut self, cx: &mut Context<Self>) {
         self.completion.set_target(None);
+        self.chart = None;
+        self.showing_chart = false;
         if self.state.set_target(None) {
             cx.notify();
         }
@@ -594,6 +643,7 @@ impl QueryItem {
             };
             item.update(cx, |item, cx| {
                 if item.state.finish_execution(&request, result) {
+                    item.sync_chart(cx);
                     cx.notify();
                 }
             })
@@ -606,6 +656,8 @@ impl QueryItem {
         self.editor
             .update(cx, |editor, cx| editor.set_text("", window, cx));
         self.state.clear_results();
+        self.chart = None;
+        self.showing_chart = false;
         window.focus(&self.editor.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
@@ -664,6 +716,10 @@ impl Render for QueryItem {
             .active_result()
             .is_some_and(|result| !result.columns.is_empty() && !result.rows.is_empty());
         let has_result_selection = self.state.has_result_selection();
+        let can_chart = self
+            .state
+            .active_result()
+            .is_some_and(|result| result.success && !result.columns.is_empty());
         let search_visible = !self.search.read(cx).is_dismissed();
 
         let content = v_flex()
@@ -793,6 +849,21 @@ impl Render for QueryItem {
                     .children(
                         result_summary.map(|summary| Label::new(summary).size(LabelSize::XSmall)),
                     )
+                    .when(can_chart, |bar| {
+                        bar.child(
+                            Button::new(
+                                "toggle-query-chart",
+                                if self.showing_chart {
+                                    text(language, "表格", "Table")
+                                } else {
+                                    text(language, "图表", "Chart")
+                                },
+                            )
+                            .size(ButtonSize::Compact)
+                            .toggle_state(self.showing_chart)
+                            .on_click(cx.listener(Self::toggle_chart)),
+                        )
+                    })
                     .when(can_select_result_rows, |bar| {
                         bar.child(
                             Button::new(

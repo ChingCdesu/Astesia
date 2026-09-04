@@ -15,6 +15,7 @@ use crate::connection_repository::{SaveConnectionRequest, SharedConnectionReposi
 use crate::credential_vault::test_support::MemoryCredentialVault;
 use crate::db::{ConnectionConfig, DbType, SqlDialect, TableRef};
 
+mod milestone_seven;
 mod milestone_six;
 
 #[derive(Deserialize)]

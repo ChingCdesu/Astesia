@@ -9,6 +9,7 @@ impl QueryItem {
         cx: &mut Context<Self>,
     ) {
         if self.state.select_result(index) {
+            self.sync_chart(cx);
             cx.notify();
         }
     }
@@ -191,6 +192,11 @@ impl QueryItem {
                     .size(LabelSize::XSmall),
                 )
                 .into_any_element();
+        }
+        if self.showing_chart {
+            if let Some(chart) = &self.chart {
+                return chart.clone().into_any_element();
+            }
         }
         let Some(result) = self.state.active_result() else {
             let message = match self.state.target() {

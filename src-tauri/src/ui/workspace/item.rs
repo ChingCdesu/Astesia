@@ -1,7 +1,7 @@
 use super::*;
 use crate::ui::{
-    document_item::DocumentItem, mcp_service_item::McpServiceItem, redis_item::RedisItem,
-    task_center_item::TaskCenterItem,
+    document_item::DocumentItem, er_diagram_item::ErDiagramItem, mcp_service_item::McpServiceItem,
+    performance_item::PerformanceItem, redis_item::RedisItem, task_center_item::TaskCenterItem,
 };
 
 pub(super) enum WorkspaceItem {
@@ -24,6 +24,8 @@ pub(super) enum WorkspaceItem {
         item: Entity<TaskCenterItem>,
         _observation: Subscription,
     },
+    Performance(Entity<PerformanceItem>),
+    ErDiagram(Entity<ErDiagramItem>),
     McpService(Entity<McpServiceItem>),
 }
 
@@ -37,6 +39,8 @@ impl WorkspaceItem {
             | Self::Document(_)
             | Self::Redis { .. }
             | Self::TaskCenter { .. }
+            | Self::Performance(_)
+            | Self::ErDiagram(_)
             | Self::McpService(_) => None,
         }
     }
@@ -50,6 +54,8 @@ impl WorkspaceItem {
             | Self::Document(_)
             | Self::Redis { .. }
             | Self::TaskCenter { .. }
+            | Self::Performance(_)
+            | Self::ErDiagram(_)
             | Self::McpService(_) => false,
         }
     }
@@ -66,6 +72,8 @@ impl WorkspaceItem {
             Self::Document(item) => item.read(cx).label(),
             Self::Redis { item, .. } => item.read(cx).label(),
             Self::TaskCenter { item, .. } => item.read(cx).label(),
+            Self::Performance(item) => item.read(cx).label(cx),
+            Self::ErDiagram(item) => item.read(cx).label(cx),
             Self::McpService(item) => item.read(cx).label(),
         }
     }
@@ -82,6 +90,8 @@ impl WorkspaceItem {
             Self::Document(item) => item.read(cx).label(),
             Self::Redis { item, .. } => item.read(cx).label(),
             Self::TaskCenter { item, .. } => item.read(cx).label(),
+            Self::Performance(item) => item.read(cx).label(cx),
+            Self::ErDiagram(item) => item.read(cx).label(cx),
             Self::McpService(item) => item.read(cx).label(),
         }
     }
@@ -95,6 +105,8 @@ impl WorkspaceItem {
             Self::Document(item) => item.clone().into_any_element(),
             Self::Redis { item, .. } => item.clone().into_any_element(),
             Self::TaskCenter { item, .. } => item.clone().into_any_element(),
+            Self::Performance(item) => item.clone().into_any_element(),
+            Self::ErDiagram(item) => item.clone().into_any_element(),
             Self::McpService(item) => item.clone().into_any_element(),
         }
     }
@@ -120,6 +132,12 @@ impl WorkspaceItem {
                 item.update(cx, |item, cx| item.focus(window, cx));
             }
             Self::TaskCenter { item, .. } => {
+                item.update(cx, |item, cx| item.focus(window, cx));
+            }
+            Self::Performance(item) => {
+                item.update(cx, |item, cx| item.focus(window, cx));
+            }
+            Self::ErDiagram(item) => {
                 item.update(cx, |item, cx| item.focus(window, cx));
             }
             Self::McpService(item) => {
@@ -172,6 +190,14 @@ impl WorkspaceItem {
         matches!(self, Self::Redis { item, .. } if item.read(cx).matches(target, key))
     }
 
+    pub(super) fn matches_performance(&self, target: &QueryTarget, cx: &App) -> bool {
+        matches!(self, Self::Performance(item) if item.read(cx).matches(target))
+    }
+
+    pub(super) fn matches_er_diagram(&self, target: &QueryTarget, cx: &App) -> bool {
+        matches!(self, Self::ErDiagram(item) if item.read(cx).matches(target))
+    }
+
     pub(super) fn is_task_center(&self) -> bool {
         matches!(self, Self::TaskCenter { .. })
     }
@@ -210,6 +236,16 @@ impl WorkspaceItem {
                 });
             }
             Self::Redis { item, .. } => {
+                item.update(cx, |item, cx| {
+                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
+                });
+            }
+            Self::Performance(item) => {
+                item.update(cx, |item, cx| {
+                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
+                });
+            }
+            Self::ErDiagram(item) => {
                 item.update(cx, |item, cx| {
                     item.invalidate_session(&target.connection_id, target.session_generation, cx);
                 });
@@ -255,6 +291,16 @@ impl WorkspaceItem {
                     item.invalidate_session(connection_id, session_generation, cx)
                 });
             }
+            Self::Performance(item) => {
+                item.update(cx, |item, cx| {
+                    item.invalidate_session(connection_id, session_generation, cx)
+                });
+            }
+            Self::ErDiagram(item) => {
+                item.update(cx, |item, cx| {
+                    item.invalidate_session(connection_id, session_generation, cx)
+                });
+            }
             Self::TaskCenter { .. } | Self::McpService(_) => {}
         }
     }
@@ -266,6 +312,30 @@ impl WorkspaceItem {
     ) {
         if let Self::Query { item, .. } = self {
             item.update(cx, |item, cx| item.reconcile_sessions(snapshot, cx));
+        }
+    }
+
+    pub(super) fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
+        match self {
+            Self::Performance(item) => {
+                item.update(cx, |item, cx| item.refresh(cx));
+                true
+            }
+            Self::ErDiagram(item) => {
+                item.update(cx, |item, cx| item.refresh(cx));
+                true
+            }
+            Self::DataGrid { item, .. } => {
+                item.update(cx, |item, cx| item.refresh_active(cx));
+                true
+            }
+            Self::Query { item, .. } => item.update(cx, |item, cx| item.refresh_chart(cx)),
+            Self::TableStructure(_)
+            | Self::ObjectDefinition(_)
+            | Self::Document(_)
+            | Self::Redis { .. }
+            | Self::TaskCenter { .. }
+            | Self::McpService(_) => false,
         }
     }
 }

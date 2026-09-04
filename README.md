@@ -3,9 +3,9 @@
 Astesia is a native desktop database workspace built in Rust with GPUI and the embedded Zed
 Editor. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 
-The native-runtime migration has completed Milestones 0-5 on macOS. See the
+The native-runtime migration has completed Milestones 0-7 on macOS. See the
 [GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) and
-[Milestone 5 acceptance](docs/plans/gpui-milestone-5-acceptance.md) for the behavioral checklist
+[Milestone 7 acceptance](docs/plans/gpui-milestone-7-acceptance.md) for the behavioral checklist
 and current evidence.
 
 ## Delivered native capabilities
@@ -21,13 +21,15 @@ and current evidence.
 - Paged relational data grids with filtering, typed sorting, selection, copying, CSV/TSV paste,
   typed and long-value editing, staged insert/update/delete, undo, discard, and deterministic saves
 - Read-only ClickHouse grids with filtering, sorting, paging, selection, copy, and CSV export
+- MongoDB document browsing, Redis key workflows, task-backed export and transfer operations,
+  Task Center inspection, and native MCP Sidecar lifecycle
+- Native table/query charts, qualified ER diagrams, and seven-engine performance dashboards
 
 ## Remaining parity work
 
-Milestones 6-8 cover MongoDB document and Redis key editing; long-running export, backup, restore,
-and table-copy tasks; native MCP Sidecar lifecycle; charts, ER diagrams, and performance dashboards;
-cross-platform validation; packaging; and final removal of the Legacy Shell. These capabilities may
-still exist in the retained React/Tauri source, but they are not yet accepted in the native runtime.
+Milestone 8 covers cross-platform validation, native packaging and update cutover, and final
+removal of the Legacy Shell. Reference implementations remain in the retained React/Tauri source
+until that cutover passes.
 
 ## Tech stack
 
@@ -72,8 +74,8 @@ pnpm tauri:build      # Legacy packaging path
 ## MCP server
 
 The standalone authenticated MCP server remains in `src-tauri/src/bin/astesia-mcp.rs`. The native
-desktop lifecycle and status-bar integration are Milestone 6 work. Existing build helpers remain
-available during migration:
+desktop owns its lifecycle through the MCP workspace tab. Existing build helpers remain available
+during migration:
 
 ```bash
 pnpm mcp:prepare:debug
