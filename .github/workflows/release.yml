@@ -66,7 +66,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: . -> target
 
       - name: Package Linux
         if: startsWith(matrix.platform, 'ubuntu')
@@ -85,7 +85,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: src-tauri/target/package/*
+          path: target/package/*
           if-no-files-found: error
 
   release:

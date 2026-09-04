@@ -132,12 +132,12 @@ def main() -> None:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=repository_root / "src-tauri" / "Cargo.toml",
+        default=repository_root / "Cargo.toml",
     )
     parser.add_argument(
         "--lockfile",
         type=Path,
-        default=repository_root / "src-tauri" / "Cargo.lock",
+        default=repository_root / "Cargo.lock",
     )
     arguments = parser.parse_args()
     print(bump_versions(arguments.manifest, arguments.lockfile))

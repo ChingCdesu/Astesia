@@ -9,12 +9,12 @@ managed by the Astesia desktop app.
 From the repository root, build the release binary:
 
 ```bash
-cargo build --release --locked --manifest-path src-tauri/Cargo.toml --bin astesia-mcp
+cargo build --release --locked --bin astesia-mcp
 ```
 
 The desktop package scripts build `astesia-mcp` beside the `astesia` executable so the native
 process host discovers the exact sidecar shipped with the application. A direct Cargo build places
-the executable under `src-tauri/target/release/`.
+the executable under `target/release/`.
 
 ## Desktop Integration Status
 
@@ -64,7 +64,7 @@ MCP client configuration formats vary, but a generic stdio entry looks like this
 {
   "mcpServers": {
     "astesia": {
-      "command": "/absolute/path/to/Astesia/src-tauri/target/release/astesia-mcp",
+      "command": "/absolute/path/to/Astesia/target/release/astesia-mcp",
       "args": []
     }
   }

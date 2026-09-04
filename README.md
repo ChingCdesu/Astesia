@@ -40,11 +40,11 @@ chain are gone, and the internal native package matrix is in place. See the
 The repository pins Rust 1.97.1 in `rust-toolchain.toml`.
 
 ```bash
-cargo run --locked --manifest-path src-tauri/Cargo.toml --bin astesia
-cargo check --locked --manifest-path src-tauri/Cargo.toml
-cargo test --locked --manifest-path src-tauri/Cargo.toml
-cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo run --locked --bin astesia
+cargo check --locked
+cargo test --locked
+cargo clippy --locked --all-targets
+cargo fmt -- --check
 ```
 
 Environment-dependent seven-engine tests are ignored by the normal suite. Their disposable-service
@@ -52,11 +52,11 @@ configuration and latest results are recorded in the milestone acceptance docume
 
 ## MCP server
 
-The standalone authenticated MCP server remains in `src-tauri/src/bin/astesia-mcp.rs`. The native
+The standalone authenticated MCP server remains in `src/bin/astesia-mcp.rs`. The native
 desktop owns its lifecycle through the MCP workspace tab. Build it directly for local clients:
 
 ```bash
-cargo build --locked --manifest-path src-tauri/Cargo.toml --bin astesia-mcp
+cargo build --locked --bin astesia-mcp
 ```
 
 See the [MCP server guide](docs/mcp.md) for stdio configuration, credential handling, available
@@ -65,21 +65,22 @@ tools, and destructive-operation safeguards.
 ## Project structure
 
 ```text
-src-tauri/                  # Native Rust package; historical directory name is retained
-  src/
-    application/            # UI-independent services and workflow state
-    connection_runtime/     # Live connection and session ownership
-    connection_repository/  # Durable profiles, revisions, and migration
-    credential_vault/       # Platform-backed credential storage
-    db/                     # Seven database-driver implementations
-    platform/               # Native lifecycle, preferences, events, and sidecars
-    ui/                     # GPUI shell, workspace, tabs, forms, catalogs, and grids
-    mcp/                    # Standalone MCP tools and policy
-    mcp_runtime/            # Native MCP lifecycle
-    tasks/                  # Background task model
-    bin/astesia-mcp.rs      # Standalone MCP entry point
-    main.rs                 # Native desktop entry point
+Cargo.toml              # Root Rust package manifest
+src/
+  application/            # UI-independent services and workflow state
+  connection_runtime/     # Live connection and session ownership
+  connection_repository/  # Durable profiles, revisions, and migration
+  credential_vault/       # Platform-backed credential storage
+  db/                     # Seven database-driver implementations
+  platform/               # Native lifecycle, preferences, events, and sidecars
+  ui/                     # GPUI shell, workspace, tabs, forms, catalogs, and grids
+  mcp/                    # Standalone MCP tools and policy
+  mcp_runtime/            # Native MCP lifecycle
+  tasks/                  # Background task model
+  bin/astesia-mcp.rs      # Standalone MCP entry point
+  main.rs                 # Native desktop entry point
 
+icons/                      # Desktop application icons
 packaging/                  # Internal package metadata
 scripts/                    # Native macOS, Linux, and Windows packaging entry points
 ```

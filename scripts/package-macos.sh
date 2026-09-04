@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
-manifest="$repository_root/src-tauri/Cargo.toml"
+manifest="$repository_root/Cargo.toml"
 toolchain="1.97.1"
 target="${1:-$(rustup run "$toolchain" rustc -vV | awk '/^host:/ { print $2 }')}"
 
@@ -16,7 +16,7 @@ case "$target" in
 esac
 
 version="$(awk -F ' = ' '/^version = / { gsub(/\"/, "", $2); print $2; exit }' "$manifest")"
-target_root="${CARGO_TARGET_DIR:-$repository_root/src-tauri/target}"
+target_root="${CARGO_TARGET_DIR:-$repository_root/target}"
 release_dir="$target_root/$target/release"
 package_dir="$target_root/package"
 archive="$package_dir/astesia-$version-$target.zip"
@@ -31,7 +31,7 @@ rustup run "$toolchain" cargo build --release --locked --manifest-path "$manifes
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$package_dir"
 install -m 755 "$release_dir/astesia" "$bundle/Contents/MacOS/astesia"
 install -m 755 "$release_dir/astesia-mcp" "$bundle/Contents/MacOS/astesia-mcp"
-install -m 644 "$repository_root/src-tauri/icons/icon.icns" \
+install -m 644 "$repository_root/icons/icon.icns" \
   "$bundle/Contents/Resources/icon.icns"
 sed "s/@VERSION@/$version/g" "$repository_root/packaging/macos/Info.plist.in" \
   > "$bundle/Contents/Info.plist"

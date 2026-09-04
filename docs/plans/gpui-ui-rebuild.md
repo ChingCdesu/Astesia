@@ -21,10 +21,11 @@ This is an internal rebuild. External licensing, public updater compatibility, s
 
 ## Target structure
 
-Keep the existing Rust package location during the migration so path churn does not obscure behavior changes. Rename `src-tauri` only as a final mechanical cleanup if it remains worthwhile.
+The repository root is the completed Cargo package. Application code lives directly under `src/`,
+with manifests and packaging assets at the root-level boundaries that own them.
 
 ```text
-src-tauri/src/
+src/
 ├── application/     UI-independent application services and workflow models
 ├── platform/        Files, dialogs, preferences, events, processes, and updates
 ├── ui/              GPUI application, window, entities, views, actions, and theme
@@ -191,7 +192,7 @@ checks passed, and the Windows MSVC application, sidecar, and library test targe
 - Replace file dialogs, filesystem access, clipboard, preferences, sidecar staging, application version, and relaunch with native implementations.
 - Produce internal macOS packages first, then validate Windows x64 and Linux x64 windowing, fonts, input, file dialogs, sidecar placement, and graphics backends.
 - Keep any future updater endpoint under the existing `ChingCdesu/Astesia` release authority.
-- Optionally rename `src-tauri` after `rg` confirms no Tauri dependency or terminology remains.
+- Keep application code under the root-level `src/` and reject stale nested package paths.
 
 Exit condition: the locked build contains no Tauri or frontend runtime dependency, and the parity checklist passes on every platform still used internally.
 
@@ -210,8 +211,8 @@ Add tests at the extracted model boundaries rather than trying to reproduce brow
 Continue running:
 
 ```sh
-cargo check --locked --manifest-path src-tauri/Cargo.toml
-cargo test --locked --manifest-path src-tauri/Cargo.toml
+cargo check --locked
+cargo test --locked
 ```
 
 ## First implementation batch

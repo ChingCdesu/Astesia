@@ -7,6 +7,8 @@ Status: Complete on 2026-09-04.
 - The React, Zustand, Radix, Monaco, Vite, and Tauri desktop shell has been removed. The repository
   no longer tracks frontend package metadata, WebView assets, Tauri capabilities or configuration,
   Tauri sidecar staging, or the former plugin scaffold.
+- The repository root is the Cargo package: application code lives under root-level `src/`, while
+  the manifests, icons, and build output use their conventional root paths.
 - GPUI owns open/save prompts and clipboard access. Rust owns filesystem operations, atomic JSON
   preferences, process-sidecar discovery, the displayed application version, and in-place restart.
   Cancelling a path prompt remains distinct from a platform error.
@@ -29,12 +31,12 @@ Status: Complete on 2026-09-04.
 
 ## Verification
 
-- `rustup run 1.97.1 cargo test --locked --manifest-path src-tauri/Cargo.toml --quiet`:
+- `rustup run 1.97.1 cargo test --locked --quiet`:
   360 tests passed, six environment-dependent tests were ignored, and the MCP binary test passed.
-- `rustup run 1.97.1 cargo check --locked --manifest-path src-tauri/Cargo.toml`: passed.
-- `rustup run 1.97.1 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets`:
+- `rustup run 1.97.1 cargo check --locked`: passed.
+- `rustup run 1.97.1 cargo clippy --locked --all-targets`:
   passed with the migration branch's existing warnings.
-- `rustup run 1.97.1 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+- `rustup run 1.97.1 cargo fmt -- --check`: passed.
 - `scripts/package-macos.sh aarch64-apple-darwin` and
   `scripts/package-macos.sh x86_64-apple-darwin`: passed. Both bundles passed strict ad-hoc
   signature validation, contained the requested Mach-O architecture, reported version 1.0.9, and
@@ -43,7 +45,7 @@ Status: Complete on 2026-09-04.
   1.97.1. The package contained two x86_64 ELF executables, its sidecar reported version 1.0.9,
   and the rendered X11 smoke covered fonts, graphics, keyboard input, the command palette, a native
   portal file dialog, and clipboard output.
-- `cargo-xwin test --locked --manifest-path src-tauri/Cargo.toml
+- `cargo-xwin test --locked
   --target x86_64-pc-windows-msvc --no-run --lib`: passed with Rust 1.97.1 and linked the full
   library test executable. Separate debug builds produced x86_64 MSVC `astesia.exe` and
   `astesia-mcp.exe`; inspection confirmed the GPUI DirectX, text-input, and accessibility imports.
@@ -55,6 +57,8 @@ Status: Complete on 2026-09-04.
   tagged entries, and removed duplicated grid-selection projection plus workspace-item lookup and
   dispatch paths.
 - `git diff --check`: passed.
+- A hidden-file scan of current configuration, scripts, and instructions found no stale nested
+  package paths; historical milestone records retain the paths used when their evidence was run.
 
 ## Windows native-runner boundary
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
-manifest="$repository_root/src-tauri/Cargo.toml"
+manifest="$repository_root/Cargo.toml"
 toolchain="1.97.1"
 target="${1:-x86_64-unknown-linux-gnu}"
 
@@ -16,7 +16,7 @@ case "$target" in
 esac
 
 version="$(awk -F ' = ' '/^version = / { gsub(/\"/, "", $2); print $2; exit }' "$manifest")"
-target_root="${CARGO_TARGET_DIR:-$repository_root/src-tauri/target}"
+target_root="${CARGO_TARGET_DIR:-$repository_root/target}"
 release_dir="$target_root/$target/release"
 package_dir="$target_root/package"
 archive="$package_dir/astesia-$version-$target.tar.gz"
@@ -36,7 +36,7 @@ install -m 755 "$release_dir/astesia" "$bundle/bin/astesia"
 install -m 755 "$release_dir/astesia-mcp" "$bundle/bin/astesia-mcp"
 install -m 644 "$repository_root/packaging/linux/com.astesia.app.desktop" \
   "$bundle/share/applications/com.astesia.app.desktop"
-install -m 644 "$repository_root/src-tauri/icons/icon.png" \
+install -m 644 "$repository_root/icons/icon.png" \
   "$bundle/share/icons/hicolor/512x512/apps/com.astesia.app.png"
 
 rm -f "$archive"
