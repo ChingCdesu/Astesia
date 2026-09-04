@@ -322,7 +322,10 @@ fn object_loading_is_lazy_and_rejects_stale_session_results() {
         .expect("reconnect starts");
     state.finish_operation(&reconnect, Ok(connected_snapshot(2, profile, 8)));
 
-    assert!(!state.finish_object_load(&request, CatalogLoadResult::Tables(Ok(Vec::new()))));
+    assert!(!state.finish_object_load(
+        &request,
+        CatalogEntry::Tables(CatalogSection::Ready(Vec::new()))
+    ));
     assert!(state.objects(&target).is_none());
 }
 
@@ -361,28 +364,19 @@ fn loaded_objects_are_scoped_to_database_and_session() {
         comment: None,
     };
 
-    assert!(state.finish_object_load(&request, CatalogLoadResult::Tables(Ok(vec![table]))));
-    assert!(matches!(
-        state.objects(&target),
-        Some(ObjectListState::Ready {
-            catalog: DatabaseCatalogSnapshot {
-                tables: CatalogSection::Ready(tables),
-                ..
-            },
-            ..
-        }) if tables.len() == 1
+    assert!(state.finish_object_load(
+        &request,
+        CatalogEntry::Tables(CatalogSection::Ready(vec![table]))
     ));
+    let Some(ObjectListState::Ready { catalog, .. }) = state.objects(&target) else {
+        panic!("catalog should be ready")
+    };
+    assert!(matches!(catalog.tables(), CatalogSection::Ready(tables) if tables.len() == 1));
 
     state.clear_object_state(&target);
     assert!(state.begin_object_load(&target).is_some());
-    assert!(matches!(
-        state.objects(&target),
-        Some(ObjectListState::Ready {
-            catalog: DatabaseCatalogSnapshot {
-                tables: CatalogSection::Loading,
-                ..
-            },
-            ..
-        })
-    ));
+    let Some(ObjectListState::Ready { catalog, .. }) = state.objects(&target) else {
+        panic!("catalog should be loading")
+    };
+    assert!(matches!(catalog.tables(), CatalogSection::Loading));
 }

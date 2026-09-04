@@ -253,19 +253,21 @@ fn discover_sidecar() -> Option<PathBuf> {
 
 fn sidecar_candidates(
     current_executable: Option<&Path>,
-    manifest: &Path,
+    manifest_dir: &Path,
     executable_name: &str,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(current_executable) = current_executable {
-        if let Some(directory) = current_executable.parent() {
-            candidates.push(directory.join(executable_name));
-        }
+    if let Some(directory) = current_executable.and_then(Path::parent) {
+        candidates.push(directory.join(executable_name));
     }
 
-    candidates.push(manifest.join("target/debug").join(executable_name));
-    candidates.push(manifest.join("target/release").join(executable_name));
-    collect_target_candidates(&manifest.join("target"), executable_name, &mut candidates);
+    candidates.push(manifest_dir.join("target/debug").join(executable_name));
+    candidates.push(manifest_dir.join("target/release").join(executable_name));
+    collect_target_candidates(
+        &manifest_dir.join("target"),
+        executable_name,
+        &mut candidates,
+    );
     candidates
 }
 

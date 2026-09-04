@@ -326,6 +326,11 @@ pub(crate) struct GridSession {
     changes: GridChangeSet,
 }
 
+struct GridProjection {
+    columns: Vec<usize>,
+    rows: Vec<usize>,
+}
+
 impl GridSession {
     pub(crate) fn new(
         target: QueryTarget,
@@ -619,96 +624,76 @@ impl GridSession {
 
     pub(crate) fn selection_tsv(&self, include_headers: bool) -> Option<String> {
         let page = self.page()?;
-        let rows = if let Some(selection) = self.selection.cells() {
-            let row_start = selection.anchor.row.min(selection.focus.row);
-            let row_end = selection.anchor.row.max(selection.focus.row);
-            let column_start = selection.anchor.column.min(selection.focus.column);
-            let column_end = selection.anchor.column.max(selection.focus.column);
-            let mut rows = Vec::new();
-            if include_headers {
-                rows.push(
-                    page.columns[column_start..=column_end]
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                );
-            }
-            for row in row_start..=row_end {
-                rows.push(
-                    (column_start..=column_end)
-                        .map(|column| {
-                            self.cell_value(GridCell { row, column })
-                                .map(format_grid_value)
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                );
-            }
-            rows
-        } else if !self.selection.rows().is_empty() {
-            let mut rows = Vec::new();
-            if include_headers {
-                rows.push(
-                    page.columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                );
-            }
-            for row in self.selection.rows() {
-                rows.push(
-                    (0..page.columns.len())
-                        .map(|column| {
-                            self.cell_value(GridCell { row: *row, column })
-                                .map(format_grid_value)
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                );
-            }
-            rows
-        } else {
-            return None;
-        };
+        let projection = self.selected_projection(page)?;
+        let (columns, values) = self.project(page, projection, format_grid_value)?;
+        let mut rows = Vec::with_capacity(values.len() + usize::from(include_headers));
+        if include_headers {
+            rows.push(columns);
+        }
+        rows.extend(values);
         Some(format_grid_tsv(rows))
     }
 
     pub(crate) fn export_rows(&self) -> Option<(Vec<String>, Vec<Vec<Value>>)> {
         let page = self.page()?;
+        let projection = self
+            .selected_projection(page)
+            .unwrap_or_else(|| self.visible_projection(page));
+        self.project(page, projection, Value::clone)
+    }
+
+    fn selected_projection(&self, page: &GridPage) -> Option<GridProjection> {
         if let Some(selection) = self.selection.cells() {
             let row_start = selection.anchor.row.min(selection.focus.row);
             let row_end = selection.anchor.row.max(selection.focus.row);
             let column_start = selection.anchor.column.min(selection.focus.column);
             let column_end = selection.anchor.column.max(selection.focus.column);
-            let columns = page.columns[column_start..=column_end]
-                .iter()
-                .map(|column| column.name.clone())
-                .collect();
-            let rows = (row_start..=row_end)
-                .map(|row| {
-                    (column_start..=column_end)
-                        .map(|column| self.cell_value(GridCell { row, column }).cloned())
-                        .collect::<Option<Vec<_>>>()
-                })
-                .collect::<Option<Vec<_>>>()?;
-            return Some((columns, rows));
+            return Some(GridProjection {
+                columns: (column_start..=column_end).collect(),
+                rows: (row_start..=row_end).collect(),
+            });
         }
 
-        let columns = page
+        (!self.selection.rows().is_empty()).then(|| GridProjection {
+            columns: (0..page.columns.len()).collect(),
+            rows: self.selection.rows().iter().copied().collect(),
+        })
+    }
+
+    fn visible_projection(&self, page: &GridPage) -> GridProjection {
+        GridProjection {
+            columns: (0..page.columns.len()).collect(),
+            rows: (0..page.rows.len())
+                .filter(|row| !self.changes.is_row_deleted(*row))
+                .collect(),
+        }
+    }
+
+    fn project<T>(
+        &self,
+        page: &GridPage,
+        projection: GridProjection,
+        project_value: impl Fn(&Value) -> T,
+    ) -> Option<(Vec<String>, Vec<Vec<T>>)> {
+        let columns = projection
             .columns
             .iter()
-            .map(|column| column.name.clone())
-            .collect();
-        let row_indexes = if self.selection.rows().is_empty() {
-            (0..page.rows.len())
-                .filter(|row| !self.changes.is_row_deleted(*row))
-                .collect::<Vec<_>>()
-        } else {
-            self.selection.rows().iter().copied().collect()
-        };
-        let rows = row_indexes
+            .map(|column| page.columns.get(*column).map(|column| column.name.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        let rows = projection
+            .rows
             .into_iter()
             .map(|row| {
-                (0..page.columns.len())
-                    .map(|column| self.cell_value(GridCell { row, column }).cloned())
+                projection
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        self.cell_value(GridCell {
+                            row,
+                            column: *column,
+                        })
+                        .map(&project_value)
+                    })
                     .collect::<Option<Vec<_>>>()
             })
             .collect::<Option<Vec<_>>>()?;

@@ -1,209 +1,82 @@
 use super::*;
 use crate::ui::{
     document_item::DocumentItem, er_diagram_item::ErDiagramItem, mcp_service_item::McpServiceItem,
-    performance_item::PerformanceItem, redis_item::RedisItem, task_center_item::TaskCenterItem,
+    object_definition_item::ObjectDefinitionKind, performance_item::PerformanceItem,
+    redis_item::RedisItem, task_center_item::TaskCenterItem,
 };
 
-pub(super) enum WorkspaceItem {
-    Query {
-        item: Entity<QueryItem>,
-        _document_subscription: Subscription,
-    },
-    TableStructure(Entity<TableStructureItem>),
-    ObjectDefinition(Entity<ObjectDefinitionItem>),
-    DataGrid {
-        item: Entity<DataGridItem>,
-        _observation: Subscription,
-    },
-    Document(Entity<DocumentItem>),
-    Redis {
-        item: Entity<RedisItem>,
-        _deletion_subscription: Subscription,
-    },
-    TaskCenter {
-        item: Entity<TaskCenterItem>,
-        _observation: Subscription,
-    },
-    Performance(Entity<PerformanceItem>),
-    ErDiagram(Entity<ErDiagramItem>),
-    McpService(Entity<McpServiceItem>),
+pub(super) trait WorkspaceItemBehavior {
+    fn query(&self) -> Option<&Entity<QueryItem>> {
+        None
+    }
+
+    fn has_unsaved_changes(&self, _cx: &App) -> bool {
+        false
+    }
+
+    fn discard_name(&self, _language: UiLanguage, cx: &App) -> String {
+        self.label("", cx)
+    }
+
+    fn label(&self, fallback: &str, cx: &App) -> String;
+
+    fn element(&self) -> AnyElement;
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>);
+
+    fn invalidate_target(&self, target: &QueryTarget, cx: &mut Context<AstesiaWorkspace>) {
+        self.invalidate_session(&target.connection_id, target.session_generation, cx);
+    }
+
+    fn invalidate_session(
+        &self,
+        _connection_id: &str,
+        _session_generation: u64,
+        _cx: &mut Context<AstesiaWorkspace>,
+    ) {
+    }
+
+    fn reconcile_sessions(
+        &self,
+        _snapshot: &ConnectionWorkspaceSnapshot,
+        _cx: &mut Context<AstesiaWorkspace>,
+    ) {
+    }
+
+    fn refresh_active_surface(&self, _cx: &mut Context<AstesiaWorkspace>) -> bool {
+        false
+    }
 }
 
+pub(super) struct WorkspaceItem(Box<dyn WorkspaceItemBehavior>);
+
 impl WorkspaceItem {
+    pub(super) fn new(item: impl WorkspaceItemBehavior + 'static) -> Self {
+        Self(Box::new(item))
+    }
+
     pub(super) fn query(&self) -> Option<&Entity<QueryItem>> {
-        match self {
-            Self::Query { item, .. } => Some(item),
-            Self::TableStructure(_)
-            | Self::ObjectDefinition(_)
-            | Self::DataGrid { .. }
-            | Self::Document(_)
-            | Self::Redis { .. }
-            | Self::TaskCenter { .. }
-            | Self::Performance(_)
-            | Self::ErDiagram(_)
-            | Self::McpService(_) => None,
-        }
+        self.0.query()
     }
 
     pub(super) fn has_unsaved_changes(&self, cx: &App) -> bool {
-        match self {
-            Self::Query { item, .. } => item.read(cx).has_unsaved_changes(),
-            Self::DataGrid { item, .. } => item.read(cx).has_unsaved_changes(),
-            Self::TableStructure(_)
-            | Self::ObjectDefinition(_)
-            | Self::Document(_)
-            | Self::Redis { .. }
-            | Self::TaskCenter { .. }
-            | Self::Performance(_)
-            | Self::ErDiagram(_)
-            | Self::McpService(_) => false,
-        }
+        self.0.has_unsaved_changes(cx)
     }
 
     pub(super) fn discard_name(&self, language: UiLanguage, cx: &App) -> String {
-        match self {
-            Self::Query { item, .. } => item
-                .read(cx)
-                .file_display_name()
-                .unwrap_or_else(|| text(language, "未命名查询", "Untitled Query").to_string()),
-            Self::DataGrid { item, .. } => item.read(cx).table_name(),
-            Self::TableStructure(item) => item.read(cx).label(),
-            Self::ObjectDefinition(item) => item.read(cx).label(),
-            Self::Document(item) => item.read(cx).label(),
-            Self::Redis { item, .. } => item.read(cx).label(),
-            Self::TaskCenter { item, .. } => item.read(cx).label(),
-            Self::Performance(item) => item.read(cx).label(cx),
-            Self::ErDiagram(item) => item.read(cx).label(cx),
-            Self::McpService(item) => item.read(cx).label(),
-        }
+        self.0.discard_name(language, cx)
     }
 
     pub(super) fn label(&self, fallback: &str, cx: &App) -> String {
-        match self {
-            Self::Query { item, .. } => item
-                .read(cx)
-                .file_display_name()
-                .unwrap_or_else(|| fallback.to_string()),
-            Self::TableStructure(item) => item.read(cx).label(),
-            Self::ObjectDefinition(item) => item.read(cx).label(),
-            Self::DataGrid { item, .. } => item.read(cx).label(cx),
-            Self::Document(item) => item.read(cx).label(),
-            Self::Redis { item, .. } => item.read(cx).label(),
-            Self::TaskCenter { item, .. } => item.read(cx).label(),
-            Self::Performance(item) => item.read(cx).label(cx),
-            Self::ErDiagram(item) => item.read(cx).label(cx),
-            Self::McpService(item) => item.read(cx).label(),
-        }
+        self.0.label(fallback, cx)
     }
 
     pub(super) fn element(&self) -> AnyElement {
-        match self {
-            Self::Query { item, .. } => item.clone().into_any_element(),
-            Self::TableStructure(item) => item.clone().into_any_element(),
-            Self::ObjectDefinition(item) => item.clone().into_any_element(),
-            Self::DataGrid { item, .. } => item.clone().into_any_element(),
-            Self::Document(item) => item.clone().into_any_element(),
-            Self::Redis { item, .. } => item.clone().into_any_element(),
-            Self::TaskCenter { item, .. } => item.clone().into_any_element(),
-            Self::Performance(item) => item.clone().into_any_element(),
-            Self::ErDiagram(item) => item.clone().into_any_element(),
-            Self::McpService(item) => item.clone().into_any_element(),
-        }
+        self.0.element()
     }
 
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
-        match self {
-            Self::Query { item, .. } => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::TableStructure(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::ObjectDefinition(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::DataGrid { item, .. } => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::Document(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::Redis { item, .. } => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::TaskCenter { item, .. } => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::Performance(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::ErDiagram(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-            Self::McpService(item) => {
-                item.update(cx, |item, cx| item.focus(window, cx));
-            }
-        }
-    }
-
-    pub(super) fn matches_table_structure(
-        &self,
-        target: &QueryTarget,
-        table: &TableRef,
-        cx: &App,
-    ) -> bool {
-        matches!(
-            self,
-            Self::TableStructure(item) if item.read(cx).matches(target, table)
-        )
-    }
-
-    pub(super) fn matches_data_grid(
-        &self,
-        target: &QueryTarget,
-        table: &TableRef,
-        cx: &App,
-    ) -> bool {
-        matches!(
-            self,
-            Self::DataGrid { item, .. } if item.read(cx).matches(target, table)
-        )
-    }
-
-    pub(super) fn matches_object_definition(&self, object: &ObjectDefinition, cx: &App) -> bool {
-        matches!(
-            self,
-            Self::ObjectDefinition(item) if item.read(cx).matches(object)
-        )
-    }
-
-    pub(super) fn matches_document_collection(
-        &self,
-        target: &QueryTarget,
-        collection: &TableRef,
-        cx: &App,
-    ) -> bool {
-        matches!(self, Self::Document(item) if item.read(cx).matches(target, collection))
-    }
-
-    pub(super) fn matches_redis_key(&self, target: &QueryTarget, key: &str, cx: &App) -> bool {
-        matches!(self, Self::Redis { item, .. } if item.read(cx).matches(target, key))
-    }
-
-    pub(super) fn matches_performance(&self, target: &QueryTarget, cx: &App) -> bool {
-        matches!(self, Self::Performance(item) if item.read(cx).matches(target))
-    }
-
-    pub(super) fn matches_er_diagram(&self, target: &QueryTarget, cx: &App) -> bool {
-        matches!(self, Self::ErDiagram(item) if item.read(cx).matches(target))
-    }
-
-    pub(super) fn is_task_center(&self) -> bool {
-        matches!(self, Self::TaskCenter { .. })
-    }
-
-    pub(super) fn is_mcp_service(&self) -> bool {
-        matches!(self, Self::McpService(_))
+        self.0.focus(window, cx);
     }
 
     pub(super) fn invalidate_target(
@@ -211,47 +84,7 @@ impl WorkspaceItem {
         target: &QueryTarget,
         cx: &mut Context<AstesiaWorkspace>,
     ) {
-        match self {
-            Self::Query { item, .. } => {
-                item.update(cx, |item, cx| item.invalidate_target(target, cx));
-            }
-            Self::TableStructure(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::ObjectDefinition(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::DataGrid { item, .. } => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::Document(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::Redis { item, .. } => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::Performance(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::ErDiagram(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(&target.connection_id, target.session_generation, cx);
-                });
-            }
-            Self::TaskCenter { .. } | Self::McpService(_) => {}
-        }
+        self.0.invalidate_target(target, cx);
     }
 
     pub(super) fn invalidate_session(
@@ -260,49 +93,8 @@ impl WorkspaceItem {
         session_generation: u64,
         cx: &mut Context<AstesiaWorkspace>,
     ) {
-        match self {
-            Self::Query { item, .. } => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::TableStructure(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::ObjectDefinition(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::DataGrid { item, .. } => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::Document(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::Redis { item, .. } => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::Performance(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::ErDiagram(item) => {
-                item.update(cx, |item, cx| {
-                    item.invalidate_session(connection_id, session_generation, cx)
-                });
-            }
-            Self::TaskCenter { .. } | Self::McpService(_) => {}
-        }
+        self.0
+            .invalidate_session(connection_id, session_generation, cx);
     }
 
     pub(super) fn reconcile_sessions(
@@ -310,32 +102,311 @@ impl WorkspaceItem {
         snapshot: &ConnectionWorkspaceSnapshot,
         cx: &mut Context<AstesiaWorkspace>,
     ) {
-        if let Self::Query { item, .. } = self {
-            item.update(cx, |item, cx| item.reconcile_sessions(snapshot, cx));
-        }
+        self.0.reconcile_sessions(snapshot, cx);
     }
 
     pub(super) fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
-        match self {
-            Self::Performance(item) => {
-                item.update(cx, |item, cx| item.refresh(cx));
-                true
-            }
-            Self::ErDiagram(item) => {
-                item.update(cx, |item, cx| item.refresh(cx));
-                true
-            }
-            Self::DataGrid { item, .. } => {
-                item.update(cx, |item, cx| item.refresh_active(cx));
-                true
-            }
-            Self::Query { item, .. } => item.update(cx, |item, cx| item.refresh_chart(cx)),
-            Self::TableStructure(_)
-            | Self::ObjectDefinition(_)
-            | Self::Document(_)
-            | Self::Redis { .. }
-            | Self::TaskCenter { .. }
-            | Self::McpService(_) => false,
-        }
+        self.0.refresh_active_surface(cx)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceItemKey {
+    Query(WorkspaceTabId),
+    TableStructure(QueryTarget, TableRef),
+    DataGrid(QueryTarget, TableRef),
+    ObjectDefinition {
+        target: QueryTarget,
+        kind: ObjectDefinitionKind,
+        name: String,
+    },
+    Document(QueryTarget, TableRef),
+    Redis(QueryTarget, String),
+    TaskCenter,
+    Performance(QueryTarget),
+    ErDiagram(QueryTarget),
+    McpService,
+}
+
+impl WorkspaceItemBehavior for Entity<QueryItem> {
+    fn query(&self) -> Option<&Entity<QueryItem>> {
+        Some(self)
+    }
+
+    fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.read(cx).has_unsaved_changes()
+    }
+
+    fn discard_name(&self, language: UiLanguage, cx: &App) -> String {
+        self.read(cx)
+            .file_display_name()
+            .unwrap_or_else(|| text(language, "未命名查询", "Untitled Query").to_string())
+    }
+
+    fn label(&self, fallback: &str, cx: &App) -> String {
+        self.read(cx)
+            .file_display_name()
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_target(&self, target: &QueryTarget, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.invalidate_target(target, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+
+    fn reconcile_sessions(
+        &self,
+        snapshot: &ConnectionWorkspaceSnapshot,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| item.reconcile_sessions(snapshot, cx));
+    }
+
+    fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
+        self.update(cx, |item, cx| item.refresh_chart(cx))
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<TableStructureItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<ObjectDefinitionItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<DataGridItem> {
+    fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.read(cx).has_unsaved_changes()
+    }
+
+    fn discard_name(&self, _language: UiLanguage, cx: &App) -> String {
+        self.read(cx).table_name()
+    }
+
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label(cx)
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+
+    fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
+        self.update(cx, |item, cx| item.refresh_active(cx));
+        true
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<DocumentItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<RedisItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<TaskCenterItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<PerformanceItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label(cx)
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+
+    fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
+        self.update(cx, |item, cx| item.refresh(cx));
+        true
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<ErDiagramItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label(cx)
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
+    }
+
+    fn invalidate_session(
+        &self,
+        connection_id: &str,
+        session_generation: u64,
+        cx: &mut Context<AstesiaWorkspace>,
+    ) {
+        self.update(cx, |item, cx| {
+            item.invalidate_session(connection_id, session_generation, cx)
+        });
+    }
+
+    fn refresh_active_surface(&self, cx: &mut Context<AstesiaWorkspace>) -> bool {
+        self.update(cx, |item, cx| item.refresh(cx));
+        true
+    }
+}
+
+impl WorkspaceItemBehavior for Entity<McpServiceItem> {
+    fn label(&self, _fallback: &str, cx: &App) -> String {
+        self.read(cx).label()
+    }
+
+    fn element(&self) -> AnyElement {
+        self.clone().into_any_element()
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<AstesiaWorkspace>) {
+        self.update(cx, |item, cx| item.focus(window, cx));
     }
 }

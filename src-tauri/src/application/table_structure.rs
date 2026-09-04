@@ -84,10 +84,6 @@ impl TableStructureState {
         &self.table
     }
 
-    pub(crate) fn matches(&self, target: &QueryTarget, table: &TableRef) -> bool {
-        self.target == *target && self.table == *table
-    }
-
     pub(crate) fn status(&self) -> TableStructureStatus<'_> {
         match &self.phase {
             TableStructurePhase::Idle => TableStructureStatus::Idle,

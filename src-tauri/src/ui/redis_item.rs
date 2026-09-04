@@ -100,10 +100,6 @@ impl RedisItem {
         item
     }
 
-    pub(super) fn matches(&self, target: &QueryTarget, key: &str) -> bool {
-        &self.target == target && self.key == key
-    }
-
     pub(super) fn label(&self) -> String {
         format!(
             "{} · {}/{}",

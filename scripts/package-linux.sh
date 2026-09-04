@@ -4,6 +4,7 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 manifest="$repository_root/src-tauri/Cargo.toml"
+toolchain="1.97.1"
 target="${1:-x86_64-unknown-linux-gnu}"
 
 case "$target" in
@@ -23,8 +24,8 @@ stage="$(mktemp -d)"
 bundle="$stage/Astesia"
 trap 'rm -rf "$stage"' EXIT
 
-rustup target add --toolchain 1.97.1 "$target"
-rustup run 1.97.1 cargo build --release --locked --manifest-path "$manifest" --target "$target" \
+rustup target add --toolchain "$toolchain" "$target"
+rustup run "$toolchain" cargo build --release --locked --manifest-path "$manifest" --target "$target" \
   --bin astesia --bin astesia-mcp
 
 mkdir -p "$bundle/bin" \

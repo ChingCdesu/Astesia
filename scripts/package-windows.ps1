@@ -12,6 +12,7 @@ if ($Target -ne 'x86_64-pc-windows-msvc') {
 
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $Manifest = Join-Path $RepositoryRoot 'src-tauri/Cargo.toml'
+$Toolchain = '1.97.1'
 $ManifestText = Get-Content -Raw $Manifest
 $VersionMatch = [regex]::Match($ManifestText, '(?m)^version = "([^"]+)"')
 if (-not $VersionMatch.Success) {
@@ -30,9 +31,9 @@ $Stage = Join-Path ([System.IO.Path]::GetTempPath()) "astesia-package-$([guid]::
 $Bundle = Join-Path $Stage 'Astesia'
 
 try {
-    rustup target add --toolchain 1.97.1 $Target
+    rustup target add --toolchain $Toolchain $Target
     if ($LASTEXITCODE -ne 0) { throw 'Could not install the Rust target' }
-    rustup run 1.97.1 cargo build --release --locked --manifest-path $Manifest --target $Target --bin astesia --bin astesia-mcp
+    rustup run $Toolchain cargo build --release --locked --manifest-path $Manifest --target $Target --bin astesia --bin astesia-mcp
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Astesia' }
 
     New-Item -ItemType Directory -Force -Path $Bundle, $PackageDirectory | Out-Null

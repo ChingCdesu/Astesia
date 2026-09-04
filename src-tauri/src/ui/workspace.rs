@@ -89,7 +89,7 @@ mod item;
 mod operations;
 mod view;
 
-use item::WorkspaceItem;
+use item::{WorkspaceItem, WorkspaceItemKey};
 
 pub(super) struct AstesiaRoot {
     phase: AppPhase,
@@ -272,7 +272,9 @@ pub(super) struct AstesiaWorkspace {
 
 struct WorkspaceTab {
     id: WorkspaceTabId,
+    key: WorkspaceItemKey,
     item: WorkspaceItem,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl AstesiaWorkspace {
@@ -293,12 +295,12 @@ impl AstesiaWorkspace {
             .subscribe(&query_item, |_, _, _: &QueryDocumentStateChanged, cx| {
                 cx.notify()
             });
+        let initial_tab_id = tabs.active();
         let workspace_tabs = vec![WorkspaceTab {
-            id: tabs.active(),
-            item: WorkspaceItem::Query {
-                item: query_item,
-                _document_subscription: query_item_subscription,
-            },
+            id: initial_tab_id,
+            key: WorkspaceItemKey::Query(initial_tab_id),
+            item: WorkspaceItem::new(query_item),
+            _subscriptions: vec![query_item_subscription],
         }];
         let profiles_subscription = cx.subscribe_in(
             &connection_profiles,
@@ -570,6 +572,38 @@ impl AstesiaWorkspace {
         self.active_item().query()
     }
 
+    fn open_or_activate(
+        &mut self,
+        key: WorkspaceItemKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        build: impl FnOnce(
+            &mut Self,
+            &mut Window,
+            &mut Context<Self>,
+        ) -> (WorkspaceItem, Vec<Subscription>),
+    ) {
+        if let Some(id) = self
+            .workspace_tabs
+            .iter()
+            .find(|tab| tab.key == key)
+            .map(|tab| tab.id)
+        {
+            self.activate_tab(id, window, cx);
+            return;
+        }
+
+        let (item, subscriptions) = build(self, window, cx);
+        let id = self.tabs.add();
+        self.workspace_tabs.push(WorkspaceTab {
+            id,
+            key,
+            item,
+            _subscriptions: subscriptions,
+        });
+        self.focus_active_item(window, cx);
+    }
+
     fn focus_active_item(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_item().focus(window, cx);
         cx.notify();
@@ -601,10 +635,9 @@ impl AstesiaWorkspace {
         let id = self.tabs.add();
         self.workspace_tabs.push(WorkspaceTab {
             id,
-            item: WorkspaceItem::Query {
-                item,
-                _document_subscription: document_subscription,
-            },
+            key: WorkspaceItemKey::Query(id),
+            item: WorkspaceItem::new(item),
+            _subscriptions: vec![document_subscription],
         });
         cx.notify();
     }
@@ -616,29 +649,19 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_table_structure(&target, &table, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            TableStructureItem::new(
-                self.application.clone(),
-                target,
-                table,
-                self.settings.clone(),
-                cx,
-            )
+        let key = WorkspaceItemKey::TableStructure(target.clone(), table.clone());
+        self.open_or_activate(key, window, cx, move |workspace, _, cx| {
+            let item = cx.new(|cx| {
+                TableStructureItem::new(
+                    workspace.application.clone(),
+                    target,
+                    table,
+                    workspace.settings.clone(),
+                    cx,
+                )
+            });
+            (WorkspaceItem::new(item), Vec::new())
         });
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::TableStructure(item),
-        });
-        self.focus_active_item(window, cx);
     }
 
     fn open_data_grid(
@@ -648,34 +671,21 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_data_grid(&target, &table, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            DataGridItem::new(
-                self.application.clone(),
-                target,
-                table,
-                self.settings.clone(),
-                window,
-                cx,
-            )
+        let key = WorkspaceItemKey::DataGrid(target.clone(), table.clone());
+        self.open_or_activate(key, window, cx, move |workspace, window, cx| {
+            let item = cx.new(|cx| {
+                DataGridItem::new(
+                    workspace.application.clone(),
+                    target,
+                    table,
+                    workspace.settings.clone(),
+                    window,
+                    cx,
+                )
+            });
+            let observation = cx.observe(&item, |_, _, cx| cx.notify());
+            (WorkspaceItem::new(item), vec![observation])
         });
-        let observation = cx.observe(&item, |_, _, cx| cx.notify());
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::DataGrid {
-                item,
-                _observation: observation,
-            },
-        });
-        self.focus_active_item(window, cx);
     }
 
     fn open_object_definition(
@@ -684,22 +694,17 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_object_definition(&object, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item =
-            cx.new(|cx| ObjectDefinitionItem::new(object, self.settings.clone(), window, cx));
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::ObjectDefinition(item),
+        let key = WorkspaceItemKey::ObjectDefinition {
+            target: object.target.clone(),
+            kind: object.kind,
+            name: object.name.clone(),
+        };
+        self.open_or_activate(key, window, cx, move |workspace, window, cx| {
+            let item = cx.new(|cx| {
+                ObjectDefinitionItem::new(object, workspace.settings.clone(), window, cx)
+            });
+            (WorkspaceItem::new(item), Vec::new())
         });
-        self.focus_active_item(window, cx);
     }
 
     fn activate_tab(&mut self, id: WorkspaceTabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -828,14 +833,12 @@ impl AstesiaWorkspace {
 
         let language = self.settings.read(cx).language();
         let message = text(language, "重启 Astesia？", "Restart Astesia?");
-        let detail = format!(
-            "{} {unsaved_count}",
-            text(
-                language,
-                "重启将放弃未保存的标签页数量：",
-                "Restarting will discard this many unsaved tabs:"
-            )
+        let unsaved_label = text(
+            language,
+            "重启将放弃未保存的标签页数量：",
+            "Restarting will discard this many unsaved tabs:",
         );
+        let detail = format!("{unsaved_label} {unsaved_count}");
         let answer = window.prompt(
             PromptLevel::Warning,
             message,

@@ -7,6 +7,13 @@ use crate::db::{DbType, SqlDialect, TableRef};
 use super::connections::ConnectionManager;
 use super::QueryTarget;
 
+mod policy;
+
+pub(crate) use policy::{
+    object_creation_policy, trigger_event_supported, trigger_timing_supported,
+    trigger_uses_function_reference, ObjectCreationPolicy,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DatabaseObjectKind {
     Database,
@@ -806,15 +813,13 @@ fn trigger_timing(
     db_type: DbType,
     timing: TriggerTiming,
 ) -> Result<&'static str, ObjectMutationError> {
-    match (db_type, timing) {
-        (DbType::PostgreSQL | DbType::MySQL | DbType::SQLite, TriggerTiming::Before) => {
-            Ok("BEFORE")
-        }
-        (_, TriggerTiming::After) => Ok("AFTER"),
-        (DbType::PostgreSQL | DbType::SQLite | DbType::SQLServer, TriggerTiming::InsteadOf) => {
-            Ok("INSTEAD OF")
-        }
-        _ => unsupported(db_type, "selected trigger timing"),
+    if !trigger_timing_supported(db_type, timing) {
+        return unsupported(db_type, "selected trigger timing");
+    }
+    match timing {
+        TriggerTiming::Before => Ok("BEFORE"),
+        TriggerTiming::After => Ok("AFTER"),
+        TriggerTiming::InsteadOf => Ok("INSTEAD OF"),
     }
 }
 
@@ -826,7 +831,7 @@ fn trigger_event(
         TriggerEvent::Insert => Ok("INSERT"),
         TriggerEvent::Update => Ok("UPDATE"),
         TriggerEvent::Delete => Ok("DELETE"),
-        TriggerEvent::Truncate if db_type == DbType::PostgreSQL => Ok("TRUNCATE"),
+        TriggerEvent::Truncate if trigger_event_supported(db_type, event) => Ok("TRUNCATE"),
         TriggerEvent::Truncate => unsupported(db_type, "TRUNCATE trigger"),
     }
 }

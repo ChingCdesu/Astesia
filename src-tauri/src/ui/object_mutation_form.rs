@@ -9,14 +9,20 @@ use zed_ui::{
 };
 
 use crate::application::{
-    Application, CreateObjectSpec, DatabaseObjectKind, ObjectMutation, QueryTarget,
-    TableColumnSpec, TriggerEvent, TriggerTiming,
+    object_creation_policy, trigger_event_supported, trigger_timing_supported,
+    trigger_uses_function_reference, Application, CreateObjectSpec, DatabaseObjectKind,
+    ObjectCreationPolicy, ObjectMutation, QueryTarget, TableColumnSpec, TriggerEvent,
+    TriggerTiming,
 };
-use crate::db::{DbType, TableRef};
+use crate::db::TableRef;
 use crate::platform::UiLanguage;
 
 use super::localization::text;
 use super::sql_language;
+
+mod draft;
+
+use draft::{ColumnDraft, CreateObjectDraft, ObjectMutationFormState, TableFields, TriggerFields};
 
 #[derive(Clone, Debug)]
 pub(super) enum ObjectMutationFormMode {
@@ -38,12 +44,6 @@ impl ObjectMutationFormMode {
             Self::Create { target, .. } | Self::Rename { target, .. } => target,
         }
     }
-
-    fn kind(&self) -> DatabaseObjectKind {
-        match self {
-            Self::Create { kind, .. } | Self::Rename { kind, .. } => *kind,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -59,64 +59,10 @@ enum FormOperation {
     Executing,
 }
 
-struct ColumnDraft {
-    id: u64,
-    name: Entity<InputField>,
-    data_type: Entity<InputField>,
-    default_value: Entity<InputField>,
-    nullable: bool,
-    primary_key: bool,
-}
-
-struct TableFields {
-    columns: Vec<ColumnDraft>,
-    next_column_id: u64,
-}
-
-struct DefinitionFields {
-    definition: Entity<Editor>,
-}
-
-struct FunctionFields {
-    arguments: Entity<InputField>,
-    return_type: Entity<InputField>,
-    language: Entity<InputField>,
-    definition: Entity<Editor>,
-}
-
-struct ProcedureFields {
-    arguments: Entity<InputField>,
-    language: Entity<InputField>,
-    definition: Entity<Editor>,
-}
-
-struct TriggerFields {
-    table: Entity<InputField>,
-    timing: TriggerTiming,
-    event: TriggerEvent,
-    definition: Entity<Editor>,
-}
-
-struct UserFields {
-    host: Entity<InputField>,
-    password: Entity<InputField>,
-}
-
-enum ObjectMutationFields {
-    Basic,
-    Table(TableFields),
-    View(DefinitionFields),
-    Function(FunctionFields),
-    Procedure(ProcedureFields),
-    Trigger(TriggerFields),
-    User(UserFields),
-}
-
 pub(super) struct ObjectMutationForm {
     application: Arc<Application>,
-    mode: ObjectMutationFormMode,
+    state: ObjectMutationFormState,
     name: Entity<InputField>,
-    fields: ObjectMutationFields,
     operation: FormOperation,
     error: Option<String>,
     scroll_handle: ScrollHandle,
@@ -135,7 +81,6 @@ impl ObjectMutationForm {
         cx: &mut Context<Self>,
     ) -> Self {
         let db_type = mode.target().db_type;
-        let kind = mode.kind();
         let name = input(
             window,
             cx,
@@ -143,84 +88,44 @@ impl ObjectMutationForm {
             text(language_setting, "名称", "Name"),
             1,
         );
-        if let ObjectMutationFormMode::Rename { original_name, .. } = &mode {
-            let initial_name = if kind == DatabaseObjectKind::Table {
-                rename_default_name(original_name)
-            } else {
-                original_name
-            };
-            set_text(&name, initial_name, window, cx);
-        }
-        let fields = match &mode {
-            ObjectMutationFormMode::Rename { .. } => ObjectMutationFields::Basic,
-            ObjectMutationFormMode::Create { kind, .. } => match kind {
-                DatabaseObjectKind::Database | DatabaseObjectKind::Schema => {
-                    ObjectMutationFields::Basic
-                }
-                DatabaseObjectKind::Table => {
-                    let mut fields = TableFields {
-                        columns: Vec::new(),
-                        next_column_id: 0,
-                    };
-                    let column =
-                        column_draft(&mut fields.next_column_id, language_setting, window, cx);
-                    set_text(&column.name, "id", window, cx);
-                    set_text(&column.data_type, default_column_type(db_type), window, cx);
-                    fields.columns.push(column);
-                    ObjectMutationFields::Table(fields)
-                }
-                DatabaseObjectKind::View => ObjectMutationFields::View(DefinitionFields {
-                    definition: definition_editor(window, cx),
-                }),
-                DatabaseObjectKind::Function => ObjectMutationFields::Function(FunctionFields {
-                    arguments: arguments_input(language_setting, window, cx),
-                    return_type: return_type_input(db_type, language_setting, window, cx),
-                    language: routine_language_input(db_type, language_setting, window, cx),
-                    definition: definition_editor(window, cx),
-                }),
-                DatabaseObjectKind::Procedure => ObjectMutationFields::Procedure(ProcedureFields {
-                    arguments: arguments_input(language_setting, window, cx),
-                    language: routine_language_input(db_type, language_setting, window, cx),
-                    definition: definition_editor(window, cx),
-                }),
-                DatabaseObjectKind::Trigger => ObjectMutationFields::Trigger(TriggerFields {
-                    table: input(
-                        window,
-                        cx,
-                        text(language_setting, "触发器所属表", "Trigger table"),
-                        text(language_setting, "表", "Table"),
-                        5,
-                    ),
-                    timing: if db_type == DbType::SQLServer {
-                        TriggerTiming::After
-                    } else {
-                        TriggerTiming::Before
-                    },
-                    event: TriggerEvent::Insert,
-                    definition: definition_editor(window, cx),
-                }),
-                DatabaseObjectKind::User => {
-                    let host = input(window, cx, "%", text(language_setting, "主机", "Host"), 6);
-                    set_text(&host, "%", window, cx);
-                    let password = cx.new(|cx| {
-                        InputField::new(
-                            window,
-                            cx,
-                            text(language_setting, "输入密码", "Enter password"),
-                        )
-                        .label(text(language_setting, "密码", "Password"))
-                        .tab_index(7)
-                        .masked(true)
-                    });
-                    ObjectMutationFields::User(UserFields { host, password })
-                }
+        let state = match mode {
+            ObjectMutationFormMode::Create {
+                target,
+                kind,
+                schema,
+            } => ObjectMutationFormState::Create {
+                target,
+                schema,
+                draft: CreateObjectDraft::new(
+                    kind,
+                    object_creation_policy(db_type),
+                    language_setting,
+                    window,
+                    cx,
+                ),
             },
+            ObjectMutationFormMode::Rename {
+                target,
+                kind,
+                original_name,
+            } => {
+                let initial_name = if kind == DatabaseObjectKind::Table {
+                    rename_default_name(&original_name)
+                } else {
+                    &original_name
+                };
+                set_text(&name, initial_name, window, cx);
+                ObjectMutationFormState::Rename {
+                    target,
+                    kind,
+                    original_name,
+                }
+            }
         };
         Self {
             application,
-            mode,
+            state,
             name,
-            fields,
             operation: FormOperation::Idle,
             error: None,
             scroll_handle: ScrollHandle::new(),
@@ -228,13 +133,32 @@ impl ObjectMutationForm {
         }
     }
 
+    fn table_fields_mut(&mut self) -> Option<&mut TableFields> {
+        match &mut self.state {
+            ObjectMutationFormState::Create {
+                draft: CreateObjectDraft::Table(fields),
+                ..
+            } => Some(fields),
+            _ => None,
+        }
+    }
+
+    fn trigger_fields_mut(&mut self) -> Option<&mut TriggerFields> {
+        match &mut self.state {
+            ObjectMutationFormState::Create {
+                draft: CreateObjectDraft::Trigger(fields),
+                ..
+            } => Some(fields),
+            _ => None,
+        }
+    }
+
     fn new_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<ColumnDraft> {
-        let ObjectMutationFields::Table(fields) = &mut self.fields else {
-            return None;
-        };
+        let language = self.language_setting;
+        let fields = self.table_fields_mut()?;
         Some(column_draft(
             &mut fields.next_column_id,
-            self.language_setting,
+            language,
             window,
             cx,
         ))
@@ -247,13 +171,10 @@ impl ObjectMutationForm {
         let Some(column) = self.new_column(window, cx) else {
             return;
         };
-        set_text(
-            &column.data_type,
-            default_column_type(self.mode.target().db_type),
-            window,
-            cx,
-        );
-        if let ObjectMutationFields::Table(fields) = &mut self.fields {
+        let default_column_type =
+            object_creation_policy(self.state.target().db_type).default_column_type;
+        set_text(&column.data_type, default_column_type, window, cx);
+        if let Some(fields) = self.table_fields_mut() {
             fields.columns.push(column);
         }
         cx.notify();
@@ -261,7 +182,7 @@ impl ObjectMutationForm {
 
     fn remove_column(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.operation == FormOperation::Idle {
-            if let ObjectMutationFields::Table(fields) = &mut self.fields {
+            if let Some(fields) = self.table_fields_mut() {
                 if fields.columns.len() > 1 {
                     fields.columns.retain(|column| column.id != id);
                     cx.notify();
@@ -271,7 +192,7 @@ impl ObjectMutationForm {
     }
 
     fn set_column_nullable(&mut self, id: u64, state: ToggleState, cx: &mut Context<Self>) {
-        let ObjectMutationFields::Table(fields) = &mut self.fields else {
+        let Some(fields) = self.table_fields_mut() else {
             return;
         };
         if let Some(column) = fields.columns.iter_mut().find(|column| column.id == id) {
@@ -281,7 +202,7 @@ impl ObjectMutationForm {
     }
 
     fn set_column_primary_key(&mut self, id: u64, state: ToggleState, cx: &mut Context<Self>) {
-        let ObjectMutationFields::Table(fields) = &mut self.fields else {
+        let Some(fields) = self.table_fields_mut() else {
             return;
         };
         if let Some(column) = fields.columns.iter_mut().find(|column| column.id == id) {
@@ -295,7 +216,7 @@ impl ObjectMutationForm {
 
     fn set_trigger_timing(&mut self, timing: TriggerTiming, cx: &mut Context<Self>) {
         if self.operation == FormOperation::Idle {
-            if let ObjectMutationFields::Trigger(fields) = &mut self.fields {
+            if let Some(fields) = self.trigger_fields_mut() {
                 fields.timing = timing;
                 cx.notify();
             }
@@ -304,7 +225,7 @@ impl ObjectMutationForm {
 
     fn set_trigger_event(&mut self, event: TriggerEvent, cx: &mut Context<Self>) {
         if self.operation == FormOperation::Idle {
-            if let ObjectMutationFields::Trigger(fields) = &mut self.fields {
+            if let Some(fields) = self.trigger_fields_mut() {
                 fields.event = event;
                 cx.notify();
             }
@@ -318,8 +239,8 @@ impl ObjectMutationForm {
                 text(self.language_setting, "名称不能为空", "Name is required").to_string(),
             );
         }
-        match &self.mode {
-            ObjectMutationFormMode::Rename {
+        match &self.state {
+            ObjectMutationFormState::Rename {
                 kind,
                 original_name,
                 ..
@@ -328,87 +249,64 @@ impl ObjectMutationForm {
                 name: original_name.clone(),
                 new_name: name,
             }),
-            ObjectMutationFormMode::Create {
+            ObjectMutationFormState::Create {
                 target,
-                kind,
                 schema,
+                draft,
             } => {
                 let name = qualify_name(schema.as_deref(), &name);
-                let spec = match (&self.fields, kind) {
-                    (ObjectMutationFields::Basic, DatabaseObjectKind::Database) => {
-                        CreateObjectSpec::Database { name }
-                    }
-                    (ObjectMutationFields::Basic, DatabaseObjectKind::Schema) => {
-                        CreateObjectSpec::Schema { name }
-                    }
-                    (ObjectMutationFields::Table(fields), DatabaseObjectKind::Table) => {
-                        CreateObjectSpec::Table {
-                            name,
-                            columns: fields
-                                .columns
-                                .iter()
-                                .map(|column| TableColumnSpec {
-                                    name: field_text(&column.name, cx).trim().to_string(),
-                                    data_type: field_text(&column.data_type, cx).trim().to_string(),
-                                    nullable: column.nullable,
-                                    primary_key: column.primary_key,
-                                    default_value: optional_text(&column.default_value, cx),
-                                })
-                                .collect(),
-                        }
-                    }
-                    (ObjectMutationFields::View(fields), DatabaseObjectKind::View) => {
-                        CreateObjectSpec::View {
-                            name,
-                            query: fields.definition.read(cx).text(cx),
-                        }
-                    }
-                    (ObjectMutationFields::Function(fields), DatabaseObjectKind::Function) => {
-                        CreateObjectSpec::Function {
-                            name,
-                            arguments: field_text(&fields.arguments, cx),
-                            return_type: field_text(&fields.return_type, cx),
-                            language: field_text(&fields.language, cx),
-                            body: fields.definition.read(cx).text(cx),
-                        }
-                    }
-                    (ObjectMutationFields::Procedure(fields), DatabaseObjectKind::Procedure) => {
-                        CreateObjectSpec::Procedure {
-                            name,
-                            arguments: field_text(&fields.arguments, cx),
-                            language: field_text(&fields.language, cx),
-                            body: fields.definition.read(cx).text(cx),
-                        }
-                    }
-                    (ObjectMutationFields::Trigger(fields), DatabaseObjectKind::Trigger) => {
-                        CreateObjectSpec::Trigger {
-                            name,
-                            table: TableRef::parse(
-                                target.db_type,
-                                field_text(&fields.table, cx).trim(),
-                            )
-                            .map_err(|error| error.to_string())?,
-                            timing: fields.timing,
-                            event: fields.event,
-                            body: fields.definition.read(cx).text(cx),
-                        }
-                    }
-                    (ObjectMutationFields::User(fields), DatabaseObjectKind::User) => {
-                        CreateObjectSpec::User {
-                            name,
-                            host: (target.db_type == DbType::MySQL)
-                                .then(|| field_text(&fields.host, cx)),
-                            password: field_text(&fields.password, cx),
-                        }
-                    }
-                    _ => {
-                        return Err(text(
-                            self.language_setting,
-                            "对象表单状态无效",
-                            "Object form state is invalid",
+                let spec = match draft {
+                    CreateObjectDraft::Database => CreateObjectSpec::Database { name },
+                    CreateObjectDraft::Schema => CreateObjectSpec::Schema { name },
+                    CreateObjectDraft::Table(fields) => CreateObjectSpec::Table {
+                        name,
+                        columns: fields
+                            .columns
+                            .iter()
+                            .map(|column| TableColumnSpec {
+                                name: field_text(&column.name, cx).trim().to_string(),
+                                data_type: field_text(&column.data_type, cx).trim().to_string(),
+                                nullable: column.nullable,
+                                primary_key: column.primary_key,
+                                default_value: optional_text(&column.default_value, cx),
+                            })
+                            .collect(),
+                    },
+                    CreateObjectDraft::View(fields) => CreateObjectSpec::View {
+                        name,
+                        query: fields.definition.read(cx).text(cx),
+                    },
+                    CreateObjectDraft::Function(fields) => CreateObjectSpec::Function {
+                        name,
+                        arguments: field_text(&fields.arguments, cx),
+                        return_type: field_text(&fields.return_type, cx),
+                        language: field_text(&fields.language, cx),
+                        body: fields.definition.read(cx).text(cx),
+                    },
+                    CreateObjectDraft::Procedure(fields) => CreateObjectSpec::Procedure {
+                        name,
+                        arguments: field_text(&fields.arguments, cx),
+                        language: field_text(&fields.language, cx),
+                        body: fields.definition.read(cx).text(cx),
+                    },
+                    CreateObjectDraft::Trigger(fields) => CreateObjectSpec::Trigger {
+                        name,
+                        table: TableRef::parse(
+                            target.db_type,
+                            field_text(&fields.table, cx).trim(),
                         )
-                        .to_string());
-                    }
+                        .map_err(|error| error.to_string())?,
+                        timing: fields.timing,
+                        event: fields.event,
+                        body: fields.definition.read(cx).text(cx),
+                    },
+                    CreateObjectDraft::User(fields) => CreateObjectSpec::User {
+                        name,
+                        host: object_creation_policy(target.db_type)
+                            .user_host
+                            .then(|| field_text(&fields.host, cx)),
+                        password: field_text(&fields.password, cx),
+                    },
                 };
                 Ok(ObjectMutation::Create(spec))
             }
@@ -432,8 +330,8 @@ impl ObjectMutationForm {
         cx.notify();
 
         let application = self.application.clone();
-        let target = self.mode.target().clone();
-        let kind = self.mode.kind();
+        let target = self.state.target().clone();
+        let kind = self.state.kind();
         let identity = mutation.display_identity();
         let operation = gpui_tokio::Tokio::spawn(cx, {
             let target = target.clone();
@@ -570,27 +468,31 @@ impl ObjectMutationForm {
 
     fn render_create_fields(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut elements = vec![self.name.clone().into_any_element()];
-        match &self.fields {
-            ObjectMutationFields::Basic => {}
-            ObjectMutationFields::Table(fields) => elements.push(self.render_columns(fields, cx)),
-            ObjectMutationFields::View(fields) => {
+        let ObjectMutationFormState::Create { draft, target, .. } = &self.state else {
+            return elements;
+        };
+        let policy = object_creation_policy(target.db_type);
+        match draft {
+            CreateObjectDraft::Database | CreateObjectDraft::Schema => {}
+            CreateObjectDraft::Table(fields) => elements.push(self.render_columns(fields, cx)),
+            CreateObjectDraft::View(fields) => {
                 elements.push(self.render_definition_editor(
                     &fields.definition,
                     text(self.language_setting, "SELECT 查询", "SELECT query"),
                     cx,
                 ));
             }
-            ObjectMutationFields::Function(fields) => {
+            CreateObjectDraft::Function(fields) => {
                 elements.push(fields.arguments.clone().into_any_element());
-                if self.mode.target().db_type != DbType::ClickHouse {
+                if policy.function_return_type {
                     elements.push(fields.return_type.clone().into_any_element());
-                    if self.mode.target().db_type == DbType::PostgreSQL {
+                    if policy.function_language {
                         elements.push(fields.language.clone().into_any_element());
                     }
                 }
                 elements.push(self.render_definition_editor(
                     &fields.definition,
-                    if self.mode.target().db_type == DbType::ClickHouse {
+                    if !policy.function_return_type {
                         text(self.language_setting, "Lambda 表达式", "Lambda expression")
                     } else {
                         text(self.language_setting, "函数体", "Function body")
@@ -598,9 +500,9 @@ impl ObjectMutationForm {
                     cx,
                 ));
             }
-            ObjectMutationFields::Procedure(fields) => {
+            CreateObjectDraft::Procedure(fields) => {
                 elements.push(fields.arguments.clone().into_any_element());
-                if self.mode.target().db_type == DbType::PostgreSQL {
+                if policy.procedure_language {
                     elements.push(fields.language.clone().into_any_element());
                 }
                 elements.push(self.render_definition_editor(
@@ -609,12 +511,12 @@ impl ObjectMutationForm {
                     cx,
                 ));
             }
-            ObjectMutationFields::Trigger(fields) => {
+            CreateObjectDraft::Trigger(fields) => {
                 elements.push(fields.table.clone().into_any_element());
                 elements.push(self.render_trigger_options(fields, cx));
                 elements.push(self.render_definition_editor(
                     &fields.definition,
-                    if self.mode.target().db_type == DbType::PostgreSQL {
+                    if trigger_uses_function_reference(target.db_type) {
                         text(
                             self.language_setting,
                             "触发器函数，例如 audit_row()",
@@ -626,8 +528,8 @@ impl ObjectMutationForm {
                     cx,
                 ));
             }
-            ObjectMutationFields::User(fields) => {
-                if self.mode.target().db_type == DbType::MySQL {
+            CreateObjectDraft::User(fields) => {
+                if policy.user_host {
                     elements.push(fields.host.clone().into_any_element());
                 }
                 elements.push(fields.password.clone().into_any_element());
@@ -637,6 +539,7 @@ impl ObjectMutationForm {
     }
 
     fn render_trigger_options(&self, fields: &TriggerFields, cx: &mut Context<Self>) -> AnyElement {
+        let db_type = self.state.target().db_type;
         let timings = [
             (TriggerTiming::Before, "BEFORE"),
             (TriggerTiming::After, "AFTER"),
@@ -659,10 +562,7 @@ impl ObjectMutationForm {
                             .toggle_state(fields.timing == timing)
                             .disabled(
                                 self.operation == FormOperation::Executing
-                                    || !trigger_timing_available(
-                                        self.mode.target().db_type,
-                                        timing,
-                                    ),
+                                    || !trigger_timing_supported(db_type, timing),
                             )
                             .on_click(cx.listener(move |form, _, _, cx| {
                                 form.set_trigger_timing(timing, cx)
@@ -678,8 +578,7 @@ impl ObjectMutationForm {
                             .toggle_state(fields.event == event)
                             .disabled(
                                 self.operation == FormOperation::Executing
-                                    || (event == TriggerEvent::Truncate
-                                        && self.mode.target().db_type != DbType::PostgreSQL),
+                                    || !trigger_event_supported(db_type, event),
                             )
                             .on_click(
                                 cx.listener(move |form, _, _, cx| {
@@ -695,13 +594,13 @@ impl ObjectMutationForm {
 impl Render for ObjectMutationForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.operation == FormOperation::Executing;
-        let kind = kind_label(self.mode.kind(), self.language_setting);
-        let (title, description) = match &self.mode {
-            ObjectMutationFormMode::Create { target, .. } => (
+        let kind = kind_label(self.state.kind(), self.language_setting);
+        let (title, description) = match &self.state {
+            ObjectMutationFormState::Create { target, .. } => (
                 format!("{} {kind}", text(self.language_setting, "新建", "Create")),
                 format!("{} / {}", target.connection_name, target.database),
             ),
-            ObjectMutationFormMode::Rename {
+            ObjectMutationFormState::Rename {
                 target,
                 original_name,
                 ..
@@ -713,10 +612,11 @@ impl Render for ObjectMutationForm {
                 ),
             ),
         };
-        let fields = if matches!(self.mode, ObjectMutationFormMode::Create { .. }) {
-            self.render_create_fields(cx)
-        } else {
-            vec![self.name.clone().into_any_element()]
+        let fields = match &self.state {
+            ObjectMutationFormState::Create { .. } => self.render_create_fields(cx),
+            ObjectMutationFormState::Rename { .. } => {
+                vec![self.name.clone().into_any_element()]
+            }
         };
 
         div()
@@ -808,7 +708,7 @@ fn arguments_input(
 }
 
 fn return_type_input(
-    db_type: DbType,
+    default_value: &str,
     language: UiLanguage,
     window: &mut Window,
     cx: &mut Context<ObjectMutationForm>,
@@ -820,21 +720,12 @@ fn return_type_input(
         text(language, "返回类型", "Return type"),
         3,
     );
-    set_text(
-        &field,
-        match db_type {
-            DbType::PostgreSQL => "void",
-            DbType::ClickHouse => "",
-            _ => "INT",
-        },
-        window,
-        cx,
-    );
+    set_text(&field, default_value, window, cx);
     field
 }
 
 fn routine_language_input(
-    db_type: DbType,
+    default_value: &str,
     language: UiLanguage,
     window: &mut Window,
     cx: &mut Context<ObjectMutationForm>,
@@ -846,16 +737,7 @@ fn routine_language_input(
         text(language, "语言", "Language"),
         4,
     );
-    set_text(
-        &field,
-        match db_type {
-            DbType::PostgreSQL => "plpgsql",
-            DbType::SQLServer => "T-SQL",
-            _ => "SQL",
-        },
-        window,
-        cx,
-    );
+    set_text(&field, default_value, window, cx);
     field
 }
 
@@ -947,28 +829,11 @@ fn rename_default_name(original_name: &str) -> &str {
         .unwrap_or(original_name)
 }
 
-fn default_column_type(db_type: DbType) -> &'static str {
-    match db_type {
-        DbType::MySQL | DbType::SQLServer => "INT",
-        DbType::PostgreSQL | DbType::SQLite => "INTEGER",
-        DbType::ClickHouse => "UInt64",
-        DbType::MongoDB | DbType::Redis => "TEXT",
-    }
-}
-
 fn toggle_state(selected: bool) -> ToggleState {
     if selected {
         ToggleState::Selected
     } else {
         ToggleState::Unselected
-    }
-}
-
-fn trigger_timing_available(db_type: DbType, timing: TriggerTiming) -> bool {
-    match timing {
-        TriggerTiming::Before => db_type != DbType::SQLServer,
-        TriggerTiming::After => true,
-        TriggerTiming::InsteadOf => db_type != DbType::MySQL,
     }
 }
 

@@ -185,6 +185,16 @@ pub(crate) enum CatalogKind {
 }
 
 impl CatalogKind {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Schemas,
+        Self::Tables,
+        Self::Views,
+        Self::Functions,
+        Self::Procedures,
+        Self::Triggers,
+        Self::Users,
+    ];
+
     pub(crate) fn supported(self, db_type: DbType) -> bool {
         let capabilities = db_type.capabilities();
         match self {
@@ -199,18 +209,18 @@ impl CatalogKind {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum CatalogLoadResult {
-    Schemas(Result<Vec<String>, String>),
-    Tables(Result<Vec<TableInfo>, String>),
-    Views(Result<Vec<ViewInfo>, String>),
-    Functions(Result<Vec<FunctionInfo>, String>),
-    Procedures(Result<Vec<ProcedureInfo>, String>),
-    Triggers(Result<Vec<TriggerInfo>, String>),
-    Users(Result<Vec<UserInfo>, String>),
+#[derive(Debug, Clone)]
+pub(crate) enum CatalogEntry {
+    Schemas(CatalogSection<String>),
+    Tables(CatalogSection<TableInfo>),
+    Views(CatalogSection<ViewInfo>),
+    Functions(CatalogSection<FunctionInfo>),
+    Procedures(CatalogSection<ProcedureInfo>),
+    Triggers(CatalogSection<TriggerInfo>),
+    Users(CatalogSection<UserInfo>),
 }
 
-impl CatalogLoadResult {
+impl CatalogEntry {
     pub(crate) const fn kind(&self) -> CatalogKind {
         match self {
             Self::Schemas(_) => CatalogKind::Schemas,
@@ -223,89 +233,94 @@ impl CatalogLoadResult {
         }
     }
 
+    fn loading(kind: CatalogKind, supported: bool) -> Self {
+        match kind {
+            CatalogKind::Schemas => Self::Schemas(loading_if(supported)),
+            CatalogKind::Tables => Self::Tables(loading_if(supported)),
+            CatalogKind::Views => Self::Views(loading_if(supported)),
+            CatalogKind::Functions => Self::Functions(loading_if(supported)),
+            CatalogKind::Procedures => Self::Procedures(loading_if(supported)),
+            CatalogKind::Triggers => Self::Triggers(loading_if(supported)),
+            CatalogKind::Users => Self::Users(loading_if(supported)),
+        }
+    }
+
+    fn is_loading(&self) -> bool {
+        matches!(
+            self,
+            Self::Schemas(CatalogSection::Loading)
+                | Self::Tables(CatalogSection::Loading)
+                | Self::Views(CatalogSection::Loading)
+                | Self::Functions(CatalogSection::Loading)
+                | Self::Procedures(CatalogSection::Loading)
+                | Self::Triggers(CatalogSection::Loading)
+                | Self::Users(CatalogSection::Loading)
+        )
+    }
+
     pub(crate) fn failed(kind: CatalogKind, error: impl Into<String>) -> Self {
         let error = error.into();
         match kind {
-            CatalogKind::Schemas => Self::Schemas(Err(error)),
-            CatalogKind::Tables => Self::Tables(Err(error)),
-            CatalogKind::Views => Self::Views(Err(error)),
-            CatalogKind::Functions => Self::Functions(Err(error)),
-            CatalogKind::Procedures => Self::Procedures(Err(error)),
-            CatalogKind::Triggers => Self::Triggers(Err(error)),
-            CatalogKind::Users => Self::Users(Err(error)),
+            CatalogKind::Schemas => Self::Schemas(CatalogSection::Failed(error)),
+            CatalogKind::Tables => Self::Tables(CatalogSection::Failed(error)),
+            CatalogKind::Views => Self::Views(CatalogSection::Failed(error)),
+            CatalogKind::Functions => Self::Functions(CatalogSection::Failed(error)),
+            CatalogKind::Procedures => Self::Procedures(CatalogSection::Failed(error)),
+            CatalogKind::Triggers => Self::Triggers(CatalogSection::Failed(error)),
+            CatalogKind::Users => Self::Users(CatalogSection::Failed(error)),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DatabaseCatalogSnapshot {
-    pub(crate) schemas: CatalogSection<String>,
-    pub(crate) tables: CatalogSection<TableInfo>,
-    pub(crate) views: CatalogSection<ViewInfo>,
-    pub(crate) functions: CatalogSection<FunctionInfo>,
-    pub(crate) procedures: CatalogSection<ProcedureInfo>,
-    pub(crate) triggers: CatalogSection<TriggerInfo>,
-    pub(crate) users: CatalogSection<UserInfo>,
+    entries: Vec<CatalogEntry>,
 }
 
 impl DatabaseCatalogSnapshot {
     pub(crate) fn loading(db_type: DbType) -> Self {
-        let capabilities = db_type.capabilities();
         Self {
-            schemas: loading_if(capabilities.schemas),
-            tables: CatalogSection::Loading,
-            views: loading_if(capabilities.views),
-            functions: loading_if(capabilities.functions),
-            procedures: loading_if(capabilities.procedures),
-            triggers: loading_if(capabilities.triggers),
-            users: loading_if(capabilities.users),
+            entries: CatalogKind::ALL
+                .into_iter()
+                .map(|kind| CatalogEntry::loading(kind, kind.supported(db_type)))
+                .collect(),
         }
+    }
+
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &CatalogEntry> {
+        self.entries.iter()
+    }
+
+    pub(crate) fn tables(&self) -> &CatalogSection<TableInfo> {
+        let CatalogEntry::Tables(section) = self.entry(CatalogKind::Tables) else {
+            unreachable!("catalog kind and entry variant must agree")
+        };
+        section
     }
 
     pub(crate) fn pending_kinds(&self) -> Vec<CatalogKind> {
-        let mut kinds = Vec::new();
-        if matches!(self.schemas, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Schemas);
-        }
-        if matches!(self.tables, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Tables);
-        }
-        if matches!(self.views, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Views);
-        }
-        if matches!(self.functions, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Functions);
-        }
-        if matches!(self.procedures, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Procedures);
-        }
-        if matches!(self.triggers, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Triggers);
-        }
-        if matches!(self.users, CatalogSection::Loading) {
-            kinds.push(CatalogKind::Users);
-        }
-        kinds
+        self.entries
+            .iter()
+            .filter(|entry| entry.is_loading())
+            .map(CatalogEntry::kind)
+            .collect()
     }
 
-    pub(crate) fn apply(&mut self, result: CatalogLoadResult) {
-        match result {
-            CatalogLoadResult::Schemas(result) => {
-                self.schemas = CatalogSection::from_result(result)
-            }
-            CatalogLoadResult::Tables(result) => self.tables = CatalogSection::from_result(result),
-            CatalogLoadResult::Views(result) => self.views = CatalogSection::from_result(result),
-            CatalogLoadResult::Functions(result) => {
-                self.functions = CatalogSection::from_result(result)
-            }
-            CatalogLoadResult::Procedures(result) => {
-                self.procedures = CatalogSection::from_result(result)
-            }
-            CatalogLoadResult::Triggers(result) => {
-                self.triggers = CatalogSection::from_result(result)
-            }
-            CatalogLoadResult::Users(result) => self.users = CatalogSection::from_result(result),
-        }
+    pub(crate) fn apply(&mut self, entry: CatalogEntry) {
+        let kind = entry.kind();
+        let current = self
+            .entries
+            .iter_mut()
+            .find(|current| current.kind() == kind)
+            .expect("catalog snapshots contain every catalog kind");
+        *current = entry;
+    }
+
+    fn entry(&self, kind: CatalogKind) -> &CatalogEntry {
+        self.entries
+            .iter()
+            .find(|entry| entry.kind() == kind)
+            .expect("catalog snapshots contain every catalog kind")
     }
 }
 
@@ -619,7 +634,7 @@ impl ConnectionWorkspaceState {
     pub(crate) fn finish_object_load(
         &mut self,
         request: &ObjectLoadRequest,
-        result: CatalogLoadResult,
+        result: CatalogEntry,
     ) -> bool {
         let key = (request.connection_id.clone(), request.database.clone());
         let target_is_live = self.session_generation(&request.connection_id)

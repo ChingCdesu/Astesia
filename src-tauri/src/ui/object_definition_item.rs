@@ -110,12 +110,6 @@ impl ObjectDefinitionItem {
         )
     }
 
-    pub(super) fn matches(&self, object: &ObjectDefinition) -> bool {
-        self.object.target == object.target
-            && self.object.kind == object.kind
-            && self.object.name == object.name
-    }
-
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &self.editor {
             window.focus(&editor.read(cx).focus_handle(cx), cx);

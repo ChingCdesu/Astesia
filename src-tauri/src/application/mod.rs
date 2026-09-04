@@ -35,7 +35,7 @@ pub use connection_service::{
     ProfileOperationOutcome,
 };
 pub(crate) use connection_workspace::{
-    CatalogKind, CatalogLoadResult, CatalogSection, DatabaseCatalogSnapshot,
+    CatalogEntry, CatalogKind, CatalogSection, DatabaseCatalogSnapshot,
 };
 pub use connections::ConnectionOutcome;
 pub(crate) use document_service::{DocumentService, DocumentSession, DocumentSessionStatus};
@@ -55,9 +55,10 @@ pub(crate) use grid_session::{
 pub(crate) use grid_value::{GridCellInputError, GridColumn, GridColumnKind};
 pub use mutation_service::{MutationService, RowUpdate};
 pub(crate) use object_service::{
-    object_kind_can_create, object_kind_can_drop, object_kind_can_rename, CreateObjectSpec,
-    DatabaseObjectKind, DropObjectTarget, ObjectMutation, ObjectMutationError, ObjectService,
-    TableColumnSpec, TriggerEvent, TriggerTiming,
+    object_creation_policy, object_kind_can_create, object_kind_can_drop, object_kind_can_rename,
+    trigger_event_supported, trigger_timing_supported, trigger_uses_function_reference,
+    CreateObjectSpec, DatabaseObjectKind, DropObjectTarget, ObjectCreationPolicy, ObjectMutation,
+    ObjectMutationError, ObjectService, TableColumnSpec, TriggerEvent, TriggerTiming,
 };
 pub(crate) use performance_dashboard::{
     PerformanceDashboardState, PerformanceLoadApply, PerformanceRefreshInterval,
