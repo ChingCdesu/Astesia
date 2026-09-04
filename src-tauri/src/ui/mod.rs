@@ -246,4 +246,15 @@ mod tests {
             })
             .expect("editor window");
     }
+
+    #[gpui::test]
+    async fn native_runtime_can_request_an_in_place_restart(cx: &mut TestAppContext) {
+        let restart = cx.expect_restart();
+
+        cx.update(|cx| cx.restart());
+
+        let (path, arguments) = restart.await.expect("restart request");
+        assert_eq!(path, None);
+        assert!(arguments.is_empty());
+    }
 }

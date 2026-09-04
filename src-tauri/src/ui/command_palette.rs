@@ -15,6 +15,7 @@ pub(super) enum WorkspaceCommand {
     PreviousTab,
     ToggleSidebar,
     RefreshConnections,
+    RestartApplication,
     SetTheme(ThemePreference),
     SetLanguage(UiLanguage),
 }
@@ -115,6 +116,13 @@ impl CommandPalette {
                 category: text(language, "连接", "Connections"),
                 shortcut: Some("⌘R"),
                 keywords: "refresh connections 刷新 连接",
+            },
+            CommandEntry {
+                command: WorkspaceCommand::RestartApplication,
+                title: text(language, "重启 Astesia", "Restart Astesia"),
+                category: text(language, "应用", "Application"),
+                shortcut: None,
+                keywords: "restart relaunch application 重启 应用",
             },
             CommandEntry {
                 command: WorkspaceCommand::SetTheme(ThemePreference::System),

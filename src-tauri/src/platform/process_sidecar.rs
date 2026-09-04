@@ -241,36 +241,32 @@ fn discover_sidecar() -> Option<PathBuf> {
     } else {
         "astesia-mcp"
     };
+    let current_executable = std::env::current_exe().ok();
+    sidecar_candidates(
+        current_executable.as_deref(),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        executable_name,
+    )
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn sidecar_candidates(
+    current_executable: Option<&Path>,
+    manifest: &Path,
+    executable_name: &str,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Ok(current_executable) = std::env::current_exe() {
+    if let Some(current_executable) = current_executable {
         if let Some(directory) = current_executable.parent() {
             candidates.push(directory.join(executable_name));
         }
     }
 
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     candidates.push(manifest.join("target/debug").join(executable_name));
     candidates.push(manifest.join("target/release").join(executable_name));
-    collect_staged_candidates(&manifest.join("binaries"), &mut candidates);
     collect_target_candidates(&manifest.join("target"), executable_name, &mut candidates);
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-fn collect_staged_candidates(directory: &Path, candidates: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    let mut staged = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("astesia-mcp-"))
-        })
-        .collect::<Vec<_>>();
-    staged.sort();
-    candidates.extend(staged);
+    candidates
 }
 
 fn collect_target_candidates(
@@ -337,5 +333,22 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(arguments, ["--http-port", "42000"]);
         assert!(!arguments.iter().any(|argument| argument.contains("secret")));
+    }
+
+    #[test]
+    fn packaged_sidecar_beside_the_application_is_the_first_candidate() {
+        let candidates = sidecar_candidates(
+            Some(Path::new("/opt/Astesia/bin/astesia")),
+            Path::new("/source/src-tauri"),
+            "astesia-mcp",
+        );
+
+        assert_eq!(
+            candidates.first(),
+            Some(&PathBuf::from("/opt/Astesia/bin/astesia-mcp"))
+        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| !candidate.to_string_lossy().contains("/binaries/")));
     }
 }
