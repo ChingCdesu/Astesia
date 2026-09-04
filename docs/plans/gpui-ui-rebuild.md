@@ -181,6 +181,12 @@ Exit condition: charts, ER, and performance workflows meet behavioral parity on 
 
 ### 8. Remove the old runtime and finish platform support
 
+Status: Complete on 2026-09-04. See [Milestone 8 acceptance](gpui-milestone-8-acceptance.md).
+
+The Legacy Shell and its build chain are gone. Native Cargo packaging now produces versioned
+desktop and MCP pairs for macOS, Linux x64, and Windows x64; packaged macOS and Linux runtime
+checks passed, and the Windows MSVC application, sidecar, and library test targets compile and link.
+
 - Delete React, Zustand, Radix, Monaco, Vite, Tauri commands, plugins, capabilities, configuration, build hooks, and unused plugin interfaces once their replacement milestone passes.
 - Replace file dialogs, filesystem access, clipboard, preferences, sidecar staging, application version, and relaunch with native implementations.
 - Produce internal macOS packages first, then validate Windows x64 and Linux x64 windowing, fonts, input, file dialogs, sidecar placement, and graphics backends.

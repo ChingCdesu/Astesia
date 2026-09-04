@@ -3,9 +3,10 @@
 Astesia is a native desktop database workspace built in Rust with GPUI and the embedded Zed
 Editor. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 
-The native-runtime migration has completed Milestones 0-7. The Milestone 8 cutover candidate has
-removed the Legacy Shell and is completing the final native package matrix. See the
-[GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) for the behavioral checklist and current status.
+The native-runtime migration has completed Milestones 0-8. The Legacy Shell and Tauri/WebView build
+chain are gone, and the internal native package matrix is in place. See the
+[Milestone 8 acceptance](docs/plans/gpui-milestone-8-acceptance.md) for platform evidence and the
+[GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) for the complete behavioral checklist.
 
 ## Delivered native capabilities
 
