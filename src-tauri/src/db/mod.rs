@@ -403,6 +403,12 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> anyhow::Result<DocumentPage> {
         Err(UnsupportedFeature::new(self.db_type(), "document browsing").into())
     }
+    async fn get_mongodb_server_status(
+        &self,
+        _database: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        Err(UnsupportedFeature::new(self.db_type(), "MongoDB server status").into())
+    }
     async fn scan_redis_keys(
         &self,
         _database: &str,

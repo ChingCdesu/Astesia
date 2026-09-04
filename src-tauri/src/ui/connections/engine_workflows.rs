@@ -99,6 +99,20 @@ impl ConnectionProfilesPanel {
         }
     }
 
+    pub(super) fn request_performance(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        if target.db_type.capabilities().performance == crate::db::PerformanceMode::Native
+            && self.state.query_target_is_live(&target)
+        {
+            cx.emit(ConnectionProfilesEvent::PerformanceRequested { target });
+        }
+    }
+
+    pub(super) fn request_er_diagram(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        if target.db_type.capabilities().foreign_keys && self.state.query_target_is_live(&target) {
+            cx.emit(ConnectionProfilesEvent::ErDiagramRequested { target });
+        }
+    }
+
     pub(super) fn copy_table(
         &mut self,
         source: QueryTarget,

@@ -406,6 +406,14 @@ impl AstesiaWorkspace {
                 self.choose_restore_file(target.clone(), window, cx);
                 return;
             }
+            ConnectionProfilesEvent::PerformanceRequested { target } => {
+                self.open_performance(target.clone(), window, cx);
+                return;
+            }
+            ConnectionProfilesEvent::ErDiagramRequested { target } => {
+                self.open_er_diagram(target.clone(), window, cx);
+                return;
+            }
             ConnectionProfilesEvent::CopyTableRequested {
                 source,
                 target,
@@ -913,7 +921,7 @@ impl AstesiaWorkspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_active_modal(cx) {
+        if !self.has_active_modal(cx) && !self.active_item().refresh_active_surface(cx) {
             self.connection_profiles
                 .update(cx, |panel, cx| panel.refresh_profiles(cx));
         }

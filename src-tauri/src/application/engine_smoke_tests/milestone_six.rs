@@ -99,7 +99,7 @@ async fn milestone_six_native_mcp_sidecar_lifecycle() {
     assert!(stopped.pid.is_none());
 }
 
-async fn connect_smoke_target(
+pub(super) async fn connect_smoke_target(
     application: &Application,
     smoke: &SmokeTarget,
     group: &str,

@@ -24,6 +24,9 @@ impl DataGridItem {
                 if item.state.finish_load(&request, result) {
                     item.normalize_active_cell();
                     item.normalize_column_widths();
+                    if item.showing_chart {
+                        item.load_chart(cx);
+                    }
                     cx.notify();
                 }
             })
@@ -41,11 +44,90 @@ impl DataGridItem {
     }
 
     pub(super) fn refresh(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_active(cx);
+    }
+
+    pub(in crate::ui) fn refresh_active(&mut self, cx: &mut Context<Self>) {
         if !self.prepare_for_navigation() {
             return;
         }
         self.operation_notice = None;
-        self.load(cx);
+        if self.showing_chart {
+            self.load_chart(cx);
+        } else {
+            self.load(cx);
+        }
+    }
+
+    fn load_chart(&mut self, cx: &mut Context<Self>) {
+        self.chart_generation = self.chart_generation.saturating_add(1);
+        let generation = self.chart_generation;
+        self.chart_loading = true;
+        self.chart_error = None;
+        cx.notify();
+        let service = self.application.charts().clone();
+        let target = self.state.target().clone();
+        let table = self.state.table().clone();
+        let query = self.state.query().clone();
+        let load =
+            gpui_tokio::Tokio::spawn(
+                cx,
+                async move { service.table_data(target, table, query).await },
+            );
+        cx.spawn(async move |item, cx| {
+            let result = match load.await {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(format!("Chart refresh ended unexpectedly: {error}")),
+            };
+            item.update(cx, |item, cx| {
+                if item.chart_generation != generation {
+                    return;
+                }
+                item.chart_loading = false;
+                match result {
+                    Ok(data) => {
+                        item.chart_error = None;
+                        if let Some(chart) = &item.chart {
+                            chart.update(cx, |chart, cx| {
+                                chart.replace_data(data.columns, &data.rows, cx)
+                            });
+                        } else {
+                            let model = ChartModel::from_names(data.columns, &data.rows);
+                            item.chart =
+                                Some(cx.new(|cx| ChartView::new(model, item.settings.clone(), cx)));
+                        }
+                    }
+                    Err(error) => item.chart_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn toggle_chart(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.showing_chart && self.has_unsaved_changes() {
+            return;
+        }
+        if self.chart.is_none() {
+            self.sync_chart(cx);
+        }
+        self.showing_chart = !self.showing_chart;
+        if self.showing_chart {
+            self.load_chart(cx);
+            if let Some(chart) = &self.chart {
+                window.focus(&chart.read(cx).focus_handle(cx), cx);
+            }
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn previous_page(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {

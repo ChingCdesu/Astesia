@@ -228,7 +228,7 @@ impl EngineCapabilities {
                 restore: false,
                 table_copy: TableCopyMode::None,
                 explain: ExplainMode::None,
-                performance: PerformanceMode::Unavailable,
+                performance: PerformanceMode::Native,
             },
             DbType::Redis => Self {
                 sql: false,
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(mongo.indexes, IndexMode::MongoCatalog);
         assert_eq!(mongo.row_mutation, RowMutationMode::None);
         assert!(mongo.data_browser_read_only);
-        assert_eq!(mongo.performance, PerformanceMode::Unavailable);
+        assert_eq!(mongo.performance, PerformanceMode::Native);
 
         let clickhouse = EngineCapabilities::for_engine(DbType::ClickHouse);
         assert_eq!(clickhouse.indexes, IndexMode::PrimaryKeyOnly);

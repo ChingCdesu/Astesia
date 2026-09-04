@@ -541,6 +541,8 @@ impl DataGridItem {
                 "The connection session changed. Reopen the table data from the sidebar.",
             ),
         ) {
+            self.chart_generation = self.chart_generation.saturating_add(1);
+            self.chart_loading = false;
             cx.notify();
         }
     }

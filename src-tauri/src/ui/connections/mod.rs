@@ -89,6 +89,12 @@ pub(super) enum ConnectionProfilesEvent {
     RestoreRequested {
         target: QueryTarget,
     },
+    PerformanceRequested {
+        target: QueryTarget,
+    },
+    ErDiagramRequested {
+        target: QueryTarget,
+    },
     CopyTableRequested {
         source: QueryTarget,
         target: QueryTarget,

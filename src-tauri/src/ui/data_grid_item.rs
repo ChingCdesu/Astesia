@@ -11,16 +11,17 @@ use serde_json::Value;
 use zed_ui::{prelude::*, Indicator, Tooltip};
 
 use crate::application::{
-    Application, GridCell, GridCellInputError, GridCellSelection, GridColumn, GridColumnKind,
-    GridEditability, GridPage, GridRowSelectionMode, GridSaveFailure, GridSaveOutcome, GridSession,
-    GridSessionError, GridSessionStatus, GridSort, GridSortDirection, QueryTarget,
-    DEFAULT_GRID_PAGE_SIZE,
+    Application, ChartModel, GridCell, GridCellInputError, GridCellSelection, GridColumn,
+    GridColumnKind, GridEditability, GridPage, GridRowSelectionMode, GridSaveFailure,
+    GridSaveOutcome, GridSession, GridSessionError, GridSessionStatus, GridSort, GridSortDirection,
+    QueryTarget, DEFAULT_GRID_PAGE_SIZE,
 };
 #[cfg(test)]
 use crate::db::ColumnInfo;
 use crate::db::TableRef;
 use crate::platform::UiLanguage;
 
+use super::chart_view::ChartView;
 use super::localization::text;
 use super::query_item::display_value;
 use super::shell::ShellSettings;
@@ -183,6 +184,11 @@ pub(super) struct DataGridItem {
     column_widths: Vec<f32>,
     rows_scroll_handle: UniformListScrollHandle,
     horizontal_scroll_handle: ScrollHandle,
+    chart: Option<Entity<ChartView>>,
+    showing_chart: bool,
+    chart_generation: u64,
+    chart_loading: bool,
+    chart_error: Option<String>,
     settings: Entity<ShellSettings>,
     _filter_observation: Subscription,
     _settings_observation: Subscription,
@@ -221,6 +227,11 @@ impl DataGridItem {
             column_widths: Vec::new(),
             rows_scroll_handle: UniformListScrollHandle::new(),
             horizontal_scroll_handle: ScrollHandle::new(),
+            chart: None,
+            showing_chart: false,
+            chart_generation: 0,
+            chart_loading: false,
+            chart_error: None,
             settings,
             _filter_observation: filter_observation,
             _settings_observation: settings_observation,
@@ -261,6 +272,24 @@ impl DataGridItem {
             window.focus(&editing.editor.read(cx).focus_handle(cx), cx);
         } else {
             window.focus(&self.focus_handle, cx);
+        }
+    }
+
+    fn sync_chart(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.state.page() else {
+            return;
+        };
+        let columns = page
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let rows = page.rows.clone();
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, cx| chart.replace_data(columns, &rows, cx));
+        } else {
+            let model = ChartModel::from_names(columns, &rows);
+            self.chart = Some(cx.new(|cx| ChartView::new(model, self.settings.clone(), cx)));
         }
     }
 }

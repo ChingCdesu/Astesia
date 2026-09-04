@@ -95,3 +95,61 @@ fn native_find_replace_preserves_focus_and_grouped_undo(cx: &mut TestAppContext)
         Some("query_target_required")
     );
 }
+
+#[gpui::test]
+fn clearing_a_session_target_discards_its_chart(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        Assets.load_test_fonts(cx);
+        let settings = settings::SettingsStore::test(cx);
+        cx.set_global(settings);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        release_channel::init(release_channel::AppVersion::load("0.0.0", None, None), cx);
+        gpui_tokio::init(cx);
+        editor::init(cx);
+        sql_language::init(cx);
+        bind_editor_keys(cx);
+        bind_query_item_keys(cx);
+    });
+
+    let directory = tempfile::tempdir().expect("query chart repository directory");
+    let repository = SharedConnectionRepository::new(
+        directory.path().join("connections.sqlite3"),
+        MemoryCredentialVault::shared(),
+    );
+    let application = Arc::new(Application::with_repository(repository));
+    let settings = cx.new(|_| ShellSettings::new(DesktopPreferences::default(), None));
+    let chart_settings = settings.clone();
+    let window = cx.add_window(|window, cx| {
+        let query_editor = cx.new(|cx| sql_language::editor("SELECT 1", window, cx));
+        QueryItem::new(application, query_editor, settings, window, cx)
+    });
+    let item = window.root(cx).expect("query item root");
+
+    item.update(cx, |item, cx| {
+        item.state.set_target(Some(QueryTarget {
+            connection_id: "sqlite".to_string(),
+            connection_name: "Local".to_string(),
+            database: ":memory:".to_string(),
+            db_type: DbType::SQLite,
+            session_generation: 1,
+        }));
+        item.chart = Some(cx.new(|cx| {
+            ChartView::new(
+                ChartModel::from_names(
+                    vec!["label".to_string(), "value".to_string()],
+                    &[vec![Value::from("row"), Value::from(1)]],
+                ),
+                chart_settings,
+                cx,
+            )
+        }));
+        item.showing_chart = true;
+        item.clear_target(cx);
+    });
+
+    item.read_with(cx, |item, _| {
+        assert!(item.state.target().is_none());
+        assert!(item.chart.is_none());
+        assert!(!item.showing_chart);
+    });
+}

@@ -6,12 +6,13 @@ pub enum PerformanceSnapshot {
     PostgreSql(PostgresMetrics),
     SQLite(SqliteMetrics),
     SqlServer(SqlServerMetrics),
+    MongoDB(MongoMetrics),
     Redis(RedisMetrics),
     ClickHouse(ClickHouseMetrics),
     Unavailable { engine: DbType },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MySqlMetrics {
     pub connections: u64,
     pub threads_running: u64,
@@ -28,7 +29,7 @@ pub struct MySqlMetrics {
     pub threads_connected: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PostgresMetrics {
     pub active_connections: i64,
     pub backends: i64,
@@ -47,7 +48,7 @@ pub struct PostgresMetrics {
     pub temporary_bytes: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SqliteMetrics {
     pub cache_size: i64,
     pub page_count: i64,
@@ -56,7 +57,7 @@ pub struct SqliteMetrics {
     pub wal_pages: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SqlServerMetrics {
     pub batch_requests_per_second: i64,
     pub buffer_cache_hit_ratio: f64,
@@ -65,7 +66,21 @@ pub struct SqlServerMetrics {
     pub page_life_expectancy: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MongoMetrics {
+    pub connections: u64,
+    pub resident_memory_mb: f64,
+    pub virtual_memory_mb: f64,
+    pub network_bytes_in: u64,
+    pub network_bytes_out: u64,
+    pub insert_operations: u64,
+    pub query_operations: u64,
+    pub update_operations: u64,
+    pub delete_operations: u64,
+    pub uptime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RedisMetrics {
     pub connected_clients: u64,
     pub used_memory_human: String,
@@ -82,7 +97,7 @@ pub struct RedisMetrics {
     pub version: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClickHouseMetrics {
     pub active_queries: f64,
     pub active_merges: f64,

@@ -165,6 +165,14 @@ Exit condition: MongoDB, Redis, tasks, exports, and MCP work without Tauri proce
 
 ### 7. Port visualization and diagnostics
 
+Status: Complete on 2026-09-04. See [Milestone 7 acceptance](gpui-milestone-7-acceptance.md).
+
+Table and query results now switch to five native chart types with typed column mapping,
+categorical aggregation, all-pages table refresh, and explicit unusable-data states. Supported
+relational engines open qualified ER diagrams with deterministic layout, drag, pan, zoom, fit, and
+a viewport-aware overview. All seven performance dashboards retain prior data during manual or
+5/10/30/60-second automatic refresh and reject stale Database Sessions.
+
 - Implement table/query charts for bar, line, area, scatter, and pie data.
 - Implement ER layout, dragging, pan, zoom, fit, and overview behavior.
 - Port the seven-engine performance dashboard and refresh intervals.

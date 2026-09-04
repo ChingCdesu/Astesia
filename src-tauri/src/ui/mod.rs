@@ -1,3 +1,4 @@
+mod chart_view;
 mod command_palette;
 mod connection_profile_form;
 mod connections;
@@ -5,10 +6,12 @@ mod copy_table_form;
 mod data_grid_item;
 mod document_item;
 mod engine_presentation;
+mod er_diagram_item;
 mod localization;
 mod mcp_service_item;
 mod object_definition_item;
 mod object_mutation_form;
+mod performance_item;
 mod query_item;
 mod redis_item;
 mod shell;

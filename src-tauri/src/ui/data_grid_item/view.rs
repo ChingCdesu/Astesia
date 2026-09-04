@@ -7,6 +7,7 @@ impl Render for DataGridItem {
         let status = self.state.status();
         let page = self.state.page();
         let loading = matches!(status, GridSessionStatus::Loading);
+        let active_loading = loading || (self.showing_chart && self.chart_loading);
         let saving = matches!(status, GridSessionStatus::Saving);
         let unavailable = matches!(status, GridSessionStatus::Unavailable { .. });
         let has_changes = self.state.has_changes();
@@ -65,6 +66,11 @@ impl Render for DataGridItem {
             }
             _ => editing_error
                 .map(|error| (Color::Error, IconName::Warning, error))
+                .or_else(|| {
+                    self.chart_error
+                        .clone()
+                        .map(|error| (Color::Error, IconName::Warning, error))
+                })
                 .or_else(|| self.operation_notice.clone().map(GridNotice::presentation)),
         };
         let editability = self.state.editability();
@@ -85,13 +91,23 @@ impl Render for DataGridItem {
         let changes_message =
             has_changes.then(|| change_summary_message(self.state.change_summary(), language));
         let show_edit_controls = editable || has_unsaved_changes;
-        let show_change_bar = page.is_some();
+        let show_change_bar = page.is_some() && !self.showing_chart;
         let show_filter_bar = page.is_some() || filter_active;
         let grid_focused = self.focus_handle.is_focused(window);
-        let content = match page {
-            Some(page) => self.render_grid(page, grid_focused, cx),
-            None => centered_grid_state(status, language),
+        let content = if self.showing_chart {
+            self.chart
+                .as_ref()
+                .map(|chart| chart.clone().into_any_element())
+                .unwrap_or_else(|| centered_grid_state(status, language))
+        } else {
+            match page {
+                Some(page) => self.render_grid(page, grid_focused, cx),
+                None => centered_grid_state(status, language),
+            }
         };
+        let can_chart = page.is_some_and(|page| !page.columns.is_empty())
+            && !has_unsaved_changes
+            && !unavailable;
         let grid_label = page.map_or_else(
             || {
                 format!(
@@ -166,6 +182,20 @@ impl Render for DataGridItem {
                     }))
                     .child(
                         Button::new(
+                            "toggle-data-grid-chart",
+                            if self.showing_chart {
+                                text(language, "表格", "Table")
+                            } else {
+                                text(language, "图表", "Chart")
+                            },
+                        )
+                        .size(ButtonSize::Compact)
+                        .toggle_state(self.showing_chart)
+                        .disabled(!can_chart)
+                        .on_click(cx.listener(Self::toggle_chart)),
+                    )
+                    .child(
+                        Button::new(
                             "previous-data-grid-page",
                             text(language, "上一页", "Previous"),
                         )
@@ -182,8 +212,8 @@ impl Render for DataGridItem {
                     .child(
                         Button::new("refresh-data-grid", text(language, "刷新", "Refresh"))
                             .size(ButtonSize::Compact)
-                            .loading(loading)
-                            .disabled(loading || unavailable || navigation_locked)
+                            .loading(active_loading)
+                            .disabled(active_loading || unavailable || navigation_locked)
                             .on_click(cx.listener(Self::refresh)),
                     ),
             )
