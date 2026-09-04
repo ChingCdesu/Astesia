@@ -1,25 +1,7 @@
 ---
 name: Astesia
-description: Compact native database operations workspace
+description: A Zed-native workspace for database operations
 colors:
-  light-focus: "#7d82e8ff"
-  light-workspace: "#dcdcddff"
-  light-panel: "#ebebecff"
-  light-editor: "#fafafaff"
-  light-border: "#c9c9caff"
-  light-text: "#242529ff"
-  light-muted: "#58585aff"
-  dark-focus: "#47679eff"
-  dark-workspace: "#3b414dff"
-  dark-panel: "#2f343eff"
-  dark-editor: "#282c33ff"
-  dark-border: "#464b57ff"
-  dark-text: "#dce0e5ff"
-  dark-muted: "#a9afbcff"
-  connected: "#22c55e"
-  busy: "#eab308"
-  attention: "#ef4444"
-  idle: "#a1a1aa"
   mysql: "#00758F"
   postgresql: "#336791"
   sqlite: "#003B57"
@@ -28,233 +10,186 @@ colors:
   redis: "#DC382D"
   clickhouse: "#FFCC01"
 typography:
-  title:
+  ui:
     fontFamily: '".ZedSans", "IBM Plex Sans", system-ui, sans-serif'
-    fontSize: "12px"
-    fontWeight: 600
-  body:
-    fontFamily: '".ZedSans", "IBM Plex Sans", system-ui, sans-serif'
-    fontSize: "12px"
-    fontWeight: 400
-  label:
-    fontFamily: '".ZedSans", "IBM Plex Sans", system-ui, sans-serif'
-    fontSize: "10px"
-    fontWeight: 400
-  editor:
+  buffer:
     fontFamily: '".ZedMono", "Lilex", monospace'
-    fontSize: "15px"
-    fontWeight: 400
-    lineHeight: 1.618
-rounded:
-  sm: "4px"
-  md: "6px"
-  lg: "8px"
-  full: "9999px"
-spacing:
-  xxs: "2px"
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
-  xl: "24px"
-components:
-  button-filled:
-    backgroundColor: "{colors.light-panel}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.label}"
-    rounded: "{rounded.sm}"
-    padding: "0 4px"
-    height: "18px"
-  button-outlined:
-    backgroundColor: "{colors.light-panel}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.label}"
-    rounded: "{rounded.sm}"
-    padding: "0 4px"
-    height: "18px"
-  input-field:
-    backgroundColor: "{colors.light-editor}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.body}"
-    rounded: "{rounded.md}"
-    padding: "6px 8px"
-    height: "32px"
-  connection-profile-row:
-    backgroundColor: "{colors.light-panel}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.body}"
-    rounded: "{rounded.md}"
-    padding: "8px 10px"
-  query-tab-active:
-    backgroundColor: "{colors.light-editor}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.body}"
-    rounded: "{rounded.md}"
-    padding: "0 8px"
-    height: "36px"
-  command-palette:
-    backgroundColor: "{colors.light-panel}"
-    textColor: "{colors.light-text}"
-    rounded: "{rounded.lg}"
-    width: "560px"
-  transient-notification:
-    backgroundColor: "{colors.light-panel}"
-    textColor: "{colors.light-text}"
-    typography: "{typography.label}"
-    rounded: "{rounded.md}"
-    padding: "8px"
-    width: "360px"
 ---
 
 # Design System: Astesia
 
 ## Overview
 
-**Creative North Star: "The Native Operator Console"**
+**Creative North Star: "A Zed Workspace for Databases"**
 
-Astesia is a compact, neutral desktop workspace built for sustained database operation. Its visual system keeps connections, query context, results, and runtime state continuously visible while allowing the native editor and data to remain the dominant material.
+Astesia should feel like a focused database workflow that belongs inside Zed: native, compact,
+keyboard-first, theme-aware, and built from the same component behavior rather than a visual copy of
+one Zed screenshot. The pinned Zed UI source owns components, typography, density, semantic colors,
+elevation, focus, and interaction states.
 
-The shell follows the operating system by default through the paired One Light and One Dark themes. It uses familiar desktop controls, shallow tonal separation, small labels, and dense toolbars instead of decorative branding or oversized presentation typography.
+Astesia owns the database workspace composition, engine capabilities, bilingual product language,
+and the small set of engine identity colors. Query text, results, and runtime state remain the
+dominant material.
 
 **Key Characteristics:**
 
-- Compact multi-pane geometry with a fixed connection sidebar, tabbed work area, and persistent status bar.
-- Theme-semantic surfaces and text, with color reserved for focus, engine identity, and meaningful status.
-- Native Zed UI controls and a local Zed editor, with Simplified Chinese and English occupying the same visual hierarchy.
-- Borders and tonal layers establish structure; elevation is reserved for temporary overlays.
+- Zed UI components and semantic theme roles form the visual foundation.
+- Compact multi-pane geometry keeps Connection Profiles, tabs, work, and status continuously
+  visible.
+- UI scale and Compact, Default, or Comfortable density come from Zed rather than fixed local pixels.
+- Engine color identifies database type; Zed semantic roles communicate actions and state.
 
 ## Colors
 
-The palette is restrained in both system modes: closely related neutral surfaces carry the workspace, one cool focus color marks interaction, and semantic colors communicate engine or runtime identity.
+Runtime color comes from the active Zed theme. Astesia does not define its own light/dark surface
+palette or freeze One Light and One Dark values into application code.
 
 ### Primary
 
-- **Light Focus Indigo:** the light-mode keyboard focus and interaction accent.
-- **Dark Focus Blue:** the dark-mode counterpart, tuned for the darker neutral field.
+- **Zed semantic roles:** use `background`, `surface_background`, `editor_background`,
+  `elevated_surface_background`, element and ghost-element states, border and focus roles, and the
+  text hierarchy from `cx.theme().colors()`.
 
 ### Secondary
 
-- **Engine Identity Set:** MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, and ClickHouse retain their extracted engine colors on profile identity marks. These colors identify an engine; they do not become general-purpose accents.
+- **Zed status roles:** use `cx.theme().status()`, `zed_ui::Color`, and `TintColor` for info,
+  success, warning, error, disabled, selected, modified, and other semantic states.
 
-### Neutral
+### Tertiary
 
-- **Workspace:** the outer application and status surface in each mode.
-- **Panel:** sidebars, toolbars, inactive tabs, and result headers.
-- **Editor:** the active query tab and editor canvas, the lightest light-mode or deepest dark-mode working surface.
-- **Border:** one-pixel pane, row, field, and toolbar separators.
-- **Text and Muted Text:** primary operator content and secondary metadata.
+- **Engine identity set:** MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, and ClickHouse use
+  the frontmatter colors only where the interface identifies an engine or Connection Profile.
 
 ### Named Rules
 
-**The Semantic Surface Rule.** New shell surfaces use the active theme's workspace, panel, editor, border, text, and muted roles; they do not introduce an independent gray palette.
+**The Zed-Is-The-System Rule.** Use the pinned Zed theme role or component API, not a copied hex,
+radius, shadow, or state color. Reinspect the exact pinned revision when Zed changes.
 
-**The Identity-Is-Not-Action Rule.** Engine colors identify Connection Profiles and database types. Actions continue to use native control states and the focus color.
+**The Identity-Is-Not-Action Rule.** Engine color identifies database type. Buttons, focus,
+selection, validation, success, warning, and failure continue to use Zed semantics.
 
-**The State-Is-Written Rule.** Connection and error state always includes text or an icon; the green, amber, red, and gray status dots never carry meaning alone.
+**The State-Is-Written Rule.** Connection and error state includes text or an icon; color never
+carries the only meaning.
 
 ## Typography
 
-**Display Font:** none; this operator shell has no display tier.
-**Body Font:** `.ZedSans`, currently backed by IBM Plex Sans, with system sans-serif fallbacks.
-**Label/Mono Font:** `.ZedMono`, currently backed by Lilex, for query editing.
+- **Display Font:** none in the routine operator workspace.
+- **UI Font:** the Zed UI font and user-configured UI scale.
+- **Buffer Font:** the Zed buffer font and user-configured buffer size for query editing and
+  code-like values.
 
-**Character:** The UI uses a workhorse sans serif at compact sizes, while the embedded editor owns its monospace typography. Weight, muted color, and position create hierarchy instead of large jumps in size.
+Use `Label`, `Headline`, `LabelSize`, and `TextSize` rather than local font sizes. Default UI text is
+the ordinary control and row voice; Small and XSmall carry dense metadata; Large or Headline sizes
+belong only where the Zed component hierarchy calls for them. Weight, semantic color, and placement
+create hierarchy before size does.
 
-### Hierarchy
-
-- **Title** (semibold, 12px): sidebar headings, result headings, and active structural labels.
-- **Body** (regular or medium, 12px): profile names, tab titles, buttons, and actionable rows.
-- **Label** (regular, 10px): endpoints, engine names, shortcuts, tags, counts, status summaries, and result cells.
-- **Editor** (regular, 15px, comfortable line height): editable query text only.
-
-### Named Rules
-
-**The Two-Scale Rule.** Shell chrome stays primarily at body and label sizes. Larger type belongs to modal structure supplied by the native component library, not routine workspace chrome.
-
-**The Editor Owns Mono Rule.** Monospace type is for editable query content and code-like values, not for general labels or navigation.
+**The Buffer Owns Mono Rule.** Monospace belongs to editable queries and code-like values. General
+navigation, actions, and status use the Zed UI font.
 
 ## Layout
 
-The desktop composition is a horizontal connection sidebar and flexible work area above a full-width status bar. The sidebar is fixed at 272px, while the query region absorbs remaining width; the supported window floor is 960 by 600 pixels.
+The application keeps an Astesia-owned horizontal composition: a Connection Profile and catalog
+sidebar beside a flexible tabbed work area, with persistent runtime status. The supported window
+floor remains 960 by 600 pixels; growing content scrolls or truncates within its owning pane.
 
-Horizontal dividers establish a 40px sidebar header, 40px query toolbar, 40px tab strip, 30px result header, and 32px status bar. The active query editor begins at 280px high and yields remaining height to results. Repeated internal spacing follows a compact 4px, 8px, 12px, and 16px rhythm; 24px is reserved for sparse startup or failure states.
+Use `DynamicSpacing` for component gaps, padding, and insets so Zed's Compact, Default, and
+Comfortable densities remain coherent. Fixed geometry is reserved for product boundaries such as
+the window minimum, sidebar behavior, result-grid columns, chart canvases, and other data surfaces
+that cannot be expressed by a Zed spacing role.
 
-The command palette is a centered 560px overlay, and transient notifications form a 360px stack at the upper-right. Content that can grow—tabs, database objects, command results, and result grids—scrolls within its pane rather than expanding the window.
+The active editor and results absorb available space. Overlays remain bounded, lists and grids own
+their scrolling, and long bilingual content never pushes the primary action out of reach.
 
-**The Continuous-State Rule.** Hiding the connection sidebar may enlarge the work area, but the tab strip and status bar remain present so query and runtime context is not lost.
+**The Continuous-State Rule.** Hiding the sidebar may enlarge the work area, but the active tab and
+runtime context stay visible.
 
 ## Elevation & Depth
 
-Astesia is flat by default. Workspace hierarchy comes from adjacent neutral tones and one-pixel borders. Medium shadow appears on notifications and large shadow appears on the command palette; ordinary panes, tabs, rows, toolbars, and data grids remain unshadowed.
+Use `ElevationIndex` as the complete depth vocabulary:
 
-### Shadow Vocabulary
+- **Background:** application background below panes and panels.
+- **Surface:** persistent panes, panels, and containers.
+- **EditorSurface:** editable buffers and work surfaces.
+- **ElevatedSurface:** floating content below dialogs.
+- **ModalSurface:** dialogs, alerts, and modal work.
 
-- **Transient Notice:** two soft black layers at 10% opacity, offset 4px and 2px, for upper-right notifications.
-- **Modal Command Surface:** two soft black layers at 10% opacity, offset 10px and 4px, for the command palette above its dimmed backdrop.
-
-### Named Rules
-
-**The Overlay-Only Elevation Rule.** Shadows signal temporary content above the workspace. Persistent application structure uses borders and tonal layering.
+Use the elevation's background and shadow. Persistent Background, Surface, and EditorSurface layers
+stay flat; floating and modal content receive the Zed-provided depth treatment. Astesia does not
+maintain a parallel shadow scale.
 
 ## Shapes
 
-Controls and inline tags use gently compact 4px corners. Notices, fields, profile rows, and tab tops use 6px corners. The command palette alone uses the broader 8px overlay radius. Status and identity marks are circular.
+Component shape belongs to Zed. Use the component's default rounding, border, clipping, and grouped
+edge behavior. Compose raw GPUI geometry only when no suitable Zed primitive exists, and derive its
+surface, borders, focus, spacing, and adjacent alignment from the surrounding Zed components.
 
-Borders are structural rather than decorative: one-pixel strokes separate panes, bound fields and overlays, and expose keyboard focus. Active tabs keep rounded top corners but meet the editor canvas with a straight lower edge.
+Persistent pane boundaries remain structural. Engine and status marks may be circular, but their
+shape does not replace a text or accessibility label.
 
 ## Components
 
 ### Buttons
 
-- **Shape:** compact controls use 4px corners and an 18px control height.
-- **Filled:** tonal panel fill with standard text; used for the primary query execution and profile confirmation actions.
-- **Outlined:** panel fill plus a structural border; used for secondary or reversible actions.
-- **Transparent:** no resting fill; used for low-emphasis status-bar settings and icon actions.
-- **Hover / Focus:** hover shifts to the theme's ghost-element state; focus remains visibly distinguished by the native focus treatment.
+- Use `Button` or `IconButton`; use `ButtonLike` only for a composition a standard button cannot
+  express.
+- `ButtonStyle::Subtle` is the common action, Filled adds emphasis, Outlined is secondary,
+  Transparent is quiet, and Tinted carries semantic Accent, Error, Warning, or Success state.
+- Use `ButtonSize`; Compact is appropriate for dense toolbars, while forms and dialogs use the size
+  owned by their surrounding Zed component.
+- Use built-in loading, selected, disabled, tooltip, key-binding, focus, and accessibility behavior.
 
-### Chips
+### Labels and status
 
-- **Style:** engine pickers use compact toggle buttons; profile tags use a quiet element fill, 4px corners, label-size text, and tight horizontal padding.
-- **State:** selected engine controls use the native accent tint. Tags are metadata, not actions.
+- Use `Label`, `LabelSize`, and semantic `Color` values.
+- Use `Indicator` or a status icon with readable text for connection, task, and failure state.
+- Truncate only dynamic text; static action labels remain complete.
 
-### Cards / Containers
+### Lists, trees, and navigation
 
-- **Corner Style:** persistent panes are square; interactive profile rows use 6px corners inside the sidebar.
-- **Background:** workspace, panel, and editor theme roles form the layer stack.
-- **Shadow Strategy:** persistent containers have no shadow.
-- **Border:** one-pixel separators and focus borders carry containment.
-- **Internal Padding:** dense rows use 8–10px horizontally and 8px vertically; empty and error states use 16–24px.
+- Use `ListItem`, `TreeViewItem`, `Tab`, and `TabBar` behavior where their contracts fit.
+- Selection, disclosure, indentation, density, end-slot visibility, hover, focus, and accessible
+  roles come from the component instead of local replicas.
+- Astesia owns the profile/catalog hierarchy and tab content, not a second navigation style.
 
-### Inputs / Fields
+### Inputs and forms
 
-- **Style:** editor-surface fill, 6px corners, one-pixel variant border, and 8px horizontal padding.
-- **Focus:** the border changes to the active theme's focus color.
-- **Error / Disabled:** validation changes the border to the semantic error treatment and includes a text explanation below the field.
+- Use Zed input, checkbox, toggle, section, modal, header, and footer components.
+- Validation preserves input, identifies the field, and uses semantic error treatment with readable
+  remediation.
+- Destructive confirmation names the exact database object and consequence; button styling follows
+  Zed semantics.
 
-### Navigation
+### Overlays and feedback
 
-The connection sidebar uses grouped, full-width profile rows with explicit selected fill, disclosure depth for databases and objects, and visible MCP and session metadata. Query tabs are 36px high, use top-only rounding, and distinguish active state by moving from the tab-bar surface to the editor surface. The status bar places state summary on the left and global commands, language, theme, session, and activity details on the right.
+- Use Zed modal, popover, context-menu, tooltip, notification, and progress patterns where available.
+- Match persistence to importance: transient confirmation may disappear; partial, failed, or
+  uncertain durable work remains inspectable.
+- Custom command, task, or notification surfaces use the appropriate Zed elevation and theme roles.
 
-### Command Palette
+### Data-specific surfaces
 
-The palette is a 560px elevated search surface with a 44px input row and scrollable results. Each result shows a body-size title, label-size category, and optional shortcut. Selection uses the native ghost-selected fill; an empty search result explains that no commands match.
-
-### Notifications
-
-Notifications form a maximum stack of four compact semantic surfaces. Each includes readable text, a semantic border and fill, and a dismiss action; long messages clamp rather than widening the stack.
+Query grids, charts, ER diagrams, MongoDB documents, Redis values, and performance views may require
+custom GPUI rendering. They still inherit Zed typography, density, semantic colors, focus,
+selection, disabled states, tooltips, and accessibility behavior.
 
 ## Do's and Don'ts
 
 ### Do:
 
-- **Do** use the current theme's semantic roles for every persistent surface, separator, text tier, and focus state.
-- **Do** keep operational state visible in labels, status summaries, notices, or icons in addition to color.
-- **Do** preserve compact row heights, internal scrolling, and the sidebar–tabs–status composition for new Milestone 3 surfaces.
-- **Do** use the engine identity set only where database type or Connection Profile identity is being communicated.
+- **Do** inspect the exact Zed component in the pinned checkout before changing or creating a visual
+  primitive.
+- **Do** use Zed components and semantic APIs so themes, UI scale, density, state, and accessibility
+  remain live.
+- **Do** preserve Astesia's compact sidebar–tabs–work–status composition and internal scrolling.
+- **Do** use engine identity colors only where database type is being communicated.
+- **Do** verify light/dark appearance and Compact/Default/Comfortable density for material changes.
 
 ### Don't:
 
-- **Don't** add large display typography, decorative gradients, glass effects, or standalone marketing-style cards to the operator workspace.
-- **Don't** use shadows on persistent panes, toolbars, tabs, rows, or data grids.
-- **Don't** turn status or engine colors into generic primary-button colors.
-- **Don't** replace text status with color-only dots, especially for errors, connection activity, or Usage Lease state.
+- **Don't** reproduce Zed with hard-coded hex values, pixel dimensions, radii, shadows, or hover and
+  focus colors.
+- **Don't** create a custom component when the pinned Zed UI library already owns the interaction.
+- **Don't** introduce marketing typography, decorative gradients, glass effects, or card-stack
+  layouts into the operator workspace.
+- **Don't** turn engine identity colors into action or status semantics.
+- **Don't** claim Zed conformity from source inspection alone; verify the rendered native surface.

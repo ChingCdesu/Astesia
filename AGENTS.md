@@ -55,3 +55,10 @@ Use the five canonical triage labels. See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 This is a single-context repo with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+
+### Product design
+
+When shaping, implementing, reviewing, copy-editing, or hardening user-facing Astesia behavior,
+load `.agents/skills/product-design/SKILL.md`. This includes GPUI surfaces and backend changes that
+alter a visible outcome. Skip it for backend-only work with no shipped UI effect, tests-only
+changes, telemetry, packaging, and marketing.
