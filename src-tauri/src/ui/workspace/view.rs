@@ -275,6 +275,11 @@ impl Render for AstesiaWorkspace {
                             .on_click(cx.listener(Self::open_palette_click)),
                     )
                     .child(
+                        Label::new(format!("Astesia v{}", env!("CARGO_PKG_VERSION")))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
                         Button::new("cycle-language", self.settings.read(cx).language().code())
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Transparent)

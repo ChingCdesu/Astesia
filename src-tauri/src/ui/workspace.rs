@@ -812,6 +812,49 @@ impl AstesiaWorkspace {
         }
     }
 
+    fn restart_application(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unsaved_count = self
+            .workspace_tabs
+            .iter()
+            .filter(|tab| tab.item.has_unsaved_changes(cx))
+            .count();
+        if unsaved_count == 0 {
+            cx.restart();
+            return;
+        }
+        if window.has_active_prompt() {
+            return;
+        }
+
+        let language = self.settings.read(cx).language();
+        let message = text(language, "重启 Astesia？", "Restart Astesia?");
+        let detail = format!(
+            "{} {unsaved_count}",
+            text(
+                language,
+                "重启将放弃未保存的标签页数量：",
+                "Restarting will discard this many unsaved tabs:"
+            )
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            message,
+            Some(&detail),
+            &[
+                PromptButton::ok(text(language, "放弃并重启", "Discard and Restart")),
+                PromptButton::cancel(text(language, "取消", "Cancel")),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |workspace, cx| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            workspace.update_in(cx, |_, _, cx| cx.restart()).ok();
+        })
+        .detach();
+    }
+
     fn execute_command(
         &mut self,
         command: WorkspaceCommand,
@@ -828,6 +871,7 @@ impl AstesiaWorkspace {
                 self.connection_profiles
                     .update(cx, |panel, cx| panel.refresh_profiles(cx));
             }
+            WorkspaceCommand::RestartApplication => self.restart_application(window, cx),
             WorkspaceCommand::SetTheme(theme) => self.set_theme(theme, cx),
             WorkspaceCommand::SetLanguage(language) => self.set_language(language, cx),
         }

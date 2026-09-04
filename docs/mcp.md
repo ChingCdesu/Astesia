@@ -9,19 +9,18 @@ managed by the Astesia desktop app.
 From the repository root, build the release binary:
 
 ```bash
-pnpm mcp:build
+cargo build --release --locked --manifest-path src-tauri/Cargo.toml --bin astesia-mcp
 ```
 
-This builds a release executable and stages it at
-`src-tauri/binaries/astesia-mcp-<target-triple>` (`.exe` on Windows). Run
-`pnpm mcp:prepare:debug` to stage a debug build.
+The desktop package scripts build `astesia-mcp` beside the `astesia` executable so the native
+process host discovers the exact sidecar shipped with the application. A direct Cargo build places
+the executable under `src-tauri/target/release/`.
 
 ## Desktop Integration Status
 
-The GPUI shell does not currently expose desktop controls for the bundled HTTP
-sidecar. Standalone stdio remains available. The desktop runtime accepts a
-platform `SidecarHost` and shares the Application's single synchronization
-registry when a host is supplied.
+The GPUI Shell exposes start, stop, restart, status, and client-configuration controls for the
+bundled HTTP sidecar. Standalone stdio remains available. Both modes share the Application's
+connection repository and synchronization contracts.
 
 Streamable HTTP and stdio both open the desktop app's shared connection
 repository. On connection tests and connection requests, the MCP server resolves
@@ -65,7 +64,7 @@ MCP client configuration formats vary, but a generic stdio entry looks like this
 {
   "mcpServers": {
     "astesia": {
-      "command": "/absolute/path/to/Astesia/src-tauri/binaries/astesia-mcp-<target-triple>",
+      "command": "/absolute/path/to/Astesia/src-tauri/target/release/astesia-mcp",
       "args": []
     }
   }

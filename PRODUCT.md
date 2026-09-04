@@ -20,7 +20,7 @@ The same Connection Profiles, credential bindings, revision checks, Usage Leases
 
 ## Operating Context
 
-- Desktop use with macOS implemented and validated first; Windows and Linux follow after macOS workflow parity.
+- Desktop use on macOS, Windows x64, and Linux x64, with macOS as the primary interactive validation platform.
 - Frequent keyboard-driven work in a multi-pane database workspace, including Chinese IME, query editing, schema browsing, tab navigation, and long-running tasks.
 - Seven supported engines: MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 - Existing native Connection Profiles remain authoritative when readable. WebView-only preferences and connections are not imported.
@@ -49,7 +49,7 @@ The same Connection Profiles, credential bindings, revision checks, Usage Leases
 - Domain language and migration boundaries: `CONTEXT.md`.
 - Approved runtime decision: `docs/adr/0001-rebuild-the-desktop-shell-with-gpui.md`.
 - Staged delivery and acceptance contract: `docs/plans/gpui-ui-rebuild.md`.
-- Incumbent interaction and visual evidence: `src/components/`, `src/stores/`, `src/i18n/`, and `src/styles/global.css`.
+- Incumbent interaction and visual evidence: `docs/plans/gpui-milestone-0-acceptance.md` and the recorded Legacy Shell commit.
 - No customer testimonials, public usage claims, or benchmark claims are available and future UI work must not invent them.
 
 ## Product Principles

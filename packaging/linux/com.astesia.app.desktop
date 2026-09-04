@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Astesia
+Comment=Native database workspace
+Exec=astesia
+Icon=com.astesia.app
+Terminal=false
+Categories=Development;Database;
+StartupNotify=true
+StartupWMClass=com.astesia.app

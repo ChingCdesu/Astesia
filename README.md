@@ -3,10 +3,9 @@
 Astesia is a native desktop database workspace built in Rust with GPUI and the embedded Zed
 Editor. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 
-The native-runtime migration has completed Milestones 0-7 on macOS. See the
-[GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) and
-[Milestone 7 acceptance](docs/plans/gpui-milestone-7-acceptance.md) for the behavioral checklist
-and current evidence.
+The native-runtime migration has completed Milestones 0-7. The Milestone 8 cutover candidate has
+removed the Legacy Shell and is completing the final native package matrix. See the
+[GPUI rebuild plan](docs/plans/gpui-ui-rebuild.md) for the behavioral checklist and current status.
 
 ## Delivered native capabilities
 
@@ -25,12 +24,6 @@ and current evidence.
   Task Center inspection, and native MCP Sidecar lifecycle
 - Native table/query charts, qualified ER diagrams, and seven-engine performance dashboards
 
-## Remaining parity work
-
-Milestone 8 covers cross-platform validation, native packaging and update cutover, and final
-removal of the Legacy Shell. Reference implementations remain in the retained React/Tauri source
-until that cutover passes.
-
 ## Tech stack
 
 | Layer | Current technology |
@@ -40,7 +33,6 @@ until that cutover passes.
 | Application Core | Rust and Tokio |
 | Database drivers | SQLx, Tiberius, MongoDB, Redis, and ClickHouse HTTP |
 | Local state and credentials | SQLite repository and platform credential vault |
-| Legacy Shell, pending Milestone 8 removal | React 19, TypeScript, Tauri 2, Monaco, Vite, Tailwind, Radix UI, and Zustand |
 
 ## Native development
 
@@ -57,29 +49,13 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 Environment-dependent seven-engine tests are ignored by the normal suite. Their disposable-service
 configuration and latest results are recorded in the milestone acceptance documents.
 
-## Legacy Shell migration commands
-
-Node.js and pnpm are needed for the retained frontend, Tauri packaging paths, and MCP sidecar
-staging helpers while the migration is in progress.
-
-```bash
-pnpm install
-pnpm dev              # Legacy frontend only
-pnpm tauri:dev        # Legacy Tauri CLI wrapper
-pnpm build            # Legacy TypeScript and Vite build gate
-pnpm lint             # Legacy frontend lint baseline
-pnpm tauri:build      # Legacy packaging path
-```
-
 ## MCP server
 
 The standalone authenticated MCP server remains in `src-tauri/src/bin/astesia-mcp.rs`. The native
-desktop owns its lifecycle through the MCP workspace tab. Existing build helpers remain available
-during migration:
+desktop owns its lifecycle through the MCP workspace tab. Build it directly for local clients:
 
 ```bash
-pnpm mcp:prepare:debug
-pnpm mcp:build
+cargo build --locked --manifest-path src-tauri/Cargo.toml --bin astesia-mcp
 ```
 
 See the [MCP server guide](docs/mcp.md) for stdio configuration, credential handling, available
@@ -88,7 +64,7 @@ tools, and destructive-operation safeguards.
 ## Project structure
 
 ```text
-src-tauri/                  # Native Rust application; directory name is retained until cutover
+src-tauri/                  # Native Rust package; historical directory name is retained
   src/
     application/            # UI-independent services and workflow state
     connection_runtime/     # Live connection and session ownership
@@ -98,11 +74,11 @@ src-tauri/                  # Native Rust application; directory name is retaine
     platform/               # Native lifecycle, preferences, events, and sidecars
     ui/                     # GPUI shell, workspace, tabs, forms, catalogs, and grids
     mcp/                    # Standalone MCP tools and policy
-    mcp_runtime/            # Native MCP lifecycle under migration
+    mcp_runtime/            # Native MCP lifecycle
     tasks/                  # Background task model
     bin/astesia-mcp.rs      # Standalone MCP entry point
     main.rs                 # Native desktop entry point
 
-src/                        # Temporary React/Tauri Legacy Shell; removed in Milestone 8
-public/                     # Legacy frontend assets
+packaging/                  # Internal package metadata
+scripts/                    # Native macOS, Linux, and Windows packaging entry points
 ```
