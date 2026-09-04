@@ -4,7 +4,8 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 manifest="$repository_root/src-tauri/Cargo.toml"
-target="${1:-$(rustup run 1.97.1 rustc -vV | awk '/^host:/ { print $2 }')}"
+toolchain="1.97.1"
+target="${1:-$(rustup run "$toolchain" rustc -vV | awk '/^host:/ { print $2 }')}"
 
 case "$target" in
   aarch64-apple-darwin|x86_64-apple-darwin) ;;
@@ -23,8 +24,8 @@ stage="$(mktemp -d)"
 bundle="$stage/Astesia.app"
 trap 'rm -rf "$stage"' EXIT
 
-rustup target add --toolchain 1.97.1 "$target"
-rustup run 1.97.1 cargo build --release --locked --manifest-path "$manifest" --target "$target" \
+rustup target add --toolchain "$toolchain" "$target"
+rustup run "$toolchain" cargo build --release --locked --manifest-path "$manifest" --target "$target" \
   --bin astesia --bin astesia-mcp
 
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$package_dir"

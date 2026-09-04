@@ -240,10 +240,6 @@ impl DataGridItem {
         item
     }
 
-    pub(super) fn matches(&self, target: &QueryTarget, table: &TableRef) -> bool {
-        self.state.target() == target && self.state.table() == table
-    }
-
     pub(super) fn label(&self, cx: &App) -> String {
         let language = self.settings.read(cx).language();
         format!(

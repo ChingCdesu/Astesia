@@ -5,7 +5,7 @@ use gpui::{AppContext as _, Context, PathPromptOptions, PromptButton, PromptLeve
 use crate::application::{BackupContent, BackupOptions, DropTableMode, QueryTarget};
 use crate::db::TableRef;
 
-use super::{AstesiaWorkspace, WorkspaceItem, WorkspaceTab};
+use super::{AstesiaWorkspace, WorkspaceItem, WorkspaceItemKey};
 use crate::ui::{
     copy_table_form::{CopyTableForm, TransferTaskStarted},
     document_item::DocumentItem,
@@ -53,29 +53,20 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self.workspace_tabs.iter().find(|tab| {
-            tab.item
-                .matches_document_collection(&target, &collection, cx)
-        }) {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            DocumentItem::new(
-                self.application.clone(),
-                target,
-                collection,
-                self.settings.clone(),
-                window,
-                cx,
-            )
+        let key = WorkspaceItemKey::Document(target.clone(), collection.clone());
+        self.open_or_activate(key, window, cx, move |workspace, window, cx| {
+            let item = cx.new(|cx| {
+                DocumentItem::new(
+                    workspace.application.clone(),
+                    target,
+                    collection,
+                    workspace.settings.clone(),
+                    window,
+                    cx,
+                )
+            });
+            (WorkspaceItem::new(item), Vec::new())
         });
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::Document(item),
-        });
-        self.focus_active_item(window, cx);
     }
 
     pub(super) fn open_redis_key(
@@ -85,62 +76,45 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_redis_key(&target, &key, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            RedisItem::new(
-                self.application.clone(),
-                target,
-                key,
-                self.settings.clone(),
-                window,
-                cx,
-            )
-        });
-        let deletion_subscription =
-            cx.subscribe(&item, |workspace, _, event: &RedisKeyDeleted, cx| {
-                workspace.connection_profiles.update(cx, |panel, cx| {
-                    panel.refresh_target_objects(event.target.clone(), cx);
-                });
+        let item_key = WorkspaceItemKey::Redis(target.clone(), key.clone());
+        self.open_or_activate(item_key, window, cx, move |workspace, window, cx| {
+            let item = cx.new(|cx| {
+                RedisItem::new(
+                    workspace.application.clone(),
+                    target,
+                    key,
+                    workspace.settings.clone(),
+                    window,
+                    cx,
+                )
             });
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::Redis {
-                item,
-                _deletion_subscription: deletion_subscription,
-            },
+            let deletion_subscription =
+                cx.subscribe(&item, |workspace, _, event: &RedisKeyDeleted, cx| {
+                    workspace.connection_profiles.update(cx, |panel, cx| {
+                        panel.refresh_target_objects(event.target.clone(), cx);
+                    });
+                });
+            (WorkspaceItem::new(item), vec![deletion_subscription])
         });
-        self.focus_active_item(window, cx);
     }
 
     pub(super) fn open_task_center(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.is_task_center())
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item =
-            cx.new(|cx| TaskCenterItem::new(self.application.clone(), self.settings.clone(), cx));
-        let observation = cx.observe(&item, |_, _, cx| cx.notify());
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::TaskCenter {
-                item,
-                _observation: observation,
+        self.open_or_activate(
+            WorkspaceItemKey::TaskCenter,
+            window,
+            cx,
+            |workspace, _, cx| {
+                let item = cx.new(|cx| {
+                    TaskCenterItem::new(
+                        workspace.application.clone(),
+                        workspace.settings.clone(),
+                        cx,
+                    )
+                });
+                let observation = cx.observe(&item, |_, _, cx| cx.notify());
+                (WorkspaceItem::new(item), vec![observation])
             },
-        });
-        self.focus_active_item(window, cx);
+        );
     }
 
     pub(super) fn open_performance(
@@ -149,23 +123,18 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_performance(&target, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            PerformanceItem::new(self.application.clone(), target, self.settings.clone(), cx)
+        let key = WorkspaceItemKey::Performance(target.clone());
+        self.open_or_activate(key, window, cx, move |workspace, _, cx| {
+            let item = cx.new(|cx| {
+                PerformanceItem::new(
+                    workspace.application.clone(),
+                    target,
+                    workspace.settings.clone(),
+                    cx,
+                )
+            });
+            (WorkspaceItem::new(item), Vec::new())
         });
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::Performance(item),
-        });
-        self.focus_active_item(window, cx);
     }
 
     pub(super) fn open_er_diagram(
@@ -174,42 +143,36 @@ impl AstesiaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.matches_er_diagram(&target, cx))
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item = cx.new(|cx| {
-            ErDiagramItem::new(self.application.clone(), target, self.settings.clone(), cx)
+        let key = WorkspaceItemKey::ErDiagram(target.clone());
+        self.open_or_activate(key, window, cx, move |workspace, _, cx| {
+            let item = cx.new(|cx| {
+                ErDiagramItem::new(
+                    workspace.application.clone(),
+                    target,
+                    workspace.settings.clone(),
+                    cx,
+                )
+            });
+            (WorkspaceItem::new(item), Vec::new())
         });
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::ErDiagram(item),
-        });
-        self.focus_active_item(window, cx);
     }
 
     pub(super) fn open_mcp_service(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(existing) = self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.item.is_mcp_service())
-        {
-            self.activate_tab(existing.id, window, cx);
-            return;
-        }
-        let item =
-            cx.new(|cx| McpServiceItem::new(self.application.clone(), self.settings.clone(), cx));
-        let id = self.tabs.add();
-        self.workspace_tabs.push(WorkspaceTab {
-            id,
-            item: WorkspaceItem::McpService(item),
-        });
-        self.focus_active_item(window, cx);
+        self.open_or_activate(
+            WorkspaceItemKey::McpService,
+            window,
+            cx,
+            |workspace, _, cx| {
+                let item = cx.new(|cx| {
+                    McpServiceItem::new(
+                        workspace.application.clone(),
+                        workspace.settings.clone(),
+                        cx,
+                    )
+                });
+                (WorkspaceItem::new(item), Vec::new())
+            },
+        );
     }
 
     pub(super) fn choose_backup_content(

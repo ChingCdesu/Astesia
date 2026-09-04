@@ -67,10 +67,6 @@ impl DocumentItem {
         item
     }
 
-    pub(super) fn matches(&self, target: &QueryTarget, collection: &TableRef) -> bool {
-        self.session.target() == target && self.session.collection() == collection
-    }
-
     pub(super) fn label(&self) -> String {
         format!(
             "{} · {}/{}",

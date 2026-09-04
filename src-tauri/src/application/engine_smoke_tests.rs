@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{
-    Application, CatalogSection, ConnectionOutcome, CreateObjectSpec, CsvOptions,
+    Application, CatalogEntry, CatalogSection, ConnectionOutcome, CreateObjectSpec, CsvOptions,
     DatabaseObjectKind, DropObjectTarget, ExportFormat, ExportSource, GridCell, GridEditability,
     GridRowSelectionMode, GridSession, GridSessionError, GridSort, GridSortDirection,
     ObjectMutation, ProfileOperationCommand, ProfileOperationOutcome, QueryTarget, TableColumnSpec,
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::connection_repository::{SaveConnectionRequest, SharedConnectionRepository};
 use crate::credential_vault::test_support::MemoryCredentialVault;
-use crate::db::{ConnectionConfig, DbType, SqlDialect, TableRef};
+use crate::db::{ConnectionConfig, DbType, SqlDialect, TableRef, ViewInfo};
 
 mod milestone_seven;
 mod milestone_six;
@@ -248,24 +248,40 @@ async fn load_catalog(
 }
 
 fn assert_catalog_contract(engine: DbType, catalog: &super::DatabaseCatalogSnapshot) {
-    assert_section_ready(&catalog.tables, true, engine, "tables");
     let capabilities = engine.capabilities();
-    assert_section_ready(&catalog.schemas, capabilities.schemas, engine, "schemas");
-    assert_section_ready(&catalog.views, capabilities.views, engine, "views");
-    assert_section_ready(
-        &catalog.functions,
-        capabilities.functions,
-        engine,
-        "functions",
-    );
-    assert_section_ready(
-        &catalog.procedures,
-        capabilities.procedures,
-        engine,
-        "procedures",
-    );
-    assert_section_ready(&catalog.triggers, capabilities.triggers, engine, "triggers");
-    assert_section_ready(&catalog.users, capabilities.users, engine, "users");
+    for entry in catalog.entries() {
+        match entry {
+            CatalogEntry::Schemas(section) => {
+                assert_section_ready(section, capabilities.schemas, engine, "schemas")
+            }
+            CatalogEntry::Tables(section) => assert_section_ready(section, true, engine, "tables"),
+            CatalogEntry::Views(section) => {
+                assert_section_ready(section, capabilities.views, engine, "views")
+            }
+            CatalogEntry::Functions(section) => {
+                assert_section_ready(section, capabilities.functions, engine, "functions")
+            }
+            CatalogEntry::Procedures(section) => {
+                assert_section_ready(section, capabilities.procedures, engine, "procedures")
+            }
+            CatalogEntry::Triggers(section) => {
+                assert_section_ready(section, capabilities.triggers, engine, "triggers")
+            }
+            CatalogEntry::Users(section) => {
+                assert_section_ready(section, capabilities.users, engine, "users")
+            }
+        }
+    }
+}
+
+fn catalog_views(catalog: &super::DatabaseCatalogSnapshot) -> &CatalogSection<ViewInfo> {
+    catalog
+        .entries()
+        .find_map(|entry| match entry {
+            CatalogEntry::Views(section) => Some(section),
+            _ => None,
+        })
+        .expect("catalog snapshots contain views")
 }
 
 fn assert_section_ready<T>(
@@ -573,13 +589,13 @@ async fn smoke_sql5_milestone_five(
             panic!("{engine:?} view creation failed: {error}; rendered SQL: {view_sql}")
         });
     let catalog = load_catalog(application, target).await;
-    let CatalogSection::Ready(tables) = &catalog.tables else {
+    let CatalogSection::Ready(tables) = catalog.tables() else {
         panic!("{engine:?} tables were not ready after creation")
     };
     assert!(tables
         .iter()
         .any(|item| item.reference.name() == table_name));
-    let CatalogSection::Ready(views) = &catalog.views else {
+    let CatalogSection::Ready(views) = catalog_views(&catalog) else {
         panic!("{engine:?} views were not ready after creation")
     };
     let view = views
@@ -604,7 +620,7 @@ async fn smoke_sql5_milestone_five(
         .await
         .unwrap_or_else(|error| panic!("{engine:?} table drop failed: {error}"));
     let catalog = load_catalog(application, target).await;
-    let CatalogSection::Ready(tables) = catalog.tables else {
+    let CatalogSection::Ready(tables) = catalog.tables() else {
         panic!("{engine:?} tables were not ready after drop")
     };
     assert!(tables

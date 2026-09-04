@@ -1,10 +1,9 @@
 use gpui::{rgb, FontWeight};
 use zed_ui::{prelude::*, Tooltip};
 
-use super::engine_workflows::{DraggedTableCopy, DraggedTableCopyPreview};
 use super::ConnectionProfilesPanel;
 use crate::application::connection_workspace::{
-    CatalogSection, DatabaseCatalogSnapshot, ObjectListState,
+    CatalogEntry, CatalogSection, DatabaseCatalogSnapshot, ObjectListState,
 };
 use crate::application::{
     object_kind_can_create, object_kind_can_drop, object_kind_can_rename, DatabaseObjectKind,
@@ -54,591 +53,314 @@ impl ConnectionProfilesPanel {
         catalog: &DatabaseCatalogSnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let language = self.settings.read(cx).language();
-        let (primary_label, primary_empty_label) = match target.db_type {
-            crate::db::DbType::MongoDB => (
-                text(language, "集合", "Collections"),
-                text(language, "未发现集合", "No collections found"),
-            ),
-            crate::db::DbType::Redis => (
-                text(language, "键", "Keys"),
-                text(language, "未发现键", "No keys found"),
-            ),
-            _ => (
-                text(language, "表", "Tables"),
-                text(language, "未发现表", "No tables found"),
-            ),
-        };
-        let primary_section = self
-            .redis_search_result
-            .as_ref()
-            .filter(|(search_target, _)| search_target == target)
-            .map(|(_, result)| CatalogSection::from_result(result.clone()))
-            .unwrap_or_else(|| catalog.tables.clone());
-        let primary_rows = match &primary_section {
-            CatalogSection::Unsupported => Vec::new(),
-            CatalogSection::Loading => vec![
-                self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    0,
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                ),
-                catalog_empty_row(text(language, "正在加载…", "Loading…")),
-            ],
-            CatalogSection::Failed(error) => vec![
-                self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    0,
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                ),
-                catalog_error_row(error),
-            ],
-            CatalogSection::Ready(tables) => {
-                let mut rows = vec![self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    tables.len(),
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                )];
-                if tables.is_empty() {
-                    rows.push(catalog_empty_row(primary_empty_label));
-                    rows
-                } else {
-                    rows.extend(tables.iter().enumerate().map(|(index, object)| {
-                        let name = object.reference.to_string();
-                        let target_for_action = target.clone();
-                        let target_for_click = target.clone();
-                        let table_for_action = object.reference.clone();
-                        let table_for_click = object.reference.clone();
-                        let structure_target = target.clone();
-                        let structure_table = object.reference.clone();
-                        let rename_target = target.clone();
-                        let rename_name = name.clone();
-                        let drop_target = target.clone();
-                        let drop_name = name.clone();
-                        let copy_target = target.clone();
-                        let copy_table = object.reference.clone();
-                        let dragged_table = DraggedTableCopy {
-                            source: target.clone(),
-                            table: object.reference.clone(),
-                        };
-                        let drag_label = name.clone();
-                        let backup_target = target.clone();
-                        let backup_table = object.reference.clone();
-                        let structure_label = text(language, "查看表结构", "View table structure");
-                        let data_name = name.clone();
-                        let supports_sql = target.db_type.capabilities().sql;
-                        let supports_browse = supports_sql
-                            || matches!(
-                                target.db_type,
-                                crate::db::DbType::MongoDB | crate::db::DbType::Redis
-                            );
-                        h_flex()
-                            .id(format!(
-                                "schema-object-{}-{}-{index}",
-                                target.connection_id, target.database
-                            ))
-                            .min_w_0()
-                            .gap_1p5()
-                            .when(supports_browse, |element| {
-                                element.child(
-                                    h_flex()
-                                        .id(format!("browse-table-data-{index}"))
-                                        .role(gpui::Role::Button)
-                                        .tab_index(0)
-                                        .key_context("SchemaObjectRow")
-                                        .aria_label(format!(
-                                            "{} {name}",
-                                            text(language, "浏览表数据", "Browse table data")
-                                        ))
-                                        .min_w_0()
-                                        .flex_1()
-                                        .gap_1p5()
-                                        .px_1()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(cx.theme().colors().border.opacity(0.0))
-                                        .cursor_pointer()
-                                        .focus_visible(|element| {
-                                            element.border_color(cx.theme().colors().border_focused)
-                                        })
-                                        .hover(|element| {
-                                            element.bg(cx.theme().colors().ghost_element_hover)
-                                        })
-                                        .on_action(cx.listener(
-                                            move |panel, _: &menu::Confirm, _, cx| {
-                                                panel.request_primary_data(
-                                                    target_for_action.clone(),
-                                                    table_for_action.clone(),
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |panel, _, _, cx| {
-                                            panel.request_primary_data(
-                                                target_for_click.clone(),
-                                                table_for_click.clone(),
-                                                cx,
-                                            );
-                                        }))
-                                        .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
-                                        .child(
-                                            Label::new(data_name)
-                                                .size(LabelSize::XSmall)
-                                                .truncate()
-                                                .flex_1(),
-                                        )
-                                        .when_some(object.row_count, |element, count| {
-                                            element.child(
-                                                Label::new(count.to_string())
-                                                    .size(LabelSize::XSmall)
-                                                    .color(Color::Muted),
-                                            )
-                                        }),
-                                )
-                            })
-                            .when(!supports_browse, |element| {
-                                element
-                                    .px_1()
-                                    .py_0p5()
-                                    .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
-                                    .child(
-                                        Label::new(name)
-                                            .size(LabelSize::XSmall)
-                                            .truncate()
-                                            .flex_1(),
-                                    )
-                                    .when_some(object.row_count, |element, count| {
-                                        element.child(
-                                            Label::new(count.to_string())
-                                                .size(LabelSize::XSmall)
-                                                .color(Color::Muted),
-                                        )
-                                    })
-                            })
-                            .when(supports_sql, |element| {
-                                element.child(
-                                    IconButton::new(
-                                        format!("view-table-structure-{index}"),
-                                        IconName::ListTree,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text(structure_label))
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| {
-                                            panel.request_table_structure(
-                                                structure_target.clone(),
-                                                structure_table.clone(),
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(
-                                target.db_type.capabilities().table_copy
-                                    != crate::db::TableCopyMode::None,
-                                |element| {
-                                    element.child(
-                                        IconButton::new(
-                                            format!("copy-table-{index}"),
-                                            IconName::Copy,
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .tooltip(Tooltip::text(text(
-                                            language,
-                                            "复制表",
-                                            "Copy table",
-                                        )))
-                                        .on_click(
-                                            cx.listener(move |panel, _, _, cx| {
-                                                panel.copy_table(
-                                                    copy_target.clone(),
-                                                    copy_table.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                },
-                            )
-                            .when(target.db_type.capabilities().backup, |element| {
-                                element.child(
-                                    IconButton::new(
-                                        format!("backup-table-{index}"),
-                                        IconName::Download,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text(text(
-                                        language,
-                                        "备份此表",
-                                        "Back up this table",
-                                    )))
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| {
-                                            panel.request_backup(
-                                                backup_target.clone(),
-                                                Some(vec![backup_table.clone()]),
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(
-                                object_kind_can_rename(target.db_type, DatabaseObjectKind::Table),
-                                |element| {
-                                    element.child(
-                                        IconButton::new(
-                                            format!("rename-table-{index}"),
-                                            IconName::Pencil,
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .disabled(self.object_operation_in_progress)
-                                        .tooltip(Tooltip::text(text(
-                                            language,
-                                            "重命名表",
-                                            "Rename table",
-                                        )))
-                                        .on_click(
-                                            cx.listener(move |panel, _, _, cx| {
-                                                panel.request_rename_object(
-                                                    rename_target.clone(),
-                                                    DatabaseObjectKind::Table,
-                                                    rename_name.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                },
-                            )
-                            .when(
-                                object_kind_can_drop(target.db_type, DatabaseObjectKind::Table),
-                                |element| {
-                                    element.child(
-                                        IconButton::new(
-                                            format!("drop-table-{index}"),
-                                            IconName::Trash,
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .disabled(self.object_operation_in_progress)
-                                        .tooltip(Tooltip::text(text(
-                                            language,
-                                            "删除表",
-                                            "Drop table",
-                                        )))
-                                        .on_click(
-                                            cx.listener(move |panel, _, window, cx| {
-                                                panel.confirm_drop_object(
-                                                    drop_target.clone(),
-                                                    ObjectMutation::Drop(DropObjectTarget::Table(
-                                                        drop_name.clone(),
-                                                    )),
-                                                    window,
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                },
-                            )
-                            .when(
-                                target.db_type.capabilities().table_copy
-                                    != crate::db::TableCopyMode::None,
-                                |element| {
-                                    element.on_drag(dragged_table, move |_, _, _, cx| {
-                                        cx.new(|_| DraggedTableCopyPreview {
-                                            label: drag_label.clone(),
-                                        })
-                                    })
-                                },
-                            )
-                            .into_any_element()
-                    }));
-                    rows
-                }
-            }
-        };
-        let refresh_target = target.clone();
-        let refresh_label = text(language, "刷新对象", "Refresh objects");
-
+        let primary_rows = self.render_primary_catalog(target, catalog, cx);
+        let secondary_rows = self.render_secondary_catalog(target, catalog, cx);
         v_flex()
             .pl_4()
             .py_1()
             .gap_0p5()
+            .child(self.render_catalog_header(target, cx))
+            .when_some(self.render_redis_search(target, cx), |element, search| {
+                element.child(search)
+            })
+            .children(primary_rows)
+            .children(secondary_rows)
+            .into_any_element()
+    }
+
+    fn render_catalog_header(&self, target: &QueryTarget, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.settings.read(cx).language();
+        let refresh_target = target.clone();
+        let refresh_label = text(language, "刷新对象", "Refresh objects");
+        h_flex()
+            .min_w_0()
+            .justify_between()
             .child(
                 h_flex()
-                    .min_w_0()
-                    .justify_between()
+                    .gap_1()
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Label::new(text(language, "数据库对象", "Database objects"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .when(self.object_operation_in_progress, |element| {
-                                element.child(
-                                    Label::new(text(language, "正在更新…", "Updating…"))
-                                        .size(LabelSize::XSmall),
-                                )
-                            }),
+                        Label::new(text(language, "数据库对象", "Database objects"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
                     )
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .when(target.db_type.capabilities().foreign_keys, |element| {
-                                let er_target = target.clone();
-                                element.child(
-                                    IconButton::new(
-                                        format!("er-diagram-database-{}", target.database),
-                                        IconName::GitGraph,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text(text(
-                                        language,
-                                        "实体关系图",
-                                        "Entity relationship diagram",
-                                    )))
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| {
-                                            panel.request_er_diagram(er_target.clone(), cx);
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(
-                                target.db_type.capabilities().performance
-                                    == crate::db::PerformanceMode::Native,
-                                |element| {
-                                    let performance_target = target.clone();
-                                    element.child(
-                                        IconButton::new(
-                                            format!("performance-database-{}", target.database),
-                                            IconName::DatabaseZap,
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .tooltip(Tooltip::text(text(
-                                            language,
-                                            "性能监控",
-                                            "Performance monitor",
-                                        )))
-                                        .on_click(
-                                            cx.listener(move |panel, _, _, cx| {
-                                                panel.request_performance(
-                                                    performance_target.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                },
+                    .when(self.object_operation_in_progress, |element| {
+                        element.child(
+                            Label::new(text(language, "正在更新…", "Updating…"))
+                                .size(LabelSize::XSmall),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .when(target.db_type.capabilities().foreign_keys, |element| {
+                        let er_target = target.clone();
+                        element.child(
+                            IconButton::new(
+                                format!("er-diagram-database-{}", target.database),
+                                IconName::GitGraph,
                             )
-                            .when(target.db_type.capabilities().backup, |element| {
-                                let backup_target = target.clone();
-                                element.child(
-                                    IconButton::new(
-                                        format!("backup-database-{}", target.database),
-                                        IconName::Download,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text(text(
-                                        language,
-                                        "备份数据库",
-                                        "Back up database",
-                                    )))
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| {
-                                            panel.request_backup(backup_target.clone(), None, cx);
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(target.db_type.capabilities().restore, |element| {
-                                let restore_target = target.clone();
-                                element.child(
-                                    IconButton::new(
-                                        format!("restore-database-{}", target.database),
-                                        IconName::ArrowUp,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .tooltip(Tooltip::text(text(
-                                        language,
-                                        "恢复数据库",
-                                        "Restore database",
-                                    )))
-                                    .on_click(cx.listener(
-                                        move |panel, _, _, cx| {
-                                            panel.request_restore(restore_target.clone(), cx);
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(
-                                target.db_type.capabilities().database_management,
-                                |element| {
-                                    let create_target = target.clone();
-                                    element.child(
-                                        IconButton::new(
-                                            format!("create-database-{}", target.connection_id),
-                                            IconName::Plus,
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .disabled(self.object_operation_in_progress)
-                                        .tooltip(Tooltip::text(text(
-                                            language,
-                                            "新建数据库",
-                                            "Create database",
-                                        )))
-                                        .on_click(
-                                            cx.listener(move |panel, _, _, cx| {
-                                                panel.request_object_mutation(
-                                                    ObjectMutationFormMode::Create {
-                                                        target: create_target.clone(),
-                                                        kind: DatabaseObjectKind::Database,
-                                                        schema: None,
-                                                    },
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text(text(
+                                language,
+                                "实体关系图",
+                                "Entity relationship diagram",
+                            )))
+                            .on_click(cx.listener(
+                                move |panel, _, _, cx| {
+                                    panel.request_er_diagram(er_target.clone(), cx);
                                 },
-                            )
-                            .child(
+                            )),
+                        )
+                    })
+                    .when(
+                        target.db_type.capabilities().performance
+                            == crate::db::PerformanceMode::Native,
+                        |element| {
+                            let performance_target = target.clone();
+                            element.child(
                                 IconButton::new(
-                                    format!(
-                                        "refresh-objects-{}-{}",
-                                        target.connection_id, target.database
-                                    ),
-                                    IconName::RotateCw,
+                                    format!("performance-database-{}", target.database),
+                                    IconName::DatabaseZap,
+                                )
+                                .icon_size(IconSize::XSmall)
+                                .tooltip(Tooltip::text(text(
+                                    language,
+                                    "性能监控",
+                                    "Performance monitor",
+                                )))
+                                .on_click(cx.listener(
+                                    move |panel, _, _, cx| {
+                                        panel.request_performance(performance_target.clone(), cx);
+                                    },
+                                )),
+                            )
+                        },
+                    )
+                    .when(target.db_type.capabilities().backup, |element| {
+                        let backup_target = target.clone();
+                        element.child(
+                            IconButton::new(
+                                format!("backup-database-{}", target.database),
+                                IconName::Download,
+                            )
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text(text(
+                                language,
+                                "备份数据库",
+                                "Back up database",
+                            )))
+                            .on_click(cx.listener(
+                                move |panel, _, _, cx| {
+                                    panel.request_backup(backup_target.clone(), None, cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(target.db_type.capabilities().restore, |element| {
+                        let restore_target = target.clone();
+                        element.child(
+                            IconButton::new(
+                                format!("restore-database-{}", target.database),
+                                IconName::ArrowUp,
+                            )
+                            .icon_size(IconSize::XSmall)
+                            .tooltip(Tooltip::text(text(
+                                language,
+                                "恢复数据库",
+                                "Restore database",
+                            )))
+                            .on_click(cx.listener(
+                                move |panel, _, _, cx| {
+                                    panel.request_restore(restore_target.clone(), cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(
+                        target.db_type.capabilities().database_management,
+                        |element| {
+                            let create_target = target.clone();
+                            element.child(
+                                IconButton::new(
+                                    format!("create-database-{}", target.connection_id),
+                                    IconName::Plus,
                                 )
                                 .icon_size(IconSize::XSmall)
                                 .disabled(self.object_operation_in_progress)
-                                .tooltip(Tooltip::text(refresh_label))
+                                .tooltip(Tooltip::text(text(
+                                    language,
+                                    "新建数据库",
+                                    "Create database",
+                                )))
                                 .on_click(cx.listener(
-                                    move |panel, event, window, cx| {
-                                        panel.retry_objects(
-                                            refresh_target.clone(),
-                                            event,
-                                            window,
+                                    move |panel, _, _, cx| {
+                                        panel.request_object_mutation(
+                                            ObjectMutationFormMode::Create {
+                                                target: create_target.clone(),
+                                                kind: DatabaseObjectKind::Database,
+                                                schema: None,
+                                            },
                                             cx,
                                         );
                                     },
                                 )),
+                            )
+                        },
+                    )
+                    .child(
+                        IconButton::new(
+                            format!(
+                                "refresh-objects-{}-{}",
+                                target.connection_id, target.database
                             ),
+                            IconName::RotateCw,
+                        )
+                        .icon_size(IconSize::XSmall)
+                        .disabled(self.object_operation_in_progress)
+                        .tooltip(Tooltip::text(refresh_label))
+                        .on_click(cx.listener(
+                            move |panel, event, window, cx| {
+                                panel.retry_objects(refresh_target.clone(), event, window, cx);
+                            },
+                        )),
                     ),
             )
-            .when(target.db_type == crate::db::DbType::Redis, |element| {
-                let search_target = target.clone();
-                element.child(
-                    h_flex()
-                        .gap_1()
-                        .pr_1()
-                        .child(div().flex_1().child(self.redis_search.clone()))
-                        .child(
-                            Button::new(
-                                format!("search-redis-keys-{}", target.database),
-                                text(language, "扫描", "Scan"),
-                            )
-                            .size(ButtonSize::Compact)
-                            .loading(self.redis_search_busy)
-                            .disabled(self.redis_search_busy)
-                            .on_click(cx.listener(
-                                move |panel, event, window, cx| {
-                                    panel.search_redis_keys(
-                                        search_target.clone(),
-                                        event,
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                        ),
-                )
-            })
-            .children(primary_rows)
-            .children(self.render_mutable_catalog_text_section(
-                target,
-                &catalog.schemas,
-                CatalogSectionSpec::new(
-                    text(language, "Schema", "Schemas"),
-                    DatabaseObjectKind::Schema,
-                ),
-                |item| item.clone(),
-                |item| DropObjectTarget::Schema(item.clone()),
-                cx,
-            ))
-            .children(self.render_definition_section(
-                target,
-                &catalog.views,
-                CatalogSectionSpec::new(text(language, "视图", "Views"), DatabaseObjectKind::View),
-                |item| item.name.clone(),
-                ObjectDefinition::view,
-                cx,
-            ))
-            .children(self.render_definition_section(
-                target,
-                &catalog.functions,
-                CatalogSectionSpec::new(
-                    text(language, "函数", "Functions"),
-                    DatabaseObjectKind::Function,
-                ),
-                |item| item.name.clone(),
-                ObjectDefinition::function,
-                cx,
-            ))
-            .children(self.render_definition_section(
-                target,
-                &catalog.procedures,
-                CatalogSectionSpec::new(
-                    text(language, "存储过程", "Procedures"),
-                    DatabaseObjectKind::Procedure,
-                ),
-                |item| item.name.clone(),
-                ObjectDefinition::procedure,
-                cx,
-            ))
-            .children(self.render_mutable_catalog_text_section(
-                target,
-                &catalog.triggers,
-                CatalogSectionSpec::new(
-                    text(language, "触发器", "Triggers"),
-                    DatabaseObjectKind::Trigger,
-                ),
-                |item| format!("{} · {} {}", item.name, item.timing, item.event),
-                |item| DropObjectTarget::Trigger {
-                    name: item.name.clone(),
-                    table: item.table.clone(),
-                },
-                cx,
-            ))
-            .children(self.render_mutable_catalog_text_section(
-                target,
-                &catalog.users,
-                CatalogSectionSpec::new(text(language, "用户", "Users"), DatabaseObjectKind::User),
-                |item| match &item.host {
-                    Some(host) => format!("{}@{host}", item.name),
-                    None => item.name.clone(),
-                },
-                |item| DropObjectTarget::User {
-                    name: item.name.clone(),
-                    host: item.host.clone(),
-                },
-                cx,
-            ))
             .into_any_element()
+    }
+
+    fn render_redis_search(
+        &self,
+        target: &QueryTarget,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if target.db_type != crate::db::DbType::Redis {
+            return None;
+        }
+        let language = self.settings.read(cx).language();
+        let search_target = target.clone();
+        Some(
+            h_flex()
+                .gap_1()
+                .pr_1()
+                .child(div().flex_1().child(self.redis_search.clone()))
+                .child(
+                    Button::new(
+                        format!("search-redis-keys-{}", target.database),
+                        text(language, "扫描", "Scan"),
+                    )
+                    .size(ButtonSize::Compact)
+                    .loading(self.redis_search_busy)
+                    .disabled(self.redis_search_busy)
+                    .on_click(cx.listener(move |panel, event, window, cx| {
+                        panel.search_redis_keys(search_target.clone(), event, window, cx);
+                    })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_secondary_catalog(
+        &self,
+        target: &QueryTarget,
+        catalog: &DatabaseCatalogSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let language = self.settings.read(cx).language();
+        let mut rows = Vec::new();
+        for entry in catalog.entries() {
+            match entry {
+                CatalogEntry::Schemas(section) => {
+                    rows.extend(self.render_mutable_catalog_text_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "Schema", "Schemas"),
+                            DatabaseObjectKind::Schema,
+                        ),
+                        |item| item.clone(),
+                        |item| DropObjectTarget::Schema(item.clone()),
+                        cx,
+                    ));
+                }
+                CatalogEntry::Tables(_) => {}
+                CatalogEntry::Views(section) => {
+                    rows.extend(self.render_definition_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "视图", "Views"),
+                            DatabaseObjectKind::View,
+                        ),
+                        |item| item.name.clone(),
+                        ObjectDefinition::view,
+                        cx,
+                    ));
+                }
+                CatalogEntry::Functions(section) => {
+                    rows.extend(self.render_definition_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "函数", "Functions"),
+                            DatabaseObjectKind::Function,
+                        ),
+                        |item| item.name.clone(),
+                        ObjectDefinition::function,
+                        cx,
+                    ));
+                }
+                CatalogEntry::Procedures(section) => {
+                    rows.extend(self.render_definition_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "存储过程", "Procedures"),
+                            DatabaseObjectKind::Procedure,
+                        ),
+                        |item| item.name.clone(),
+                        ObjectDefinition::procedure,
+                        cx,
+                    ));
+                }
+                CatalogEntry::Triggers(section) => {
+                    rows.extend(self.render_mutable_catalog_text_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "触发器", "Triggers"),
+                            DatabaseObjectKind::Trigger,
+                        ),
+                        |item| format!("{} · {} {}", item.name, item.timing, item.event),
+                        |item| DropObjectTarget::Trigger {
+                            name: item.name.clone(),
+                            table: item.table.clone(),
+                        },
+                        cx,
+                    ));
+                }
+                CatalogEntry::Users(section) => {
+                    rows.extend(self.render_mutable_catalog_text_section(
+                        target,
+                        section,
+                        CatalogSectionSpec::new(
+                            text(language, "用户", "Users"),
+                            DatabaseObjectKind::User,
+                        ),
+                        |item| match &item.host {
+                            Some(host) => format!("{}@{host}", item.name),
+                            None => item.name.clone(),
+                        },
+                        |item| DropObjectTarget::User {
+                            name: item.name.clone(),
+                            host: item.host.clone(),
+                        },
+                        cx,
+                    ));
+                }
+            }
+        }
+        rows
     }
 
     fn render_definition_section<T>(
@@ -772,7 +494,7 @@ impl ConnectionProfilesPanel {
         }
     }
 
-    fn catalog_section_heading_with_create(
+    pub(super) fn catalog_section_heading_with_create(
         &self,
         target: &QueryTarget,
         label: &str,
@@ -960,7 +682,7 @@ fn catalog_section_heading(label: impl Into<SharedString>, count: usize) -> AnyE
         .into_any_element()
 }
 
-fn catalog_empty_row(label: impl Into<SharedString>) -> AnyElement {
+pub(super) fn catalog_empty_row(label: impl Into<SharedString>) -> AnyElement {
     div()
         .px_1()
         .py_0p5()
@@ -972,7 +694,7 @@ fn catalog_empty_row(label: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-fn catalog_error_row(error: &str) -> AnyElement {
+pub(super) fn catalog_error_row(error: &str) -> AnyElement {
     div()
         .px_1()
         .py_0p5()

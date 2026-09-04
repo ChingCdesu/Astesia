@@ -21,19 +21,8 @@ jobs:
       - name: Bump patch version
         id: bump
         run: |
-          current=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml)
-          IFS=. read -r major minor patch <<< "${current%%-*}"
-          if [[ -z "$major" || -z "$minor" || -z "$patch" ]]; then
-            echo "Unexpected version format: $current" >&2
-            exit 1
-          fi
-          version="$major.$minor.$((patch + 1))"
-          VERSION="$version" perl -0pi -e \
-            's/(\[package\]\nname = "astesia"\nversion = ")[^"]+/$1$ENV{VERSION}/' \
-            src-tauri/Cargo.toml
-          VERSION="$version" perl -0pi -e \
-            's/(\[\[package\]\]\nname = "astesia"\nversion = ")[^"]+/$1$ENV{VERSION}/' \
-            src-tauri/Cargo.lock
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          version="$(PYTHONDONTWRITEBYTECODE=1 python3 scripts/bump_patch_version.py)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Update CHANGELOG

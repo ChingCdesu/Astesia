@@ -15,6 +15,42 @@ fn column(name: &str, data_type: &str, nullable: bool, primary_key: bool) -> Tab
 }
 
 #[test]
+fn creation_policy_matches_rendered_engine_syntax() {
+    let postgres = object_creation_policy(DbType::PostgreSQL);
+    assert_eq!(postgres.default_column_type, "INTEGER");
+    assert_eq!(postgres.default_return_type, "void");
+    assert_eq!(postgres.default_routine_language, "plpgsql");
+    assert!(postgres.function_return_type);
+    assert!(postgres.function_language);
+    assert!(postgres.procedure_language);
+    assert!(!postgres.user_host);
+
+    let clickhouse = object_creation_policy(DbType::ClickHouse);
+    assert_eq!(clickhouse.default_column_type, "UInt64");
+    assert!(!clickhouse.function_return_type);
+    assert_eq!(clickhouse.default_return_type, "");
+
+    let mysql = object_creation_policy(DbType::MySQL);
+    assert!(mysql.user_host);
+    assert!(trigger_timing_supported(
+        DbType::MySQL,
+        TriggerTiming::Before
+    ));
+    assert!(!trigger_timing_supported(
+        DbType::MySQL,
+        TriggerTiming::InsteadOf
+    ));
+    assert!(trigger_event_supported(
+        DbType::PostgreSQL,
+        TriggerEvent::Truncate
+    ));
+    assert!(!trigger_event_supported(
+        DbType::SQLServer,
+        TriggerEvent::Truncate
+    ));
+}
+
+#[test]
 fn create_ddl_is_engine_specific_and_capability_gated() {
     assert_eq!(
             render_object_mutation(

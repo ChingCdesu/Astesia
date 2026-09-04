@@ -4,7 +4,9 @@ use crate::db::{
 };
 
 use super::connections::ConnectionManager;
-use super::{CatalogKind, CatalogLoadResult, TableStructureLoadError, TableStructureSnapshot};
+use super::{
+    CatalogEntry, CatalogKind, CatalogSection, TableStructureLoadError, TableStructureSnapshot,
+};
 
 #[derive(Clone)]
 pub struct CatalogService {
@@ -43,64 +45,64 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
         kind: CatalogKind,
-    ) -> CatalogLoadResult {
+    ) -> CatalogEntry {
         let handle = match self.manager.driver(connection_id).await {
             Ok(handle) => handle,
-            Err(error) => return CatalogLoadResult::failed(kind, error),
+            Err(error) => return CatalogEntry::failed(kind, error),
         };
         let driver = match handle.lock_active().await {
             Ok(driver) => driver,
-            Err(error) => return CatalogLoadResult::failed(kind, error),
+            Err(error) => return CatalogEntry::failed(kind, error),
         };
         if !kind.supported(driver.db_type()) {
-            return CatalogLoadResult::failed(
+            return CatalogEntry::failed(
                 kind,
                 format!("{kind:?} is not supported for {:?}", driver.db_type()),
             );
         }
         match kind {
-            CatalogKind::Schemas => CatalogLoadResult::Schemas(
+            CatalogKind::Schemas => CatalogEntry::Schemas(CatalogSection::from_result(
                 driver
                     .get_schemas(database)
                     .await
                     .map_err(|error| format!("获取Schema列表失败: {error}")),
-            ),
-            CatalogKind::Tables => CatalogLoadResult::Tables(
+            )),
+            CatalogKind::Tables => CatalogEntry::Tables(CatalogSection::from_result(
                 driver
                     .get_tables(database)
                     .await
                     .map_err(|error| format!("获取表列表失败: {error}")),
-            ),
-            CatalogKind::Views => CatalogLoadResult::Views(
+            )),
+            CatalogKind::Views => CatalogEntry::Views(CatalogSection::from_result(
                 driver
                     .get_views(database)
                     .await
                     .map_err(|error| format!("获取视图失败: {error}")),
-            ),
-            CatalogKind::Functions => CatalogLoadResult::Functions(
+            )),
+            CatalogKind::Functions => CatalogEntry::Functions(CatalogSection::from_result(
                 driver
                     .get_functions(database)
                     .await
                     .map_err(|error| format!("获取函数失败: {error}")),
-            ),
-            CatalogKind::Procedures => CatalogLoadResult::Procedures(
+            )),
+            CatalogKind::Procedures => CatalogEntry::Procedures(CatalogSection::from_result(
                 driver
                     .get_procedures(database)
                     .await
                     .map_err(|error| format!("获取存储过程失败: {error}")),
-            ),
-            CatalogKind::Triggers => CatalogLoadResult::Triggers(
+            )),
+            CatalogKind::Triggers => CatalogEntry::Triggers(CatalogSection::from_result(
                 driver
                     .get_triggers(database)
                     .await
                     .map_err(|error| format!("获取触发器失败: {error}")),
-            ),
-            CatalogKind::Users => CatalogLoadResult::Users(
+            )),
+            CatalogKind::Users => CatalogEntry::Users(CatalogSection::from_result(
                 driver
                     .get_users()
                     .await
                     .map_err(|error| format!("获取用户列表失败: {error}")),
-            ),
+            )),
         }
     }
 

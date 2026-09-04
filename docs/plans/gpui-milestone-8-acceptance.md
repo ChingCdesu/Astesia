@@ -14,8 +14,8 @@ Status: Complete on 2026-09-04.
   application bundle, Linux archive, and Windows archive layout all place the sidecar beside the
   desktop executable.
 - The release workflow now builds macOS arm64, macOS x64, Linux x64, and Windows x64 packages with
-  Cargo only. The version workflow updates `Cargo.toml` and `Cargo.lock` without Node, Vite, or
-  Tauri tooling.
+  Cargo only. The version workflow updates `Cargo.toml` and `Cargo.lock` through a tested repository
+  script that parses both TOML documents and validates both replacements before writing either one.
 - The status bar reports the Cargo package version. The command palette exposes native restart and
   protects unsaved query tabs with a confirmation prompt.
 
@@ -30,7 +30,7 @@ Status: Complete on 2026-09-04.
 ## Verification
 
 - `rustup run 1.97.1 cargo test --locked --manifest-path src-tauri/Cargo.toml --quiet`:
-  359 tests passed, six environment-dependent tests were ignored, and the MCP binary test passed.
+  360 tests passed, six environment-dependent tests were ignored, and the MCP binary test passed.
 - `rustup run 1.97.1 cargo check --locked --manifest-path src-tauri/Cargo.toml`: passed.
 - `rustup run 1.97.1 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets`:
   passed with the migration branch's existing warnings.
@@ -47,8 +47,13 @@ Status: Complete on 2026-09-04.
   --target x86_64-pc-windows-msvc --no-run --lib`: passed with Rust 1.97.1 and linked the full
   library test executable. Separate debug builds produced x86_64 MSVC `astesia.exe` and
   `astesia-mcp.exe`; inspection confirmed the GPUI DirectX, text-input, and accessibility imports.
-- The release workflow and version workflow parse as YAML; the Cargo-only version replacement was
-  exercised on temporary copies and updated both version files to the same value.
+- The release workflow and version workflow parse as YAML. Three version-script tests cover stable
+  and prerelease bumps plus mismatch rejection without mutation; a temporary copy of the real Cargo
+  files advanced both Astesia entries from 1.0.9 to 1.0.10 without changing another package.
+- A strict maintainability follow-up left every modified source file below 1,000 lines, reduced the
+  Connection Profile wiring module from 1,004 to 216 lines, replaced parallel catalog state with
+  tagged entries, and removed duplicated grid-selection projection plus workspace-item lookup and
+  dispatch paths.
 - `git diff --check`: passed.
 
 ## Windows native-runner boundary

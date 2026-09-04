@@ -88,10 +88,6 @@ impl ErDiagramItem {
         )
     }
 
-    pub(super) fn matches(&self, target: &QueryTarget) -> bool {
-        self.state.target() == target
-    }
-
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
     }

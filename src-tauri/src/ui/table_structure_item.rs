@@ -50,10 +50,6 @@ impl TableStructureItem {
         item
     }
 
-    pub(super) fn matches(&self, target: &QueryTarget, table: &TableRef) -> bool {
-        self.state.matches(target, table)
-    }
-
     pub(super) fn label(&self) -> String {
         format!(
             "{} · {}/{}",
