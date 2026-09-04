@@ -48,7 +48,8 @@ The same Connection Profiles, credential bindings, revision checks, Usage Leases
 - Product capabilities and development contract: `README.md` and `AGENTS.md`.
 - Domain language and migration boundaries: `CONTEXT.md`.
 - Approved runtime decision: `docs/adr/0001-rebuild-the-desktop-shell-with-gpui.md`.
-- Staged delivery and acceptance contract: `docs/plans/gpui-ui-rebuild.md`.
+- Completed delivery and acceptance contract: `docs/plans/gpui-ui-rebuild.md` and
+  `docs/plans/gpui-milestone-8-acceptance.md`.
 - Incumbent interaction and visual evidence: `docs/plans/gpui-milestone-0-acceptance.md` and the recorded Legacy Shell commit.
 - No customer testimonials, public usage claims, or benchmark claims are available and future UI work must not invent them.
 
