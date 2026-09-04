@@ -11,7 +11,7 @@ if ($Target -ne 'x86_64-pc-windows-msvc') {
 }
 
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
-$Manifest = Join-Path $RepositoryRoot 'src-tauri/Cargo.toml'
+$Manifest = Join-Path $RepositoryRoot 'Cargo.toml'
 $Toolchain = '1.97.1'
 $ManifestText = Get-Content -Raw $Manifest
 $VersionMatch = [regex]::Match($ManifestText, '(?m)^version = "([^"]+)"')
@@ -22,7 +22,7 @@ $Version = $VersionMatch.Groups[1].Value
 $TargetRoot = if ($env:CARGO_TARGET_DIR) {
     $env:CARGO_TARGET_DIR
 } else {
-    Join-Path $RepositoryRoot 'src-tauri/target'
+    Join-Path $RepositoryRoot 'target'
 }
 $ReleaseDirectory = Join-Path $TargetRoot "$Target/release"
 $PackageDirectory = Join-Path $TargetRoot 'package'

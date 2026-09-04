@@ -2,18 +2,19 @@
 
 ## Project Structure & Module Organization
 
-The native Rust application lives in `src-tauri/src/`: UI-independent workflows belong in
+The repository root is the Cargo package, and the native Rust application lives in `src/`:
+UI-independent workflows belong in
 `application/`, platform adapters in `platform/`, GPUI views in `ui/`, database adapters in `db/`,
 MCP tools in `mcp/`, and background work in `tasks/`. The standalone MCP entry point is
-`src-tauri/src/bin/astesia-mcp.rs`. Internal package definitions live in `packaging/`, with build
+`src/bin/astesia-mcp.rs`. Internal package definitions live in `packaging/`, with build
 entry points under `scripts/`.
 
 ## Build, Test, and Development Commands
 
-- `cargo run --locked --manifest-path src-tauri/Cargo.toml --bin astesia` starts the native app.
-- `cargo test --locked --manifest-path src-tauri/Cargo.toml` compiles and tests the application.
-- `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets` checks Rust lints.
-- `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` checks Rust formatting.
+- `cargo run --locked --bin astesia` starts the native app.
+- `cargo test --locked` compiles and tests the application.
+- `cargo clippy --locked --all-targets` checks Rust lints.
+- `cargo fmt -- --check` checks Rust formatting.
 - `scripts/package-macos.sh <target>` builds an internal macOS application archive.
 - `scripts/package-linux.sh x86_64-unknown-linux-gnu` builds the internal Linux archive.
 - `scripts/package-windows.ps1 -Target x86_64-pc-windows-msvc` builds the Windows archive.

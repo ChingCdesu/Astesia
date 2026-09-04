@@ -341,7 +341,7 @@ mod tests {
     fn packaged_sidecar_beside_the_application_is_the_first_candidate() {
         let candidates = sidecar_candidates(
             Some(Path::new("/opt/Astesia/bin/astesia")),
-            Path::new("/source/src-tauri"),
+            Path::new("/source"),
             "astesia-mcp",
         );
 
