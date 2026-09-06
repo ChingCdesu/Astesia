@@ -1,6 +1,28 @@
 use super::*;
 
 impl ConnectionProfilesPanel {
+    pub(in crate::ui) fn synchronize_context(
+        &mut self,
+        target: QueryTarget,
+        table: Option<TableRef>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.query_target_is_live(&target) {
+            return;
+        }
+        self.selected_profile_id = Some(target.connection_id.clone());
+        self.selected_query_target = Some(target.clone());
+        self.selected_catalog_table = table
+            .as_ref()
+            .map(|table| super::catalog_tree::CatalogTableKey::new(&target, table));
+        self.expanded_databases.insert((
+            target.connection_id.clone(),
+            target.session_generation,
+            target.database.clone(),
+        ));
+        self.load_objects(target, cx);
+        self.notify_sidebar(cx);
+    }
     pub(in crate::ui) fn profile_saved(&mut self, profile_id: String, cx: &mut Context<Self>) {
         self.selected_profile_id = Some(profile_id);
         self.refresh_profiles(cx);
@@ -18,6 +40,24 @@ impl ConnectionProfilesPanel {
 
     pub(in crate::ui) fn query_target(&self) -> Option<&QueryTarget> {
         self.selected_query_target.as_ref()
+    }
+
+    pub(in crate::ui) fn profile_actions(&self) -> super::ProfileActions {
+        let Some(profile) = self.selected_profile() else {
+            return super::ProfileActions::default();
+        };
+        let busy = self.actions_blocked() || self.state.operation(&profile.profile.id).is_some();
+        let editable = !busy
+            && !profile
+                .mcp_usage
+                .as_ref()
+                .is_some_and(|usage| usage.mcp_in_use);
+        super::ProfileActions {
+            connect: !busy && !profile.session.is_connected(),
+            disconnect: editable && profile.session.is_connected(),
+            edit: editable,
+            delete: editable,
+        }
     }
 
     pub(super) fn selected_profile(&self) -> Option<&ConnectionProfileSnapshot> {
@@ -48,13 +88,32 @@ impl ConnectionProfilesPanel {
         }
     }
 
+    pub(super) fn toggle_database(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        let key = (
+            target.connection_id.clone(),
+            target.session_generation,
+            target.database.clone(),
+        );
+        if self.expanded_databases.remove(&key) {
+            self.notify_sidebar(cx);
+        } else {
+            self.select_database(target, cx);
+        }
+    }
+
     pub(super) fn select_database(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        self.selected_profile_id = Some(target.connection_id.clone());
+        self.expanded_databases.insert((
+            target.connection_id.clone(),
+            target.session_generation,
+            target.database.clone(),
+        ));
         if self.selected_query_target.as_ref() != Some(&target) {
             self.selected_query_target = Some(target.clone());
             cx.emit(ConnectionProfilesEvent::QueryTargetSelected(target.clone()));
         }
         self.load_objects(target, cx);
-        cx.notify();
+        self.notify_sidebar(cx);
     }
 
     pub(super) fn request_table_structure(
@@ -77,6 +136,11 @@ impl ConnectionProfilesPanel {
         if !self.state.query_target_is_live(&target) {
             return;
         }
+        self.selected_profile_id = Some(target.connection_id.clone());
+        self.selected_query_target = Some(target.clone());
+        self.selected_catalog_table =
+            Some(super::catalog_tree::CatalogTableKey::new(&target, &object));
+        self.notify_sidebar(cx);
         match target.db_type {
             crate::db::DbType::MongoDB => {
                 cx.emit(ConnectionProfilesEvent::DocumentCollectionRequested {
@@ -141,18 +205,19 @@ impl ConnectionProfilesPanel {
             .is_some_and(|target| target.connection_id == connection_id)
         {
             self.selected_query_target = None;
-            cx.notify();
+            self.notify_sidebar(cx);
         }
     }
 
     fn clear_query_target(&mut self, cx: &mut Context<Self>) {
         if let Some(target) = self.selected_query_target.take() {
             cx.emit(ConnectionProfilesEvent::QueryTargetInvalidated(target));
-            cx.notify();
+            self.notify_sidebar(cx);
         }
     }
 
-    pub(super) fn emit_query_sessions(&self, cx: &mut Context<Self>) {
+    pub(super) fn emit_query_sessions(&mut self, cx: &mut Context<Self>) {
+        self.prune_catalog_details();
         if let Some(snapshot) = self.state.snapshot() {
             cx.emit(ConnectionProfilesEvent::QuerySessionsChanged(Arc::new(
                 snapshot.clone(),
@@ -174,7 +239,10 @@ pub(super) fn derive_status(
     object_operation_in_progress: bool,
     language: crate::platform::UiLanguage,
 ) -> ConnectionProfilesStatus {
-    let selected = selected_profile_id.and_then(|selected| {
+    let context_profile = selected_target
+        .map(|target| target.connection_id.as_str())
+        .or(selected_profile_id);
+    let selected = context_profile.and_then(|selected| {
         state
             .snapshot()?
             .profiles
@@ -184,24 +252,12 @@ pub(super) fn derive_status(
     let operation = selected.and_then(|profile| state.operation(&profile.profile.id));
     let summary = selected
         .map(|profile| {
-            format!(
-                "{} · {}",
-                profile.profile.name,
-                engine_label(profile.profile.db_type),
-            )
+            selected_target
+                .filter(|target| target.connection_id == profile.profile.id)
+                .map(|target| format!("{} / {}", profile.profile.name, target.database))
+                .unwrap_or_else(|| profile.profile.name.clone())
         })
-        .or_else(|| {
-            state.snapshot().map(|snapshot| {
-                format!(
-                    "{} {}",
-                    snapshot.profiles.len(),
-                    text(language, "个连接配置", "connection profiles")
-                )
-            })
-        })
-        .unwrap_or_else(|| {
-            text(language, "未加载连接配置", "Connection profiles not loaded").to_string()
-        });
+        .unwrap_or_else(|| text(language, "未连接", "Disconnected").to_string());
     let session = match (selected, operation) {
         (_, Some(ProfileOperationKind::Connecting)) => ConnectionSessionStatus::Connecting,
         (_, Some(ProfileOperationKind::Disconnecting)) => ConnectionSessionStatus::Disconnecting,

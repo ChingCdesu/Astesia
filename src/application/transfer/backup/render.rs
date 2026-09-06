@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use chrono::Utc;
 
 use crate::db::{DbType, QueryResult, SqlDialect, SqlRenderResult};
@@ -117,19 +119,25 @@ impl BackupRenderer {
             .iter()
             .map(|column| self.quote_export_identifier(&column.name))
             .collect::<SqlRenderResult<Vec<_>>>()?;
-        let mut page = String::new();
+        let columns = columns.join(", ");
+        let page_start = self.output.len();
         for row in &result.rows {
             let values = row
                 .iter()
                 .map(|value| self.dialect.literal(value))
-                .collect::<SqlRenderResult<Vec<_>>>()?;
-            page.push_str(&format!(
-                "INSERT INTO {quoted_table} ({}) VALUES ({});\n",
-                columns.join(", "),
+                .collect::<SqlRenderResult<Vec<_>>>();
+            let values = match values {
+                Ok(values) => values,
+                Err(error) => {
+                    self.output.truncate(page_start);
+                    return Err(error);
+                }
+            };
+            self.output.push_str(&format!(
+                "INSERT INTO {quoted_table} ({columns}) VALUES ({});\n",
                 values.join(", ")
             ));
         }
-        self.output.push_str(&page);
         Ok(())
     }
 
@@ -152,6 +160,13 @@ impl BackupRenderer {
         }
     }
 
+    pub(super) fn drain_output(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(self.output.as_bytes())?;
+        self.output.clear();
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn into_output(self) -> String {
         self.output
     }
@@ -247,13 +262,93 @@ fn push_sql_comment(output: &mut String, text: &str) {
 mod tests {
     use crate::db::{ColumnInfo, DbType, IndexInfo, QueryResult, TableRef};
 
-    use super::{BackupRenderer, BackupTable};
+    use super::{BackupRenderer, BackupTable, DropTableMode};
 
     fn table(schema: Option<&str>, name: &str) -> BackupTable {
         BackupTable {
             reference: TableRef::from_parts(schema.map(str::to_string), name.to_string()),
             indexes: Vec::new(),
         }
+    }
+
+    fn data_page(values: impl IntoIterator<Item = String>) -> QueryResult {
+        QueryResult {
+            columns: vec![ColumnInfo {
+                name: "name".to_string(),
+                data_type: "TEXT".to_string(),
+                nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            }],
+            rows: values.into_iter().map(|value| vec![value.into()]).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn draining_sections_preserves_complete_backup_bytes() {
+        for db_type in [
+            DbType::MySQL,
+            DbType::PostgreSQL,
+            DbType::SQLite,
+            DbType::SQLServer,
+        ] {
+            let tables = [table(None, "users")];
+            let mut buffered = BackupRenderer::with_timestamp(db_type, "app", "date");
+            let mut streamed = BackupRenderer::with_timestamp(db_type, "app", "date");
+            let mut output = Vec::new();
+            for renderer in [&mut buffered, &mut streamed] {
+                renderer
+                    .render_drop_tables(&tables, DropTableMode::DropIfExists)
+                    .unwrap();
+                renderer
+                    .render_structure(&tables[0], "CREATE TABLE users (name TEXT)")
+                    .unwrap();
+            }
+            streamed.drain_output(&mut output).unwrap();
+            for value in ["O'Brien", "二", "third"] {
+                let page = data_page([value.to_string()]);
+                buffered.render_data_page(&tables[0], &page).unwrap();
+                streamed.render_data_page(&tables[0], &page).unwrap();
+                streamed.drain_output(&mut output).unwrap();
+            }
+            for renderer in [&mut buffered, &mut streamed] {
+                renderer.finish_table_data(&tables[0]).unwrap();
+                renderer.finish_success();
+            }
+            streamed.drain_output(&mut output).unwrap();
+            assert_eq!(output, buffered.into_output().into_bytes(), "{db_type:?}");
+        }
+    }
+
+    #[test]
+    fn page_buffer_capacity_does_not_grow_with_backup_length() {
+        let mut renderer = BackupRenderer::with_timestamp(DbType::SQLite, "app", "date");
+        let table = table(None, "users");
+        let page = data_page((0..100).map(|_| "x".repeat(1_024)));
+        let mut output = std::io::sink();
+        renderer.drain_output(&mut output).unwrap();
+        renderer.render_data_page(&table, &page).unwrap();
+        let page_capacity = renderer.output.capacity();
+        renderer.drain_output(&mut output).unwrap();
+        for _ in 0..100 {
+            renderer.render_data_page(&table, &page).unwrap();
+            renderer.drain_output(&mut output).unwrap();
+            assert!(renderer.output.is_empty());
+            assert_eq!(renderer.output.capacity(), page_capacity);
+        }
+    }
+
+    #[test]
+    fn failed_page_does_not_leave_partially_rendered_rows() {
+        let mut renderer = BackupRenderer::with_timestamp(DbType::SQLite, "app", "date");
+        let table = table(None, "users");
+        let original = renderer.output.clone();
+        let page = data_page(["valid".to_string(), "invalid\0value".to_string()]);
+
+        assert!(renderer.render_data_page(&table, &page).is_err());
+        assert_eq!(renderer.output, original);
     }
 
     #[test]

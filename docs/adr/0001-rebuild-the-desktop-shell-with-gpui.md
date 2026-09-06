@@ -1,5 +1,7 @@
 # Rebuild the desktop shell with GPUI
 
+The embedded Zed editor choice is superseded by [ADR-0002](0002-use-gpui-kit-for-the-desktop-shell.md).
+
 Astesia will replace its React/Tauri Legacy Shell in place with a standalone GPUI Shell and preserve the Tauri-independent Application Core. The internal application will use the pinned Zed editor stack through an isolated, local-only integration on Rust 1.97.1; the Legacy Shell remains only in version control and prior signed artifacts.
 
 The shell embeds Zed's standalone `Editor` rather than initializing Zed `Client`, `Project`, or `Workspace` services. Astesia owns the surrounding workspace and application state so unused Zed authentication, collaboration, telemetry, and network paths remain dormant.

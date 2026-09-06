@@ -1,8 +1,8 @@
 mod dialects;
 
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    collections::{HashSet, VecDeque},
+    sync::{Arc, Mutex as SyncMutex},
 };
 
 use async_trait::async_trait;
@@ -34,10 +34,16 @@ pub(crate) struct QueryCompletion {
     pub(crate) kind: QueryCompletionKind,
 }
 
+const MAX_CACHED_TARGETS: usize = 16;
+const MAX_CACHED_COLUMN_TABLES: usize = 64;
+
+type CachedTargets = VecDeque<(CompletionTargetKey, Arc<TargetCatalog>)>;
+type CachedColumns = VecDeque<(TableRef, Arc<OnceCell<Arc<Vec<ColumnInfo>>>>)>;
+
 #[derive(Clone)]
 pub(crate) struct QueryCompletionService {
     catalog: Arc<dyn CompletionCatalog>,
-    targets: Arc<Mutex<HashMap<CompletionTargetKey, Arc<TargetCatalog>>>>,
+    targets: Arc<SyncMutex<CachedTargets>>,
 }
 
 impl QueryCompletionService {
@@ -63,7 +69,7 @@ impl QueryCompletionService {
 
         let scope = CompletionScope::parse(&request.text_before_cursor);
         let mut fallback = dialects::completions(request.target.db_type);
-        let catalog = self.target_catalog(&request.target).await;
+        let catalog = self.target_catalog(&request.target);
         let Ok(tables) = catalog
             .tables
             .get_or_try_init(|| self.catalog.tables(&request.target))
@@ -108,17 +114,45 @@ impl QueryCompletionService {
         deduplicate(completions)
     }
 
-    async fn target_catalog(&self, target: &QueryTarget) -> Arc<TargetCatalog> {
+    pub(crate) fn invalidate_session(&self, connection_id: &str, generation: u64) {
+        self.targets
+            .lock()
+            .expect("completion target cache")
+            .retain(|(key, _)| {
+                key.connection_id != connection_id || key.session_generation != generation
+            });
+    }
+
+    pub(crate) fn retain_sessions(&self, snapshot: &super::ConnectionWorkspaceSnapshot) {
+        self.targets
+            .lock()
+            .expect("completion target cache")
+            .retain(|(key, _)| {
+                snapshot.profiles.iter().any(|entry| {
+                    entry.profile.id == key.connection_id
+                        && entry.session.generation == Some(key.session_generation)
+                })
+            });
+    }
+
+    fn target_catalog(&self, target: &QueryTarget) -> Arc<TargetCatalog> {
         let key = CompletionTargetKey::from(target);
-        let mut targets = self.targets.lock().await;
-        targets.retain(|candidate, _| {
+        let mut targets = self.targets.lock().expect("completion target cache");
+        targets.retain(|(candidate, _)| {
             candidate.connection_id != key.connection_id
                 || candidate.session_generation == key.session_generation
         });
-        targets
-            .entry(key)
-            .or_insert_with(|| Arc::new(TargetCatalog::default()))
-            .clone()
+        let entry = targets
+            .iter()
+            .position(|(candidate, _)| *candidate == key)
+            .and_then(|index| targets.remove(index))
+            .unwrap_or_else(|| (key, Arc::new(TargetCatalog::default())));
+        let catalog = entry.1.clone();
+        targets.push_back(entry);
+        while targets.len() > MAX_CACHED_TARGETS {
+            targets.pop_front();
+        }
+        catalog
     }
 }
 
@@ -171,7 +205,7 @@ impl From<&QueryTarget> for CompletionTargetKey {
 #[derive(Default)]
 struct TargetCatalog {
     tables: OnceCell<Vec<TableInfo>>,
-    columns: Mutex<HashMap<TableRef, Arc<OnceCell<Arc<Vec<ColumnInfo>>>>>>,
+    columns: Mutex<CachedColumns>,
 }
 
 impl TargetCatalog {
@@ -183,10 +217,17 @@ impl TargetCatalog {
     ) -> Result<Arc<Vec<ColumnInfo>>, String> {
         let cell = {
             let mut columns = self.columns.lock().await;
-            columns
-                .entry(table.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            let entry = columns
+                .iter()
+                .position(|(candidate, _)| candidate == table)
+                .and_then(|index| columns.remove(index))
+                .unwrap_or_else(|| (table.clone(), Arc::new(OnceCell::new())));
+            let cell = entry.1.clone();
+            columns.push_back(entry);
+            while columns.len() > MAX_CACHED_COLUMN_TABLES {
+                columns.pop_front();
+            }
+            cell
         };
         cell.get_or_try_init(|| async { catalog.columns(target, table).await.map(Arc::new) })
             .await
@@ -196,8 +237,8 @@ impl TargetCatalog {
     async fn cached_column_completions(&self, db_type: DbType) -> Vec<QueryCompletion> {
         let columns = self.columns.lock().await;
         let cached = columns
-            .values()
-            .filter_map(|cell| cell.get())
+            .iter()
+            .filter_map(|(_, cell)| cell.get())
             .flat_map(|columns| column_completions(db_type, columns))
             .collect::<Vec<_>>();
         deduplicate(cached)
@@ -351,6 +392,7 @@ fn deduplicate(completions: Vec<QueryCompletion>) -> Vec<QueryCompletion> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -385,6 +427,58 @@ mod tests {
             db_type,
             session_generation: generation,
         }
+    }
+
+    #[tokio::test]
+    async fn target_budget_evicts_old_catalogs_and_disconnect_drops_session_data() {
+        let catalog = Arc::new(TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: Vec::new(),
+            columns: HashMap::new(),
+        });
+        let service = QueryCompletionService::with_catalog(catalog);
+        let first = target(DbType::SQLite, 1);
+        let first_cache = service.target_catalog(&first);
+        let first_weak = Arc::downgrade(&first_cache);
+        drop(first_cache);
+        for index in 0..MAX_CACHED_TARGETS {
+            let mut next = first.clone();
+            next.database = format!("database-{index}");
+            service.target_catalog(&next);
+        }
+        assert!(first_weak.upgrade().is_none());
+        assert_eq!(service.targets.lock().unwrap().len(), MAX_CACHED_TARGETS);
+        service.invalidate_session(&first.connection_id, 1);
+        assert!(service.targets.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn column_budget_evicts_old_table_metadata() {
+        let catalog = TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: Vec::new(),
+            columns: HashMap::new(),
+        };
+        let cached = TargetCatalog::default();
+        let target = target(DbType::SQLite, 1);
+        let first = cached
+            .columns(&catalog, &target, &TableRef::unqualified("first"))
+            .await
+            .unwrap();
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        for index in 0..MAX_CACHED_COLUMN_TABLES {
+            cached
+                .columns(
+                    &catalog,
+                    &target,
+                    &TableRef::unqualified(format!("table-{index}")),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(weak.upgrade().is_none());
+        assert_eq!(cached.columns.lock().await.len(), MAX_CACHED_COLUMN_TABLES);
     }
 
     fn table(schema: Option<&str>, name: &str) -> TableInfo {

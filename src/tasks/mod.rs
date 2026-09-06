@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::platform::{UiEvent, UiEventSinkHandle};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) const MAX_COMPLETED_TASKS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackgroundTask {
     pub id: String,
     pub name: String,
@@ -97,7 +99,7 @@ impl TaskEntry {
         self.task.completed_at = Some(Utc::now());
     }
 
-    fn complete(&mut self, id: &str, outcome: TaskOutcome) -> Option<UiEvent> {
+    fn complete(&mut self, outcome: TaskOutcome) -> Option<UiEvent> {
         self.cancellation = None;
         if self.completion_event_sent {
             return None;
@@ -118,7 +120,9 @@ impl TaskEntry {
             self.mark_terminal(status, message);
         }
         self.completion_event_sent = true;
-        Some(UiEvent::TaskCompleted { id: id.to_string() })
+        Some(UiEvent::TaskCompleted {
+            task: Arc::new(self.task.clone()),
+        })
     }
 }
 
@@ -249,11 +253,30 @@ impl TaskManager {
             let Some(entry) = entries.get_mut(id) else {
                 return;
             };
-            entry.complete(id, outcome)
+            let event = entry.complete(outcome);
+            prune_completed(&mut entries);
+            event
         };
         if let Some(event) = event {
             self.inner.events.emit(event);
         }
+    }
+}
+
+fn prune_completed(entries: &mut HashMap<String, TaskEntry>) {
+    let mut completed = entries
+        .values()
+        .filter_map(|entry| {
+            entry
+                .task
+                .completed_at
+                .map(|at| (at, entry.task.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    completed.sort_unstable();
+    let remove_count = completed.len().saturating_sub(MAX_COMPLETED_TASKS);
+    for (_, id) in completed.into_iter().take(remove_count) {
+        entries.remove(&id);
     }
 }
 
@@ -265,6 +288,121 @@ mod tests {
 
     use super::*;
     use crate::platform::{UiEvent, UiEventBus};
+
+    #[tokio::test]
+    async fn history_budget_keeps_active_tasks_and_newest_terminal_outcomes() {
+        let manager = TaskManager::new(Arc::new(UiEventBus::new()));
+        let now = Utc::now();
+        let mut entries = manager.inner.entries.lock().await;
+        for index in 0..MAX_COMPLETED_TASKS + 5 {
+            let id = index.to_string();
+            entries.insert(
+                id.clone(),
+                TaskEntry {
+                    task: BackgroundTask {
+                        id,
+                        name: "History".into(),
+                        status: TaskStatus::Failed,
+                        progress: 0.0,
+                        message: "Failure remains inspectable".into(),
+                        created_at: now,
+                        completed_at: Some(now + chrono::Duration::seconds(index as i64)),
+                    },
+                    cancellation: None,
+                    completion_event_sent: true,
+                },
+            );
+        }
+        let mut active = entries.get("0").unwrap().task.clone();
+        active.id = "active".into();
+        active.status = TaskStatus::Cancelling;
+        active.completed_at = None;
+        entries.insert(
+            active.id.clone(),
+            TaskEntry {
+                task: active,
+                cancellation: Some(CancellationToken::new()),
+                completion_event_sent: false,
+            },
+        );
+        prune_completed(&mut entries);
+        assert_eq!(entries.len(), MAX_COMPLETED_TASKS + 1);
+        assert!(entries.contains_key("active"));
+        assert!(!entries.contains_key("4"));
+        assert!(entries.contains_key("5"));
+        assert!(entries.contains_key(&(MAX_COMPLETED_TASKS + 4).to_string()));
+    }
+
+    #[tokio::test]
+    async fn completion_events_preserve_terminal_details_after_history_eviction() {
+        for (outcome, status) in [
+            (
+                TaskOutcome::Completed("Done".to_string()),
+                TaskStatus::Completed,
+            ),
+            (
+                TaskOutcome::Partial("Some changes applied".to_string()),
+                TaskStatus::Partial,
+            ),
+            (
+                TaskOutcome::Failed("Write failed".to_string()),
+                TaskStatus::Failed,
+            ),
+            (
+                TaskOutcome::Cancelled("Cancelled".to_string()),
+                TaskStatus::Cancelled,
+            ),
+        ] {
+            let events = UiEventBus::new();
+            let mut receiver = events.subscribe();
+            let manager = TaskManager::new(Arc::new(events));
+            manager.inner.entries.lock().await.insert(
+                "first".to_string(),
+                TaskEntry {
+                    task: BackgroundTask {
+                        id: "first".to_string(),
+                        name: "Restore".to_string(),
+                        status: TaskStatus::Running,
+                        progress: 0.5,
+                        message: "Working".to_string(),
+                        created_at: Utc::now(),
+                        completed_at: None,
+                    },
+                    cancellation: None,
+                    completion_event_sent: false,
+                },
+            );
+            manager.finish("first", outcome).await;
+            let completed = manager.get_task("first").await.unwrap();
+            {
+                let mut entries = manager.inner.entries.lock().await;
+                for index in 0..MAX_COMPLETED_TASKS {
+                    let mut newer = completed.clone();
+                    newer.id = format!("newer-{index}");
+                    newer.completed_at = completed
+                        .completed_at
+                        .map(|at| at + chrono::Duration::seconds(index as i64 + 1));
+                    entries.insert(
+                        newer.id.clone(),
+                        TaskEntry {
+                            task: newer,
+                            cancellation: None,
+                            completion_event_sent: true,
+                        },
+                    );
+                }
+                prune_completed(&mut entries);
+            }
+            assert!(manager.get_task("first").await.is_none());
+            let UiEvent::TaskCompleted { task } = receiver.recv().await.unwrap() else {
+                panic!("expected terminal event");
+            };
+            assert_eq!(*task, completed);
+            assert_eq!(task.status, status);
+            assert_eq!(task.name, "Restore");
+            assert!(task.completed_at.is_some());
+        }
+    }
 
     #[tokio::test]
     async fn spawn_owns_progress_and_completion_state() {
@@ -303,7 +441,9 @@ mod tests {
         );
         assert_eq!(
             receiver.recv().await.expect("completion event"),
-            UiEvent::TaskCompleted { id: id.clone() }
+            UiEvent::TaskCompleted {
+                task: Arc::new(manager.get_task(&id).await.expect("retained task"))
+            }
         );
 
         let task = manager.get_task(&id).await.expect("task");
@@ -335,7 +475,9 @@ mod tests {
         ));
         assert_eq!(
             receiver.recv().await.expect("completion event"),
-            UiEvent::TaskCompleted { id: id.clone() }
+            UiEvent::TaskCompleted {
+                task: Arc::new(manager.get_task(&id).await.expect("retained task"))
+            }
         );
 
         let task = manager.get_task(&id).await.expect("task");
@@ -436,7 +578,9 @@ mod tests {
                 .await
                 .expect("completion event timeout")
                 .expect("cancellation completion event"),
-            UiEvent::TaskCompleted { id: id.clone() }
+            UiEvent::TaskCompleted {
+                task: Arc::new(manager.get_task(&id).await.expect("retained task"))
+            }
         );
 
         let task = manager.get_task(&id).await.expect("task");
@@ -474,7 +618,9 @@ mod tests {
                 .await
                 .expect("completion event timeout")
                 .expect("completion event"),
-            UiEvent::TaskCompleted { id: id.clone() }
+            UiEvent::TaskCompleted {
+                task: Arc::new(manager.get_task(&id).await.expect("retained task"))
+            }
         );
 
         let task = manager.get_task(&id).await.expect("task");

@@ -1,20 +1,22 @@
 use std::sync::Arc;
 
-use gpui::{
-    ClickEvent, Entity, EventEmitter, FocusHandle, Hsla, PromptButton, PromptLevel, Subscription,
+use crate::ui::components::{prelude::*, TintColor, Tooltip};
+use crate::ui::input_field::InputField;
+use gpui_kit::{
+    ClickEvent, ClipboardItem, Entity, EventEmitter, FocusHandle, Hsla, PromptButton, PromptLevel,
+    Subscription,
 };
-use ui_input::InputField;
-use zed_ui::{prelude::*, TintColor};
 
 use crate::application::{
-    Application, QueryTarget, RedisKeySnapshot, RedisListSide, RedisMutation, RedisValue,
+    Application, QueryTarget, RedisKeySnapshot, RedisListSide, RedisMutation, RedisPageCursor,
+    RedisValue,
 };
 
 use super::{localization::text, shell::ShellSettings};
 
 #[derive(Debug)]
 enum RedisItemState {
-    Loading { generation: u64 },
+    Loading,
     Ready(RedisKeySnapshot),
     Failed(String),
     Unavailable(String),
@@ -27,6 +29,8 @@ pub(super) struct RedisItem {
     state: RedisItemState,
     next_generation: u64,
     mutation_busy: bool,
+    page_loading: bool,
+    current_cursor: Option<RedisPageCursor>,
     notice: Option<Result<String, String>>,
     primary_input: Entity<InputField>,
     secondary_input: Entity<InputField>,
@@ -85,6 +89,8 @@ impl RedisItem {
             state: RedisItemState::Failed("Redis key has not loaded".to_string()),
             next_generation: 0,
             mutation_busy: false,
+            page_loading: false,
+            current_cursor: None,
             notice: None,
             primary_input,
             secondary_input,
@@ -131,40 +137,59 @@ impl RedisItem {
                 .to_string(),
             );
             self.mutation_busy = false;
+            self.page_loading = false;
             cx.notify();
         }
     }
 
+    fn is_busy(&self) -> bool {
+        self.mutation_busy || self.page_loading
+    }
+
     fn load(&mut self, cx: &mut Context<Self>) {
+        self.load_page(None, cx);
+    }
+
+    fn load_page(&mut self, cursor: Option<RedisPageCursor>, cx: &mut Context<Self>) {
         if matches!(self.state, RedisItemState::Unavailable(_)) {
             return;
         }
         self.next_generation = self.next_generation.saturating_add(1);
         let generation = self.next_generation;
-        self.state = RedisItemState::Loading { generation };
+        self.page_loading = true;
+        if !matches!(self.state, RedisItemState::Ready(_)) {
+            self.state = RedisItemState::Loading;
+        }
         cx.notify();
         let application = self.application.clone();
         let target = self.target.clone();
         let key = self.key.clone();
-        let load =
-            gpui_tokio::Tokio::spawn(
-                cx,
-                async move { application.redis().key(&target, &key).await },
-            );
+        let load = crate::ui::runtime::spawn(cx, async move {
+            match cursor {
+                None => application.redis().key(&target, &key).await,
+                Some(_) => application.redis().key_page(&target, &key, cursor).await,
+            }
+        });
         cx.spawn(async move |item, cx| {
             let result = match load.await {
                 Ok(result) => result,
                 Err(error) => Err(format!("Redis key task ended unexpectedly: {error}")),
             };
             item.update(cx, |item, cx| {
-                if !matches!(item.state, RedisItemState::Loading { generation: current } if current == generation)
-                {
+                if item.next_generation != generation {
                     return;
                 }
-                item.state = match result {
-                    Ok(snapshot) => RedisItemState::Ready(snapshot),
-                    Err(error) => RedisItemState::Failed(error),
-                };
+                item.page_loading = false;
+                match result {
+                    Ok(snapshot) => {
+                        item.current_cursor = cursor;
+                        item.state = RedisItemState::Ready(snapshot);
+                    }
+                    Err(error) if matches!(item.state, RedisItemState::Ready(_)) => {
+                        item.notice = Some(Err(error));
+                    }
+                    Err(error) => item.state = RedisItemState::Failed(error),
+                }
                 cx.notify();
             })
             .ok();
@@ -173,7 +198,23 @@ impl RedisItem {
     }
 
     fn refresh(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.load(cx);
+        if !self.is_busy() {
+            self.notice = None;
+            self.load(cx);
+        }
+    }
+
+    fn next_page(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_busy() {
+            return;
+        }
+        let RedisItemState::Ready(snapshot) = &self.state else {
+            return;
+        };
+        if let Some(cursor) = snapshot.next_page {
+            self.notice = None;
+            self.load_page(Some(cursor), cx);
+        }
     }
 
     fn input_text(field: &Entity<InputField>, cx: &Context<Self>) -> String {
@@ -273,20 +314,28 @@ impl RedisItem {
         );
     }
 
-    fn remove_hash_field(&mut self, field: String, cx: &mut Context<Self>) {
-        self.start_mutation(RedisMutation::HashDelete { field }, false, cx);
+    fn remove_entry(&mut self, index: usize, generation: u64, cx: &mut Context<Self>) {
+        if self.is_busy() || self.next_generation != generation {
+            return;
+        }
+        let RedisItemState::Ready(snapshot) = &self.state else {
+            return;
+        };
+        if let Some(mutation) = entry_removal(&snapshot.value, index) {
+            self.start_mutation(mutation, false, cx);
+        }
     }
 
-    fn remove_list_value(&mut self, value: String, cx: &mut Context<Self>) {
-        self.start_mutation(RedisMutation::ListRemove { count: 1, value }, false, cx);
-    }
-
-    fn remove_set_member(&mut self, member: String, cx: &mut Context<Self>) {
-        self.start_mutation(RedisMutation::SetRemove { member }, false, cx);
-    }
-
-    fn remove_sorted_set_member(&mut self, member: String, cx: &mut Context<Self>) {
-        self.start_mutation(RedisMutation::SortedSetRemove { member }, false, cx);
+    fn copy_entry(&self, index: usize, generation: u64, cx: &mut Context<Self>) {
+        if self.is_busy() || self.next_generation != generation {
+            return;
+        }
+        let RedisItemState::Ready(snapshot) = &self.state else {
+            return;
+        };
+        if let Some(value) = entry_text(&snapshot.value, index) {
+            cx.write_to_clipboard(ClipboardItem::new_string(value));
+        }
     }
 
     fn start_mutation(
@@ -295,7 +344,7 @@ impl RedisItem {
         refresh_catalog: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.mutation_busy || matches!(self.state, RedisItemState::Unavailable(_)) {
+        if self.is_busy() || matches!(self.state, RedisItemState::Unavailable(_)) {
             return;
         }
         self.mutation_busy = true;
@@ -304,7 +353,8 @@ impl RedisItem {
         let application = self.application.clone();
         let target = self.target.clone();
         let key = self.key.clone();
-        let mutation = gpui_tokio::Tokio::spawn(cx, async move {
+        let generation = self.next_generation;
+        let mutation = crate::ui::runtime::spawn(cx, async move {
             application.redis().mutate(&target, &key, mutation).await
         });
         cx.spawn(async move |item, cx| {
@@ -313,9 +363,18 @@ impl RedisItem {
                 Err(error) => Err(format!("Redis mutation task ended unexpectedly: {error}")),
             };
             item.update(cx, |item, cx| {
+                if item.next_generation != generation {
+                    return;
+                }
                 item.mutation_busy = false;
                 let succeeded = result.is_ok();
-                item.notice = Some(result.map(|affected| format!("Updated {affected} item(s)")));
+                let language = item.settings.read(cx).language();
+                item.notice = Some(result.map(|affected| {
+                    format!(
+                        "{} {affected}",
+                        text(language, "已更新项数：", "Items updated:")
+                    )
+                }));
                 item.load(cx);
                 if succeeded && refresh_catalog {
                     cx.emit(RedisKeyDeleted {
@@ -329,7 +388,7 @@ impl RedisItem {
     }
 
     fn confirm_delete(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mutation_busy || window.has_active_prompt() {
+        if self.is_busy() || window.has_active_prompt() {
             return;
         }
         let language = self.settings.read(cx).language();
@@ -363,114 +422,150 @@ impl RedisItem {
     }
 
     fn render_value(&self, snapshot: &RedisKeySnapshot, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors().clone();
         let language = self.settings.read(cx).language();
-        let rows = match &snapshot.value {
-            RedisValue::Missing => {
-                return centered_state(
-                    text(
-                        language,
-                        "此键不存在或已过期",
-                        "This key is missing or has expired",
-                    ),
-                    Color::Warning,
-                );
-            }
-            RedisValue::String(value) => {
-                vec![redis_row("value", value.clone(), None, colors.border)]
-            }
-            RedisValue::Hash(values) => values
-                .iter()
-                .enumerate()
-                .map(|(index, (field, value))| {
-                    let field_to_remove = field.clone();
-                    redis_row(
-                        field.clone(),
-                        value.clone(),
-                        Some(
-                            IconButton::new(format!("remove-hash-field-{index}"), IconName::Trash)
-                                .icon_size(IconSize::XSmall)
-                                .disabled(self.mutation_busy)
-                                .on_click(cx.listener(move |item, _, _, cx| {
-                                    item.remove_hash_field(field_to_remove.clone(), cx);
-                                }))
-                                .into_any_element(),
-                        ),
-                        colors.border,
-                    )
-                })
-                .collect(),
-            RedisValue::List(values) => values
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let value_to_remove = value.clone();
-                    redis_row(
-                        index.to_string(),
-                        value.clone(),
-                        Some(
-                            IconButton::new(format!("remove-list-value-{index}"), IconName::Trash)
-                                .icon_size(IconSize::XSmall)
-                                .disabled(self.mutation_busy)
-                                .on_click(cx.listener(move |item, _, _, cx| {
-                                    item.remove_list_value(value_to_remove.clone(), cx);
-                                }))
-                                .into_any_element(),
-                        ),
-                        colors.border,
-                    )
-                })
-                .collect(),
-            RedisValue::Set(values) => values
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let member = value.clone();
-                    redis_row(
-                        text(language, "成员", "member"),
-                        value.clone(),
-                        Some(
-                            IconButton::new(format!("remove-set-member-{index}"), IconName::Trash)
-                                .icon_size(IconSize::XSmall)
-                                .disabled(self.mutation_busy)
-                                .on_click(cx.listener(move |item, _, _, cx| {
-                                    item.remove_set_member(member.clone(), cx);
-                                }))
-                                .into_any_element(),
-                        ),
-                        colors.border,
-                    )
-                })
-                .collect(),
-            RedisValue::SortedSet(values) => values
-                .iter()
-                .enumerate()
-                .map(|(index, (member, score))| {
-                    let member_to_remove = member.clone();
-                    redis_row(
-                        score.to_string(),
-                        member.clone(),
-                        Some(
-                            IconButton::new(format!("remove-zset-member-{index}"), IconName::Trash)
-                                .icon_size(IconSize::XSmall)
-                                .disabled(self.mutation_busy)
-                                .on_click(cx.listener(move |item, _, _, cx| {
-                                    item.remove_sorted_set_member(member_to_remove.clone(), cx);
-                                }))
-                                .into_any_element(),
-                        ),
-                        colors.border,
-                    )
-                })
-                .collect(),
+        if matches!(snapshot.value, RedisValue::Missing) {
+            return centered_state(
+                text(
+                    language,
+                    "此键不存在或已过期",
+                    "This key is missing or has expired",
+                ),
+                Color::Warning,
+            );
+        }
+        if snapshot.value.entry_count() == 0 {
+            return centered_state(
+                text(
+                    language,
+                    "当前批次没有数据。可继续下一批或刷新。",
+                    "No entries in this batch. Continue to the next batch or refresh.",
+                ),
+                Color::Muted,
+            );
+        }
+        gpui_kit::uniform_list(
+            "redis-value-rows",
+            snapshot.value.entry_count(),
+            cx.processor(|item, visible_range: std::ops::Range<usize>, _, cx| {
+                visible_range
+                    .filter_map(|index| item.render_entry(index, cx))
+                    .collect()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .into_any_element()
+    }
+
+    fn render_entry(&self, index: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let RedisItemState::Ready(snapshot) = &self.state else {
+            return None;
         };
-        v_flex()
-            .id("redis-value-rows")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .children(rows)
-            .into_any_element()
+        let language = self.settings.read(cx).language();
+        let (name, value, removable) = match &snapshot.value {
+            RedisValue::Missing => return None,
+            RedisValue::String(value) if index == 0 => ("value".to_string(), preview(value), false),
+            RedisValue::String(_) => return None,
+            RedisValue::Hash(values) => {
+                let (field, value) = values.get(index)?;
+                (preview(field), preview(value), true)
+            }
+            RedisValue::List(values) => (
+                (snapshot.offset + index as u64).to_string(),
+                preview(values.get(index)?),
+                true,
+            ),
+            RedisValue::Set(values) => (
+                text(language, "成员", "member").to_string(),
+                preview(values.get(index)?),
+                true,
+            ),
+            RedisValue::SortedSet(values) => {
+                let (member, score) = values.get(index)?;
+                (score.to_string(), preview(member), true)
+            }
+        };
+        let generation = self.next_generation;
+        let copy_label = text(language, "复制完整行", "Copy full row");
+        let remove_label = text(language, "移除此项", "Remove this entry");
+        let actions = h_flex()
+            .gap_1()
+            .child(
+                IconButton::new(format!("copy-redis-entry-{index}"), IconName::Copy)
+                    .icon_size(IconSize::XSmall)
+                    .aria_label(copy_label)
+                    .tooltip(Tooltip::text(copy_label))
+                    .disabled(self.is_busy())
+                    .on_click(
+                        cx.listener(move |item, _, _, cx| item.copy_entry(index, generation, cx)),
+                    ),
+            )
+            .when(removable, |element| {
+                element.child(
+                    IconButton::new(format!("remove-redis-entry-{index}"), IconName::Trash)
+                        .icon_size(IconSize::XSmall)
+                        .aria_label(remove_label)
+                        .tooltip(Tooltip::text(remove_label))
+                        .disabled(self.is_busy())
+                        .on_click(cx.listener(move |item, _, _, cx| {
+                            item.remove_entry(index, generation, cx)
+                        })),
+                )
+            });
+        Some(redis_row(
+            name,
+            value,
+            Some(actions.into_any_element()),
+            cx.theme().colors().border,
+        ))
+    }
+
+    fn render_paging_controls(
+        &self,
+        snapshot: &RedisKeySnapshot,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if matches!(snapshot.value, RedisValue::Missing | RedisValue::String(_)) {
+            return None;
+        }
+        let language = self.settings.read(cx).language();
+        let count = snapshot.value.entry_count();
+        let total = snapshot.total_entries;
+        Some(
+            h_flex()
+                .flex_none()
+                .px_3()
+                .py_1()
+                .gap_2()
+                .border_t_1()
+                .border_color(cx.theme().colors().border)
+                .child(
+                    Label::new(format!(
+                        "{} {count} · {} {total}",
+                        text(language, "本批", "This batch"),
+                        text(language, "总计", "Total")
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .flex_1(),
+                )
+                .child(
+                    Button::new(
+                        "first-redis-page",
+                        text(language, "返回首批", "First batch"),
+                    )
+                    .size(ButtonSize::Compact)
+                    .disabled(self.is_busy() || self.current_cursor.is_none())
+                    .on_click(cx.listener(Self::refresh)),
+                )
+                .child(
+                    Button::new("next-redis-page", text(language, "下一批", "Next batch"))
+                        .size(ButtonSize::Compact)
+                        .disabled(self.is_busy() || snapshot.next_page.is_none())
+                        .on_click(cx.listener(Self::next_page)),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_mutation_controls(&self, value: &RedisValue, cx: &mut Context<Self>) -> AnyElement {
@@ -487,7 +582,7 @@ impl RedisItem {
                     )
                     .size(ButtonSize::Compact)
                     .loading(self.mutation_busy)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::set_string)),
                 )
                 .into_any_element(),
@@ -502,7 +597,7 @@ impl RedisItem {
                     )
                     .size(ButtonSize::Compact)
                     .loading(self.mutation_busy)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::hash_set)),
                 )
                 .into_any_element(),
@@ -515,7 +610,7 @@ impl RedisItem {
                         text(language, "左侧添加", "Push Left"),
                     )
                     .size(ButtonSize::Compact)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::list_push_left)),
                 )
                 .child(
@@ -524,7 +619,7 @@ impl RedisItem {
                         text(language, "右侧添加", "Push Right"),
                     )
                     .size(ButtonSize::Compact)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::list_push_right)),
                 )
                 .into_any_element(),
@@ -537,7 +632,7 @@ impl RedisItem {
                         text(language, "添加成员", "Add Member"),
                     )
                     .size(ButtonSize::Compact)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::set_add)),
                 )
                 .into_any_element(),
@@ -551,7 +646,7 @@ impl RedisItem {
                         text(language, "设置成员", "Set Member"),
                     )
                     .size(ButtonSize::Compact)
-                    .disabled(self.mutation_busy)
+                    .disabled(self.is_busy())
                     .on_click(cx.listener(Self::sorted_set_add)),
                 )
                 .into_any_element(),
@@ -562,17 +657,21 @@ impl RedisItem {
 
 impl Render for RedisItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
-        let loading = matches!(self.state, RedisItemState::Loading { .. });
+        let loading = self.page_loading;
         let content = match &self.state {
-            RedisItemState::Loading { .. } => centered_state(
+            RedisItemState::Loading => centered_state(
                 text(language, "正在加载 Redis 键…", "Loading Redis key…"),
                 Color::Muted,
             ),
             RedisItemState::Failed(error) => centered_state(error.clone(), Color::Error),
             RedisItemState::Unavailable(reason) => centered_state(reason.clone(), Color::Warning),
             RedisItemState::Ready(snapshot) => self.render_value(snapshot, cx),
+        };
+        let paging_controls = match &self.state {
+            RedisItemState::Ready(snapshot) => self.render_paging_controls(snapshot, cx),
+            _ => None,
         };
         let metadata = match &self.state {
             RedisItemState::Ready(snapshot) => Some((
@@ -609,7 +708,7 @@ impl Render for RedisItem {
                     .child(
                         Label::new(self.label())
                             .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::MEDIUM)
+                            .weight(gpui_kit::FontWeight::MEDIUM)
                             .truncate()
                             .flex_1(),
                     )
@@ -623,7 +722,8 @@ impl Render for RedisItem {
                             .size(ButtonSize::Compact)
                             .loading(loading)
                             .disabled(
-                                loading || matches!(self.state, RedisItemState::Unavailable(_)),
+                                self.is_busy()
+                                    || matches!(self.state, RedisItemState::Unavailable(_)),
                             )
                             .on_click(cx.listener(Self::refresh)),
                     )
@@ -632,8 +732,7 @@ impl Render for RedisItem {
                             .size(ButtonSize::Compact)
                             .style(ButtonStyle::Tinted(TintColor::Error))
                             .disabled(
-                                self.mutation_busy
-                                    || !matches!(self.state, RedisItemState::Ready(_)),
+                                self.is_busy() || !matches!(self.state, RedisItemState::Ready(_)),
                             )
                             .on_click(cx.listener(Self::confirm_delete)),
                     ),
@@ -663,6 +762,7 @@ impl Render for RedisItem {
                 )
             })
             .child(content)
+            .when_some(paging_controls, |element, controls| element.child(controls))
     }
 }
 
@@ -695,22 +795,112 @@ fn redis_row(
     border: Hsla,
 ) -> AnyElement {
     h_flex()
-        .min_h(px(34.0))
+        .h(px(34.0))
+        .overflow_hidden()
         .flex_none()
         .px_3()
         .gap_2()
         .border_b_1()
         .border_color(border)
         .child(
-            div()
-                .w(px(180.0))
-                .child(Label::new(name).size(LabelSize::XSmall).color(Color::Muted)),
+            div().w(px(180.0)).min_w_0().child(
+                Label::new(name)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .truncate(),
+            ),
         )
         .child(
             div()
                 .flex_1()
-                .child(Label::new(value).size(LabelSize::XSmall)),
+                .min_w_0()
+                .child(Label::new(value).size(LabelSize::XSmall).truncate()),
         )
         .when_some(action, |element, action| element.child(action))
         .into_any_element()
+}
+
+fn preview(value: &str) -> String {
+    const PREVIEW_CHARACTERS: usize = 512;
+    let mut characters = value.chars();
+    let mut result = characters
+        .by_ref()
+        .take(PREVIEW_CHARACTERS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        result.push('…');
+    }
+    result
+}
+
+fn entry_text(value: &RedisValue, index: usize) -> Option<String> {
+    match value {
+        RedisValue::Missing => None,
+        RedisValue::String(value) => (index == 0).then(|| value.clone()),
+        RedisValue::Hash(values) => values
+            .get(index)
+            .map(|(field, value)| format!("{field}\t{value}")),
+        RedisValue::List(values) | RedisValue::Set(values) => values.get(index).cloned(),
+        RedisValue::SortedSet(values) => values
+            .get(index)
+            .map(|(member, score)| format!("{score}\t{member}")),
+    }
+}
+
+fn entry_removal(value: &RedisValue, index: usize) -> Option<RedisMutation> {
+    match value {
+        RedisValue::Missing | RedisValue::String(_) => None,
+        RedisValue::Hash(values) => values
+            .get(index)
+            .map(|(field, _)| RedisMutation::HashDelete {
+                field: field.clone(),
+            }),
+        RedisValue::List(values) => values.get(index).map(|value| RedisMutation::ListRemove {
+            count: 1,
+            value: value.clone(),
+        }),
+        RedisValue::Set(values) => values.get(index).map(|member| RedisMutation::SetRemove {
+            member: member.clone(),
+        }),
+        RedisValue::SortedSet(values) => {
+            values
+                .get(index)
+                .map(|(member, _)| RedisMutation::SortedSetRemove {
+                    member: member.clone(),
+                })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_previews_are_bounded_without_changing_copy_or_mutation_identity() {
+        let member = "数据\n".repeat(600);
+        assert_eq!(preview(&member).chars().count(), 513);
+        assert!(preview(&member).ends_with('…'));
+        let value = RedisValue::Set(vec![member.clone()]);
+        assert_eq!(entry_text(&value, 0), Some(member.clone()));
+        assert_eq!(
+            entry_removal(&value, 0),
+            Some(RedisMutation::SetRemove { member })
+        );
+        assert_eq!(entry_removal(&value, 1), None);
+    }
+
+    #[test]
+    fn hash_copy_and_removal_preserve_full_field_and_value() {
+        let field = "字段".repeat(600);
+        let value = "值".repeat(600);
+        let hash = RedisValue::Hash(vec![(field.clone(), value.clone())]);
+        assert_eq!(entry_text(&hash, 0), Some(format!("{field}\t{value}")));
+        assert_eq!(
+            entry_removal(&hash, 0),
+            Some(RedisMutation::HashDelete { field })
+        );
+        assert_eq!(preview(""), "");
+        assert_eq!(preview(&"a".repeat(512)), "a".repeat(512));
+    }
 }

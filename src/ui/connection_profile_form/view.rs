@@ -1,6 +1,6 @@
-use gpui::{FocusHandle, Focusable, Render};
-use workspace::{DismissDecision, ModalView};
-use zed_ui::{prelude::*, ElevationIndex, Modal, ModalFooter, ModalHeader, Section, TintColor};
+use crate::ui::components::{prelude::*, Modal, ModalFooter, ModalHeader};
+use crate::ui::modal::{DismissDecision, ModalView};
+use gpui_kit::{FocusHandle, Focusable, Render};
 
 use super::{
     ConnectionProfileForm, FormNotice, FormOperation, NoticeKind, SubmitConnectionProfile,
@@ -11,54 +11,50 @@ use crate::ui::localization::text;
 
 impl ConnectionProfileForm {
     fn render_engine_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .gap_1()
-            .child(
-                Label::new(text(self.language, "数据库类型", "Database Type"))
-                    .size(LabelSize::Small),
-            )
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(
-                        DbType::all()
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, db_type)| {
-                                let label = engine_label(db_type);
-                                let selected = self.db_type == db_type;
-                                div()
-                                    .key_context("ConnectionProfileFormControl")
-                                    .on_action(cx.listener(
-                                        move |form, _: &menu::Confirm, window, cx| {
+        div().child(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .children(
+                    DbType::all()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, db_type)| {
+                            let label = engine_label(db_type);
+                            let selected = self.db_type == db_type;
+                            div()
+                                .key_context("ConnectionProfileFormControl")
+                                .on_action(cx.listener(
+                                    move |form, _: &menu::Confirm, window, cx| {
+                                        form.select_db_type(db_type, window, cx);
+                                    },
+                                ))
+                                .child(
+                                    Button::new(format!("connection-engine-{label}"), label)
+                                        .size(ButtonSize::Compact)
+                                        .tab_index(1 + index as isize)
+                                        .toggle_state(selected)
+                                        .selected_style(ButtonStyle::Filled)
+                                        .disabled(self.operation.is_busy())
+                                        .on_click(cx.listener(move |form, _, window, cx| {
                                             form.select_db_type(db_type, window, cx);
-                                        },
-                                    ))
-                                    .child(
-                                        Button::new(format!("connection-engine-{label}"), label)
-                                            .size(ButtonSize::Compact)
-                                            .tab_index(2 + index as isize)
-                                            .toggle_state(selected)
-                                            .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                                            .disabled(self.operation.is_busy())
-                                            .on_click(cx.listener(move |form, _, window, cx| {
-                                                form.select_db_type(db_type, window, cx);
-                                            })),
-                                    )
-                            }),
-                    ),
-            )
+                                        })),
+                                )
+                        }),
+                ),
+        )
     }
 
     fn render_notice(&self, notice: &FormNotice, cx: &mut Context<Self>) -> AnyElement {
         let (color, icon) = match notice.kind {
+            NoticeKind::Info => (Color::Info, IconName::LoaderCircle),
             NoticeKind::Success => (Color::Success, IconName::Check),
-            NoticeKind::Warning => (Color::Warning, IconName::Warning),
-            NoticeKind::Error => (Color::Error, IconName::Warning),
+            NoticeKind::Warning => (Color::Warning, IconName::TriangleAlert),
+            NoticeKind::Error => (Color::Error, IconName::TriangleAlert),
         };
         let status = cx.theme().status();
         let (border, background) = match notice.kind {
+            NoticeKind::Info => (status.info_border, status.info_background),
             NoticeKind::Success => (status.success_border, status.success_background),
             NoticeKind::Warning => (status.warning_border, status.warning_background),
             NoticeKind::Error => (status.error_border, status.error_background),
@@ -78,14 +74,14 @@ impl ConnectionProfileForm {
                     .child(Label::new(notice.message.clone()).size(LabelSize::Small)),
             )
             .when_some(notice.detail.clone(), |element, detail| {
-                element.child(Label::new(detail).size(LabelSize::XSmall).line_clamp(3))
+                element.child(Label::new(detail).size(LabelSize::XSmall))
             })
             .into_any_element()
     }
 }
 
 impl Render for ConnectionProfileForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editing = self.origin.is_editing();
         let removes_credential = self.origin.removes_saved_credential(self.db_type);
         let title = if editing {
@@ -114,6 +110,7 @@ impl Render for ConnectionProfileForm {
         };
         let busy = self.operation.is_busy();
         let spec = self.db_type.profile_spec();
+        let available_height = window.viewport_size().height - px(32.0);
         let test_notice = self
             .test_notice
             .as_ref()
@@ -141,25 +138,39 @@ impl Render for ConnectionProfileForm {
             .on_action(cx.listener(Self::submit_action))
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
-            .elevation_3(cx)
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius_lg)
+            .shadow_lg()
             .occlude()
-            .w(rems(42.0))
-            .max_h(rems(44.0))
+            .w(px(640.0))
+            .max_w(window.viewport_size().width - px(32.0))
+            .h(px(if spec.is_file() { 490.0 } else { 650.0 }).min(available_height))
             .child(
                 Modal::new("connection-profile-form", Some(self.scroll_handle.clone()))
                     .header(
                         ModalHeader::new()
                             .headline(title)
-                            .description(description)
+                            .when(
+                                editing && (!spec.is_file() || removes_credential),
+                                |header| header.description(description),
+                            )
                             .show_dismiss_button(!busy),
                     )
-                    .section(
-                        Section::new()
+                    .child(
+                        // Section fills its parent, hiding overflow from the modal's scroll container.
+                        v_flex()
+                            .w_full()
+                            .flex_none()
+                            .gap_y(DynamicSpacing::Base04.rems(cx))
+                            .pb_2()
+                            .px(DynamicSpacing::Base12.rems(cx))
                             .child(
                                 v_flex()
                                     .gap_3()
-                                    .child(self.fields.name.clone())
-                                    .child(self.render_engine_picker(cx)),
+                                    .child(self.render_engine_picker(cx))
+                                    .child(self.fields.name.clone()),
                             )
                             .child(
                                 h_flex()
@@ -218,65 +229,101 @@ impl Render for ConnectionProfileForm {
                             )
                             .child(self.fields.tags.clone())
                             .children(credential_notice)
+                            .when(busy, |section| {
+                                section.child(
+                                    self.render_notice(
+                                        &FormNotice {
+                                            kind: NoticeKind::Info,
+                                            message: match self.operation {
+                                                FormOperation::Testing => text(
+                                                    self.language,
+                                                    "正在测试连接…",
+                                                    "Testing connection…",
+                                                ),
+                                                FormOperation::Saving => text(
+                                                    self.language,
+                                                    "正在保存连接配置…",
+                                                    "Saving connection profile…",
+                                                ),
+                                                FormOperation::Idle => unreachable!(),
+                                            }
+                                            .to_string(),
+                                            detail: Some(
+                                                text(
+                                                    self.language,
+                                                    "请稍候，输入已保留。",
+                                                    "Please wait. Your input is preserved.",
+                                                )
+                                                .to_string(),
+                                            ),
+                                        },
+                                        cx,
+                                    ),
+                                )
+                            })
                             .children(test_notice)
                             .children(save_notice),
                     )
                     .footer(
-                        ModalFooter::new().end_slot(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .key_context("ConnectionProfileFormControl")
-                                        .on_action(cx.listener(Self::cancel_confirm))
-                                        .child(
-                                            Button::new(
-                                                "cancel-connection-profile",
-                                                text(self.language, "取消", "Cancel"),
-                                            )
-                                            .tab_index(17_isize)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(Self::cancel_click)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .key_context("ConnectionProfileFormControl")
-                                        .on_action(cx.listener(Self::test_confirm))
-                                        .child(
-                                            Button::new(
-                                                "test-connection-profile",
-                                                text(self.language, "测试连接", "Test Connection"),
-                                            )
-                                            .tab_index(18_isize)
-                                            .style(ButtonStyle::Outlined)
-                                            .loading(self.operation == FormOperation::Testing)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(Self::test_click)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .key_context("ConnectionProfileFormControl")
-                                        .on_action(cx.listener(Self::save_confirm))
-                                        .child(
-                                            Button::new(
-                                                "save-connection-profile",
-                                                text(self.language, "保存", "Save"),
-                                            )
-                                            .tab_index(19_isize)
-                                            .style(ButtonStyle::Filled)
-                                            .layer(ElevationIndex::ModalSurface)
-                                            .loading(self.operation == FormOperation::Saving)
-                                            .disabled(busy)
-                                            .key_binding(zed_ui::KeyBinding::for_action(
-                                                &SubmitConnectionProfile,
-                                                cx,
-                                            ))
-                                            .on_click(cx.listener(Self::save_click)),
-                                        ),
-                                ),
-                        ),
+                        ModalFooter::new()
+                            .start_slot(
+                                div()
+                                    .key_context("ConnectionProfileFormControl")
+                                    .on_action(cx.listener(Self::test_confirm))
+                                    .child(
+                                        Button::new(
+                                            "test-connection-profile",
+                                            text(self.language, "测试连接", "Test Connection"),
+                                        )
+                                        .tab_index(17_isize)
+                                        .size(ButtonSize::Compact)
+                                        .loading(self.operation == FormOperation::Testing)
+                                        .disabled(busy)
+                                        .on_click(cx.listener(Self::test_click)),
+                                    ),
+                            )
+                            .end_slot(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .key_context("ConnectionProfileFormControl")
+                                            .on_action(cx.listener(Self::cancel_confirm))
+                                            .child(
+                                                Button::new(
+                                                    "cancel-connection-profile",
+                                                    text(self.language, "取消", "Cancel"),
+                                                )
+                                                .tab_index(18_isize)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(busy)
+                                                .on_click(cx.listener(Self::cancel_click)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .key_context("ConnectionProfileFormControl")
+                                            .on_action(cx.listener(Self::save_confirm))
+                                            .child(
+                                                Button::new(
+                                                    "save-connection-profile",
+                                                    text(self.language, "保存", "Save"),
+                                                )
+                                                .tab_index(19_isize)
+                                                .size(ButtonSize::Compact)
+                                                .style(ButtonStyle::Filled)
+                                                .loading(self.operation == FormOperation::Saving)
+                                                .disabled(busy)
+                                                .key_binding(
+                                                    crate::ui::components::KeyBinding::for_action(
+                                                        &SubmitConnectionProfile,
+                                                        cx,
+                                                    ),
+                                                )
+                                                .on_click(cx.listener(Self::save_click)),
+                                            ),
+                                    ),
+                            ),
                     ),
             )
     }

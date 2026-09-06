@@ -1,11 +1,14 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use gpui::{
+use crate::ui::components::{prelude::*, Tooltip};
+use gpui_kit::{
     canvas, fill, point, px, BorderStyle, Bounds, ClickEvent, Entity, FocusHandle, Hsla,
     MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Point, ScrollDelta,
     ScrollWheelEvent, Subscription,
 };
-use zed_ui::{prelude::*, Tooltip};
 
 use crate::application::{
     Application, ErBounds, ErDiagramState, ErLayout, ErLoadError, ErPoint, ErSchema, ErStatus,
@@ -120,7 +123,7 @@ impl ErDiagramItem {
         cx.notify();
         let service = self.application.er_diagrams().clone();
         let target = self.state.target().clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move { service.load(&target).await });
+        let load = crate::ui::runtime::spawn(cx, async move { service.load(&target).await });
         cx.spawn(async move |item, cx| {
             let result = match load.await {
                 Ok(result) => result,
@@ -270,7 +273,7 @@ impl ErDiagramItem {
                 cx,
             );
         }
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let positions = self
             .layout
             .nodes
@@ -295,7 +298,10 @@ impl ErDiagramItem {
             .filter_map(|relationship| {
                 let from = *node_by_table.get(&relationship.from_table)?;
                 let to = *node_by_table.get(&relationship.to_table)?;
+                let from_node = self.layout.nodes.get(from)?;
                 let to_node = self.layout.nodes.get(to)?;
+                let target_to_right = positions[from].x + from_node.width * self.zoom / 2.0
+                    < positions[to].x + to_node.width * self.zoom / 2.0;
                 let from_column = relationship
                     .from_columns
                     .first()
@@ -320,12 +326,28 @@ impl ErDiagramItem {
                     .min(11);
                 Some((
                     ErPoint {
-                        x: positions[from].x,
-                        y: positions[from].y + (48.0 + from_column as f32 * 20.0) * self.zoom,
+                        x: positions[from].x
+                            + if target_to_right {
+                                from_node.width * self.zoom
+                            } else {
+                                0.0
+                            },
+                        y: positions[from].y
+                            + (ErLayout::HEADER_HEIGHT
+                                + (from_column as f32 + 0.5) * ErLayout::ROW_HEIGHT)
+                                * self.zoom,
                     },
                     ErPoint {
-                        x: positions[to].x + to_node.width * self.zoom,
-                        y: positions[to].y + (48.0 + to_column as f32 * 20.0) * self.zoom,
+                        x: positions[to].x
+                            + if target_to_right {
+                                0.0
+                            } else {
+                                to_node.width * self.zoom
+                            },
+                        y: positions[to].y
+                            + (ErLayout::HEADER_HEIGHT
+                                + (to_column as f32 + 0.5) * ErLayout::ROW_HEIGHT)
+                                * self.zoom,
                     },
                 ))
             })
@@ -351,6 +373,16 @@ impl ErDiagramItem {
                 )
             })
             .collect::<Vec<_>>();
+        let foreign_columns = schema
+            .relationships
+            .iter()
+            .flat_map(|relationship| {
+                relationship
+                    .from_columns
+                    .iter()
+                    .map(|column| (relationship.from_table.clone(), column.clone()))
+            })
+            .collect::<HashSet<_>>();
         let edge_color = colors.text_muted.alpha(0.72);
         let layout_width = bounds.width;
         let layout_height = bounds.height;
@@ -420,7 +452,7 @@ impl ErDiagramItem {
                         .cursor_move()
                         .border_1()
                         .border_color(colors.border)
-                        .bg(colors.panel_background)
+                        .bg(colors.surface_background)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |item, event, window, cx| {
@@ -428,48 +460,85 @@ impl ErDiagramItem {
                             }),
                         )
                         .child(
-                            v_flex()
-                                .min_h(px(38.0 * self.zoom))
+                            h_flex()
+                                .h(px(ErLayout::HEADER_HEIGHT * self.zoom))
                                 .flex_none()
-                                .justify_center()
-                                .px_2()
+                                .px(px(12.0 * self.zoom))
                                 .border_b_1()
                                 .border_color(colors.border)
                                 .child(
-                                    Label::new(table.reference.name().to_string())
-                                        .size(LabelSize::Small)
-                                        .weight(gpui::FontWeight::SEMIBOLD)
+                                    Label::new(table.reference.to_string())
+                                        .size(LabelSize::Custom(
+                                            crate::ui::components::TextSize::Small.rems(cx)
+                                                * self.zoom,
+                                        ))
                                         .truncate(),
-                                )
-                                .children(table.reference.schema().map(|schema| {
-                                    Label::new(schema.to_string())
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate()
-                                })),
+                                ),
                         )
                         .children(table.columns.iter().take(12).map(|column| {
+                            let foreign = foreign_columns
+                                .contains(&(table.reference.clone(), column.name.clone()));
                             h_flex()
-                                .h(px(20.0 * self.zoom))
+                                .h(px(ErLayout::ROW_HEIGHT * self.zoom))
                                 .flex_none()
-                                .gap_1()
-                                .px_2()
+                                .bg(colors.editor_background)
+                                .border_b_1()
+                                .border_color(colors.border)
                                 .child(
-                                    Label::new(if column.is_primary_key { "PK" } else { "" })
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Accent),
-                                )
-                                .child(
-                                    Label::new(column.name.clone())
+                                    h_flex()
                                         .flex_1()
-                                        .size(LabelSize::XSmall)
-                                        .truncate(),
+                                        .min_w_0()
+                                        .px(px(12.0 * self.zoom))
+                                        .gap(px(4.0 * self.zoom))
+                                        .child(
+                                            div().w(px(24.0 * self.zoom)).flex_none().child(
+                                                Label::new(if column.is_primary_key {
+                                                    "PK"
+                                                } else if foreign {
+                                                    "FK"
+                                                } else {
+                                                    ""
+                                                })
+                                                .buffer_font(cx)
+                                                .size(LabelSize::Custom(
+                                                    crate::ui::components::TextSize::XSmall
+                                                        .rems(cx)
+                                                        * self.zoom,
+                                                )),
+                                            ),
+                                        )
+                                        .child(
+                                            Label::new(column.name.clone())
+                                                .buffer_font(cx)
+                                                .size(LabelSize::Custom(
+                                                    crate::ui::components::TextSize::XSmall
+                                                        .rems(cx)
+                                                        * self.zoom,
+                                                ))
+                                                .truncate(),
+                                        ),
                                 )
                                 .child(
-                                    Label::new(column.data_type.clone())
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
+                                    div()
+                                        .w(px(110.0 * self.zoom))
+                                        .h_full()
+                                        .flex_none()
+                                        .px(px(8.0 * self.zoom))
+                                        .border_l_1()
+                                        .border_color(colors.border)
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            Label::new(column.data_type.clone())
+                                                .buffer_font(cx)
+                                                .size(LabelSize::Custom(
+                                                    crate::ui::components::TextSize::XSmall
+                                                        .rems(cx)
+                                                        * self.zoom,
+                                                ))
+                                                .color(Color::Muted)
+                                                .truncate(),
+                                        ),
                                 )
                         }))
                         .children((table.columns.len() > 12).then(|| {
@@ -485,6 +554,17 @@ impl ErDiagramItem {
                 )
             }))
             .child(
+                div().absolute().left(px(20.0)).bottom(px(20.0)).child(
+                    Label::new(text(
+                        language,
+                        "拖动表调整位置 · 拖动画布平移 · 连线 FK → PK",
+                        "Drag tables to arrange · Drag canvas to pan · Links FK → PK",
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                ),
+            )
+            .child(
                 div()
                     .absolute()
                     .right(px(12.0))
@@ -493,7 +573,7 @@ impl ErDiagramItem {
                     .h(px(104.0))
                     .border_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -517,7 +597,7 @@ impl ErDiagramItem {
 
 impl Render for ErDiagramItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let target = self.state.target();
         let (loading, error, schema, unavailable) = match self.state.status() {
@@ -528,7 +608,9 @@ impl Render for ErDiagramItem {
             ErStatus::Unavailable(reason) => (false, None, None, Some(reason)),
         };
         let viewport = window.viewport_size();
-        let content = if let Some(schema) = schema {
+        let content = if let Some(schema) =
+            schema.filter(|schema| error.is_none() || !schema.tables.is_empty())
+        {
             self.render_schema(
                 schema,
                 language,
@@ -540,6 +622,16 @@ impl Render for ErDiagramItem {
             empty_state(
                 text(language, "关系图不可用", "ER diagram unavailable"),
                 reason,
+                cx,
+            )
+        } else if error.is_some() {
+            empty_state(
+                text(language, "无法加载关系图", "Unable to load ER diagram"),
+                text(
+                    language,
+                    "请检查连接状态和读取表结构的权限后重试。",
+                    "Check the connection and schema permissions, then retry.",
+                ),
                 cx,
             )
         } else if loading {
@@ -565,60 +657,92 @@ impl Render for ErDiagramItem {
             .key_context("ErDiagramItem")
             .size_full()
             .overflow_hidden()
-            .bg(colors.background)
+            .bg(colors.editor_background)
             .child(
                 h_flex()
-                    .h(px(40.0))
+                    .h(DynamicSpacing::Base32.rems(cx))
                     .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
+                    .gap(DynamicSpacing::Base04.rems(cx))
+                    .px(DynamicSpacing::Base08.rems(cx))
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
-                    .child(
-                        Label::new(text(language, "实体关系图", "Entity Relationship Diagram"))
-                            .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::SEMIBOLD),
-                    )
-                    .child(
-                        Label::new(format!("{} · {}", target.connection_name, target.database))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
-                    .child(div().flex_1())
+                    .bg(colors.surface_background)
+                    .child(super::button::button_with_disabled_state(
+                        crate::ui::components::ButtonLike::new("er-refresh", "")
+                            .size(ButtonSize::Compact)
+                            .child(
+                                Icon::new(if loading {
+                                    IconName::LoaderCircle
+                                } else {
+                                    IconName::RotateCw
+                                })
+                                .size(IconSize::Small),
+                            )
+                            .aria_label(text(language, "刷新", "Refresh"))
+                            .tooltip(Tooltip::text(text(language, "刷新", "Refresh")))
+                            .on_click(cx.listener(Self::refresh_click)),
+                        loading || unavailable.is_some(),
+                        window,
+                        cx,
+                    ))
+                    .child(super::button::button_with_disabled_state(
+                        crate::ui::components::ButtonLike::new("er-zoom-out", "")
+                            .size(ButtonSize::Compact)
+                            .aria_label(text(language, "缩小", "Zoom out"))
+                            .tooltip(Tooltip::text(text(language, "缩小", "Zoom out")))
+                            .child(Label::new("−").size(LabelSize::Small))
+                            .on_click(cx.listener(Self::zoom_out)),
+                        self.zoom <= MIN_ZOOM
+                            || schema.is_none_or(|schema| schema.tables.is_empty()),
+                        window,
+                        cx,
+                    ))
                     .child(
                         Label::new(format!("{}%", (self.zoom * 100.0).round() as u32))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
+                            .size(LabelSize::XSmall),
                     )
-                    .child(
-                        IconButton::new("er-zoom-out", IconName::SquareMinus)
-                            .icon_size(IconSize::XSmall)
-                            .tooltip(Tooltip::text(text(language, "缩小", "Zoom out")))
-                            .disabled(self.zoom <= MIN_ZOOM)
-                            .on_click(cx.listener(Self::zoom_out)),
-                    )
-                    .child(
-                        IconButton::new("er-zoom-in", IconName::SquarePlus)
-                            .icon_size(IconSize::XSmall)
+                    .child(super::button::button_with_disabled_state(
+                        crate::ui::components::ButtonLike::new("er-zoom-in", "")
+                            .size(ButtonSize::Compact)
+                            .child(Icon::new(IconName::Plus).size(IconSize::XSmall))
+                            .aria_label(text(language, "放大", "Zoom in"))
                             .tooltip(Tooltip::text(text(language, "放大", "Zoom in")))
-                            .disabled(self.zoom >= MAX_ZOOM)
                             .on_click(cx.listener(Self::zoom_in)),
-                    )
-                    .child(
-                        Button::new("er-fit", text(language, "适合窗口", "Fit"))
+                        self.zoom >= MAX_ZOOM
+                            || schema.is_none_or(|schema| schema.tables.is_empty()),
+                        window,
+                        cx,
+                    ))
+                    .child(super::button::button_with_disabled_state(
+                        crate::ui::components::ButtonLike::new("er-fit", "")
                             .size(ButtonSize::Compact)
-                            .disabled(schema.is_none())
+                            .aria_label(text(language, "适合窗口", "Fit to Window"))
+                            .tooltip(Tooltip::text(text(language, "适合窗口", "Fit to Window")))
+                            .child(
+                                Icon::from_path("icons/astesia/fit-window.svg")
+                                    .size(IconSize::Small),
+                            )
                             .on_click(cx.listener(Self::fit)),
-                    )
+                        schema.is_none_or(|schema| schema.tables.is_empty()),
+                        window,
+                        cx,
+                    ))
+                    .child(div().flex_1())
+                    .children(schema.map(|schema| {
+                        Label::new(format!(
+                            "{} {} · {} {}",
+                            schema.tables.len(),
+                            text(language, "张表", "tables"),
+                            schema.relationships.len(),
+                            text(language, "条外键关系", "foreign keys")
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                    }))
                     .child(
-                        Button::new("er-refresh", text(language, "刷新", "Refresh"))
-                            .size(ButtonSize::Compact)
-                            .loading(loading)
-                            .disabled(loading || unavailable.is_some())
-                            .on_click(cx.listener(Self::refresh_click)),
+                        Label::new(format!("{} / {}", target.connection_name, target.database))
+                            .size(LabelSize::XSmall)
+                            .truncate(),
                     ),
             )
             .children(error.map(|error| {
@@ -629,9 +753,9 @@ impl Render for ErDiagramItem {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
-                        Icon::new(IconName::Warning)
+                        Icon::new(IconName::TriangleAlert)
                             .size(IconSize::XSmall)
                             .color(Color::Error),
                     )
@@ -654,14 +778,16 @@ fn paint_edges(
     for (from, to) in edges {
         let start = point(bounds.origin.x + px(from.x), bounds.origin.y + px(from.y));
         let end = point(bounds.origin.x + px(to.x), bounds.origin.y + px(to.y));
-        let bend = ((end.x - start.x).abs() / 2.0).max(px(24.0));
+        let arrow_offset = if end.x >= start.x { px(-6.0) } else { px(6.0) };
         let mut path = PathBuilder::stroke(px(1.5));
         path.move_to(start);
-        path.cubic_bezier_to(
-            end,
-            point(start.x - bend, start.y),
-            point(end.x + bend, end.y),
-        );
+        let middle = (start.x + end.x) / 2.0;
+        path.line_to(point(middle, start.y));
+        path.line_to(point(middle, end.y));
+        path.line_to(end);
+        path.move_to(point(end.x + arrow_offset, end.y - px(5.0)));
+        path.line_to(end);
+        path.line_to(point(end.x + arrow_offset, end.y + px(5.0)));
         if let Ok(path) = path.build() {
             window.paint_path(path, color);
         }
@@ -682,7 +808,7 @@ fn paint_overview(bounds: Bounds<Pixels>, overview: &OverviewPaint, window: &mut
                     bounds.origin.x + px(6.0 + position.x * scale),
                     bounds.origin.y + px(6.0 + position.y * scale),
                 ),
-                gpui::size(px(width * scale), px(height * scale)),
+                gpui_kit::size(px(width * scale), px(height * scale)),
             ),
             overview.node_color.alpha(0.55),
         ));
@@ -692,15 +818,15 @@ fn paint_overview(bounds: Bounds<Pixels>, overview: &OverviewPaint, window: &mut
             bounds.origin.x + px(6.0 + overview.viewport_origin.x * scale),
             bounds.origin.y + px(6.0 + overview.viewport_origin.y * scale),
         ),
-        gpui::size(
+        gpui_kit::size(
             px((overview.viewport_extent.0 * scale).max(2.0)),
             px((overview.viewport_extent.1 * scale).max(2.0)),
         ),
     );
-    window.paint_quad(gpui::quad(
+    window.paint_quad(gpui_kit::quad(
         viewport_bounds,
         px(0.0),
-        gpui::transparent_black(),
+        gpui_kit::transparent_black(),
         px(1.0),
         overview.viewport_color,
         BorderStyle::Solid,
@@ -708,8 +834,8 @@ fn paint_overview(bounds: Bounds<Pixels>, overview: &OverviewPaint, window: &mut
 }
 
 fn empty_state(
-    title: impl Into<gpui::SharedString>,
-    detail: impl Into<gpui::SharedString>,
+    title: impl Into<gpui_kit::SharedString>,
+    detail: impl Into<gpui_kit::SharedString>,
     cx: &mut Context<ErDiagramItem>,
 ) -> AnyElement {
     v_flex()
@@ -724,6 +850,6 @@ fn empty_state(
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
         )
-        .bg(cx.theme().colors().background)
+        .bg(cx.theme().colors().editor_background)
         .into_any_element()
 }

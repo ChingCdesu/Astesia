@@ -1,3 +1,4 @@
+use crate::application::atomic_output::AtomicOutput;
 use crate::connection_runtime::DriverHandle;
 use crate::tasks::{TaskContext, TaskOutcome};
 
@@ -15,6 +16,16 @@ pub(super) async fn execute_backup(
     let mut renderer = BackupRenderer::new(plan.db_type, &plan.database);
     if let Err(error) = renderer.render_drop_tables(&plan.tables, plan.drop_tables) {
         return TaskOutcome::Failed(format!("生成 DROP TABLE 语句失败: {error}"));
+    }
+    if task.is_cancelled() {
+        return TaskOutcome::Cancelled("任务已取消".to_string());
+    }
+    let mut output = match AtomicOutput::new(&plan.output_path) {
+        Ok(output) => output,
+        Err(error) => return TaskOutcome::Failed(format!("写入文件失败: {error}")),
+    };
+    if let Err(error) = renderer.drain_output(&mut output) {
+        return TaskOutcome::Failed(format!("写入文件失败: {error}"));
     }
 
     let mut fatal_error = None;
@@ -50,6 +61,9 @@ pub(super) async fn execute_backup(
                     renderer.render_structure_error(&table.reference, &error.to_string());
                 }
             }
+            if let Err(error) = renderer.drain_output(&mut output) {
+                return TaskOutcome::Failed(format!("写入文件失败: {error}"));
+            }
         }
 
         if plan.content.includes_data() {
@@ -83,6 +97,9 @@ pub(super) async fn execute_backup(
                             ));
                             break;
                         }
+                        if let Err(error) = renderer.drain_output(&mut output) {
+                            return TaskOutcome::Failed(format!("写入文件失败: {error}"));
+                        }
                         if row_count < PAGE_SIZE as usize {
                             break;
                         }
@@ -107,6 +124,9 @@ pub(super) async fn execute_backup(
                 ));
             }
         }
+        if let Err(error) = renderer.drain_output(&mut output) {
+            return TaskOutcome::Failed(format!("写入文件失败: {error}"));
+        }
 
         let progress = (index + 1) as f32 / total as f32;
         task.progress(progress, format!("已处理 {}/{} 表", index + 1, total))
@@ -124,7 +144,13 @@ pub(super) async fn execute_backup(
     }
 
     renderer.finish_success();
-    match std::fs::write(&plan.output_path, renderer.into_output()) {
+    if let Err(error) = renderer.drain_output(&mut output) {
+        return TaskOutcome::Failed(format!("写入文件失败: {error}"));
+    }
+    if task.is_cancelled() {
+        return TaskOutcome::Cancelled("已取消".to_string());
+    }
+    match output.commit() {
         Ok(()) => backup_outcome(total, partial_failures),
         Err(error) => TaskOutcome::Failed(format!("写入文件失败: {error}")),
     }

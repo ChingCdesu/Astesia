@@ -1,5 +1,5 @@
-use gpui::{ClickEvent, Context, Render, Window};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{ClickEvent, Context, Render, Window};
 
 use crate::application::QueryTarget;
 use crate::db::{TableInfo, TableRef};
@@ -43,11 +43,11 @@ impl ConnectionProfilesPanel {
         self.redis_search_generation = self.redis_search_generation.saturating_add(1);
         let generation = self.redis_search_generation;
         self.redis_search_busy = true;
-        cx.notify();
+        self.notify_sidebar(cx);
         let contains = self.redis_search.read(cx).text(cx);
         let application = self.application.clone();
         let target_for_task = target.clone();
-        let search = gpui_tokio::Tokio::spawn(cx, async move {
+        let search = crate::ui::runtime::spawn(cx, async move {
             application
                 .redis()
                 .scan_keys(&target_for_task, &contains)
@@ -75,7 +75,7 @@ impl ConnectionProfilesPanel {
                     }
                     panel.redis_search_busy = false;
                     panel.redis_search_result = Some((target, result));
-                    cx.notify();
+                    panel.notify_sidebar(cx);
                 })
                 .ok();
         })
@@ -130,7 +130,7 @@ impl ConnectionProfilesPanel {
             NoticeTone::Info,
             format!("Copied {identity}; choose a target database"),
         );
-        cx.notify();
+        self.notify_sidebar(cx);
     }
 
     pub(super) fn request_dragged_table_copy(
@@ -158,6 +158,7 @@ impl ConnectionProfilesPanel {
         cx: &mut Context<Self>,
     ) {
         if self.state.query_target_is_live(&target) {
+            self.refresh_table_details(&target, cx);
             self.state.clear_object_state(&target);
             self.load_objects(target, cx);
         }

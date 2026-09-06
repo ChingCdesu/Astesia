@@ -68,7 +68,44 @@ impl GridService {
     }
 
     pub(crate) async fn load(&self, request: &GridLoadRequest) -> Result<GridPage, GridLoadError> {
+        self.load_in(request, None).await
+    }
+
+    pub(crate) async fn begin_transaction(
+        &self,
+        target: super::QueryTarget,
+        isolation: crate::db::TransactionIsolation,
+    ) -> Result<super::GridTransaction, String> {
+        let (handle, generation) = self.manager.driver_session(&target.connection_id).await?;
+        if generation != target.session_generation {
+            return Err("Connection session changed".to_string());
+        }
+        let driver = handle.lock_active().await?;
+        if driver.db_type() != target.db_type {
+            return Err("Connection engine changed".to_string());
+        }
+        let transaction = driver
+            .begin_transaction(&target.database, isolation)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(super::GridTransaction::start(
+            target,
+            transaction,
+            handle.retirement(),
+        ))
+    }
+
+    pub(crate) async fn load_in(
+        &self,
+        request: &GridLoadRequest,
+        transaction: Option<&super::GridTransaction>,
+    ) -> Result<GridPage, GridLoadError> {
         let target = request.target();
+        if transaction.is_some_and(|transaction| transaction.target() != target) {
+            return Err(GridLoadError::Connection(
+                "Transaction belongs to another database session".to_string(),
+            ));
+        }
         let (handle, actual_generation) = self
             .manager
             .driver_session(&target.connection_id)
@@ -118,15 +155,26 @@ impl GridService {
             request.query().filter.as_deref(),
         )
         .map_err(GridLoadError::Query)?;
-        let mut result = driver
-            .execute_query(&target.database, &page_sql)
-            .await
-            .map_err(|error| GridLoadError::Query(error.to_string()))?;
-        let total_rows = driver
-            .execute_query(&target.database, &count_sql)
-            .await
-            .ok()
-            .and_then(|result| total_rows(&result));
+        let mut result = if let Some(transaction) = transaction {
+            transaction
+                .query(page_sql)
+                .await
+                .map_err(GridLoadError::Query)?
+        } else {
+            driver
+                .execute_query(&target.database, &page_sql)
+                .await
+                .map_err(|error| GridLoadError::Query(error.to_string()))?
+        };
+        let count_result = if let Some(transaction) = transaction {
+            transaction.query(count_sql).await.ok()
+        } else {
+            driver
+                .execute_query(&target.database, &count_sql)
+                .await
+                .ok()
+        };
+        let total_rows = count_result.and_then(|result| total_rows(&result));
         normalize_grid_values(actual_db_type, &columns, &mut result)
             .map_err(GridLoadError::Query)?;
         merge_column_metadata(&mut result, columns);
@@ -139,9 +187,51 @@ impl GridService {
         &self,
         request: &GridSaveRequest,
     ) -> Result<GridSaveOutcome, GridSaveFailure> {
+        self.save_in(request, None).await
+    }
+
+    pub(crate) async fn save_with_isolation(
+        &self,
+        request: &GridSaveRequest,
+        isolation: crate::db::TransactionIsolation,
+    ) -> Result<GridSaveOutcome, GridSaveFailure> {
+        let count = save_statement_count(request.plan());
+        let transaction = self
+            .begin_transaction(request.plan().target.clone(), isolation)
+            .await
+            .map_err(|error| GridSaveFailure::before_execution(count, error))?;
+        match self.save_in(request, Some(&transaction)).await {
+            Ok(outcome) => {
+                transaction.finish(true).await.map_err(|error| {
+                    let mut failure = GridSaveFailure::before_execution(count, error);
+                    failure.recovery_sql = Some(transaction.recovery_sql());
+                    failure
+                })?;
+                Ok(outcome)
+            }
+            Err(mut failure) => {
+                if let Err(error) = transaction.finish(false).await {
+                    failure.message = format!("{}; {error}", failure.message);
+                }
+                Err(failure)
+            }
+        }
+    }
+
+    pub(crate) async fn save_in(
+        &self,
+        request: &GridSaveRequest,
+        transaction: Option<&super::GridTransaction>,
+    ) -> Result<GridSaveOutcome, GridSaveFailure> {
         let plan = request.plan();
         let total_statements = save_statement_count(plan);
         let target = &plan.target;
+        if transaction.is_some_and(|transaction| transaction.target() != target) {
+            return Err(GridSaveFailure::before_execution(
+                total_statements,
+                "Transaction belongs to another database session".to_string(),
+            ));
+        }
         let (handle, actual_generation) = self
             .manager
             .driver_session(&target.connection_id)
@@ -182,12 +272,15 @@ impl GridService {
 
         let statements = save_statements(plan)
             .map_err(|message| GridSaveFailure::before_execution(total_statements, message))?;
-        let results = driver
-            .execute_mutation_batch(&target.database, statements)
-            .await
-            .map_err(|error| {
-                GridSaveFailure::before_execution(total_statements, error.to_string())
-            })?;
+        let results = if let Some(transaction) = transaction {
+            transaction.apply(statements).await
+        } else {
+            driver
+                .execute_mutation_batch(&target.database, statements)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        .map_err(|error| GridSaveFailure::before_execution(total_statements, error))?;
         save_outcome(plan, total_statements, results)
     }
 }
@@ -637,6 +730,51 @@ mod tests {
             let page = self.service.load(&request).await.unwrap();
             assert!(session.finish_load(&request, Ok(page)));
         }
+    }
+
+    #[tokio::test]
+    async fn manual_grid_load_and_save_share_a_transaction() {
+        let grid = SqliteGrid::new().await;
+        let transaction = grid
+            .service
+            .begin_transaction(
+                grid.target.clone(),
+                crate::db::TransactionIsolation::Serializable,
+            )
+            .await
+            .unwrap();
+        let mut session = grid.session();
+        let load = session.begin_load().unwrap();
+        let page = grid
+            .service
+            .load_in(&load, Some(&transaction))
+            .await
+            .unwrap();
+        session.finish_load(&load, Ok(page));
+        session
+            .stage_cell_value(GridCell { row: 0, column: 1 }, json!("Augusta"))
+            .unwrap();
+        let save = session.begin_save().unwrap();
+        grid.service
+            .save_in(&save, Some(&transaction))
+            .await
+            .unwrap();
+        session.finish_save(&save, Ok(()));
+        assert!(transaction.has_pending_changes());
+        assert!(transaction.recovery_sql().contains("Augusta"));
+        let load = session.begin_load().unwrap();
+        let page = grid
+            .service
+            .load_in(&load, Some(&transaction))
+            .await
+            .unwrap();
+        assert_eq!(page.rows[0][1], json!("Augusta"));
+        let outside = grid.service.load(&load).await.unwrap();
+        assert_eq!(outside.rows[0][1], json!("Ada"));
+        transaction.finish(true).await.unwrap();
+        assert!(!transaction.has_pending_changes());
+        let committed = grid.service.load(&load).await.unwrap();
+        assert_eq!(committed.rows[0][1], json!("Augusta"));
     }
 
     #[test]

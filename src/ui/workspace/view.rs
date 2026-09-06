@@ -5,21 +5,20 @@ impl Render for AstesiaWorkspace {
         let colors = cx.theme().colors();
         let status = self.connection_profiles.read(cx).status(cx);
         let language = self.settings.read(cx).language();
-        let theme = self.settings.read(cx).theme();
         let sidebar_visible = self.settings.read(cx).sidebar_visible();
-        let active_item = self.active_item().element();
+        let active_item = self.active_item().map(WorkspaceItem::element);
         let active_tab = self.tabs.active();
         let status_indicator = if status.activity == ConnectionActivityStatus::NeedsRefresh {
-            rgb(0xef4444)
+            Color::Error
         } else {
             match status.session {
-                ConnectionSessionStatus::Connected => rgb(0x22c55e),
+                ConnectionSessionStatus::Connected => Color::Success,
                 ConnectionSessionStatus::Connecting
                 | ConnectionSessionStatus::Disconnecting
-                | ConnectionSessionStatus::Deleting => rgb(0xeab308),
+                | ConnectionSessionStatus::Deleting => Color::Warning,
                 ConnectionSessionStatus::Loading
                 | ConnectionSessionStatus::NoSelection
-                | ConnectionSessionStatus::Disconnected => rgb(0xa1a1aa),
+                | ConnectionSessionStatus::Disconnected => Color::Muted,
             }
         };
         let session_label = match status.session {
@@ -52,6 +51,7 @@ impl Render for AstesiaWorkspace {
         };
 
         v_flex()
+            .track_focus(&self.focus_handle)
             .key_context("AstesiaWorkspace")
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::new_query_action))
@@ -80,161 +80,30 @@ impl Render for AstesiaWorkspace {
                             .h_full()
                             .min_w_0()
                             .min_h_0()
-                            .child(
-                                h_flex()
-                                    .h(px(40.0))
-                                    .flex_none()
-                                    .items_end()
-                                    .px_1()
-                                    .border_b_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.tab_bar_background)
-                                    .gap_1()
-                                    .child(
-                                        h_flex()
-                                            .id("workspace-tabs-scroll")
-                                            .h_full()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .items_end()
-                                            .gap_1()
-                                            .overflow_x_scroll()
-                                            .children(self.tabs.tabs().iter().enumerate().map(
-                                                |(index, id)| {
-                                                    let id = *id;
-                                                    let is_active = id == active_tab;
-                                                    let tab = self
-                                                        .workspace_tabs
-                                                        .iter()
-                                                        .find(|tab| tab.id == id)
-                                                        .expect(
-                                                            "workspace tab model and views must agree",
-                                                        );
-                                                    let fallback = format!(
-                                                        "{} {}",
-                                                        text(language, "查询", "Query"),
-                                                        index + 1
-                                                    );
-                                                    let label = tab.item.label(&fallback, cx);
-                                                    let dirty = tab.item.has_unsaved_changes(cx);
-                                                    let accessibility_label = if dirty {
-                                                        format!(
-                                                            "{label}, {}",
-                                                            text(
-                                                                language,
-                                                                "有未保存的更改",
-                                                                "has unsaved changes"
-                                                            )
-                                                        )
-                                                    } else {
-                                                        label.clone()
-                                                    };
-                                                    h_flex()
-                                                        .id(format!("workspace-tab-{index}"))
-                                                        .role(gpui::Role::Button)
-                                                        .tab_index(0)
-                                                        .key_context("WorkspaceTabRow")
-                                                        .aria_label(accessibility_label)
-                                                        .aria_toggled(if is_active {
-                                                            gpui::Toggled::True
-                                                        } else {
-                                                            gpui::Toggled::False
-                                                        })
-                                                        .h(px(36.0))
-                                                        .min_w(px(112.0))
-                                                        .max_w(px(260.0))
-                                                        .px_2()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .rounded_t_md()
-                                                        .border_1()
-                                                        .border_b_0()
-                                                        .border_color(colors.border)
-                                                        .bg(if is_active {
-                                                            colors.tab_active_background
-                                                        } else {
-                                                            colors.tab_inactive_background
-                                                        })
-                                                        .cursor_pointer()
-                                                        .on_action(cx.listener(
-                                                            move |workspace,
-                                                                  _: &menu::Confirm,
-                                                                  window,
-                                                                  cx| {
-                                                                workspace
-                                                                    .activate_tab(id, window, cx);
-                                                            },
-                                                        ))
-                                                        .on_click(cx.listener(
-                                                            move |workspace, _, window, cx| {
-                                                                workspace
-                                                                    .activate_tab(id, window, cx);
-                                                            },
-                                                        ))
-                                                        .when(dirty, |element| {
-                                                            element.child(
-                                                                Indicator::dot()
-                                                                    .color(Color::Warning),
-                                                            )
-                                                        })
-                                                        .child(
-                                                            Label::new(label)
-                                                                .size(LabelSize::Small)
-                                                                .weight(gpui::FontWeight::MEDIUM)
-                                                                .truncate()
-                                                                .flex_1(),
-                                                        )
-                                                        .when(
-                                                            self.tabs.tabs().len() > 1,
-                                                            |element| {
-                                                                element.child(
-                                                                    IconButton::new(
-                                                                        format!(
-                                                                            "close-workspace-tab-{index}"
-                                                                        ),
-                                                                        IconName::Close,
-                                                                    )
-                                                                    .icon_size(IconSize::XSmall)
-                                                                    .on_click(cx.listener(
-                                                                        move |workspace,
-                                                                              _,
-                                                                              window,
-                                                                              cx| {
-                                                                            workspace.close_tab(
-                                                                                id, window, cx,
-                                                                            );
-                                                                        },
-                                                                    )),
-                                                                )
-                                                            },
-                                                        )
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        IconButton::new("new-query-tab", IconName::Plus)
-                                            .icon_size(IconSize::Small)
-                                            .tooltip(move |_, cx| {
-                                                Tooltip::with_meta(
-                                                    text(language, "新建查询", "New Query"),
-                                                    None,
-                                                    "⌘N",
-                                                    cx,
-                                                )
-                                            })
-                                            .on_click(cx.listener(|workspace, _, window, cx| {
-                                                workspace.new_query_tab(window, cx);
-                                            })),
-                                    ),
-                            )
+                            .when(active_tab.is_some(), |pane| pane.child(self.tab_bar(cx)))
                             .child(
                                 div()
                                     .flex_1()
                                     .w_full()
                                     .min_h_0()
                                     .min_w_0()
-                                    .bg(colors.background)
-                                    .child(active_item),
+                                    .bg(colors.editor_background)
+                                    .child(active_item.unwrap_or_else(|| {
+                                        v_flex()
+                                            .size_full()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap(DynamicSpacing::Base08.rems(cx))
+                                            .child(Label::new(text(language,
+                                                "尚未打开任何内容", "No open tabs"))
+                                                .color(Color::Muted))
+                                            .child(Label::new(text(language,
+                                                "从左侧选择连接，打开查询或数据表",
+                                                "Select a connection on the left to open a query or table"))
+                                                .size(LabelSize::Small)
+                                                .color(Color::Placeholder))
+                                            .into_any_element()
+                                    })),
                             ),
                     ),
             )
@@ -248,51 +117,49 @@ impl Render for AstesiaWorkspace {
                     .border_t_1()
                     .border_color(colors.border)
                     .bg(colors.status_bar_background)
-                    .child(div().size(px(8.0)).rounded_full().bg(status_indicator))
-                    .child(Label::new(status.summary).size(LabelSize::XSmall))
+                    .child(
+                        h_flex()
+                            .id("workspace-session-status")
+                            .min_w_0()
+                            .gap(DynamicSpacing::Base08.rems(cx))
+                            .aria_label(format!("{} · {session_label} · {activity_label}", status.summary))
+                            .tooltip(Tooltip::text(format!("{session_label} · {activity_label}")))
+                            .when(status.session != ConnectionSessionStatus::NoSelection, |row| row.child(Indicator::dot().color(status_indicator)))
+                            .child(Label::new(status.summary).size(LabelSize::XSmall).truncate())
+                            .when(status.activity != ConnectionActivityStatus::Ready, |row| row.child(Label::new(activity_label).size(LabelSize::XSmall))),
+                    )
                     .child(div().flex_1())
                     .child(
-                        Button::new("open-task-center", text(language, "任务", "Tasks"))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
+                        IconButton::new("open-task-center", IconName::ListTodo)
+                            .icon_size(IconSize::Small)
+                            .aria_label(text(language, "任务", "Tasks"))
+                            .tooltip(Tooltip::text(text(language, "任务", "Tasks")))
                             .on_click(cx.listener(|workspace, _, window, cx| {
                                 workspace.open_task_center(window, cx);
                             })),
                     )
                     .child(
-                        Button::new("open-mcp-service", "MCP")
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
+                        IconButton::new("open-mcp-service", IconName::Server)
+                            .icon_size(IconSize::Small)
+                            .aria_label(text(language, "MCP 服务", "MCP Service"))
+                            .tooltip(Tooltip::text(text(language, "MCP 服务", "MCP Service")))
                             .on_click(cx.listener(|workspace, _, window, cx| {
                                 workspace.open_mcp_service(window, cx);
                             })),
                     )
                     .child(
-                        Button::new("open-command-palette", text(language, "命令", "Commands"))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .key_binding(zed_ui::KeyBinding::for_action(&ToggleCommandPalette, cx))
+                        IconButton::new("open-command-palette", IconName::Command)
+                            .icon_size(IconSize::Small)
+                            .aria_label(text(language, "命令", "Commands"))
+                            .tooltip(move |_, cx| Tooltip::for_action(text(language, "命令", "Commands"), &ToggleCommandPalette, cx))
                             .on_click(cx.listener(Self::open_palette_click)),
                     )
+                    .child(self.settings_menu(cx))
                     .child(
                         Label::new(format!("Astesia v{}", env!("CARGO_PKG_VERSION")))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
-                    )
-                    .child(
-                        Button::new("cycle-language", self.settings.read(cx).language().code())
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .on_click(cx.listener(Self::cycle_language)),
-                    )
-                    .child(
-                        Button::new("cycle-theme", theme_label(language, theme))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Transparent)
-                            .on_click(cx.listener(Self::cycle_theme)),
-                    )
-                    .child(Label::new(session_label).size(LabelSize::XSmall))
-                    .child(Label::new(activity_label).size(LabelSize::XSmall)),
+                    ),
             )
             .child(self.modal_layer.clone())
             .child(self.notifications.clone())

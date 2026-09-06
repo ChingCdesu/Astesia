@@ -262,9 +262,10 @@ impl QueryItem {
         let header = h_flex()
             .w_full()
             .flex_none()
+            .h(px(30.0))
             .border_b_1()
             .border_color(colors.border)
-            .bg(colors.panel_background)
+            .bg(colors.surface_background)
             .child(
                 div()
                     .w(px(48.0))
@@ -294,7 +295,7 @@ impl QueryItem {
                             .truncate(),
                     )
             }));
-        let rows = gpui::uniform_list(
+        let rows = gpui_kit::uniform_list(
             "query-result-rows",
             result.rows.len(),
             cx.processor(move |item, visible_range: std::ops::Range<usize>, _, cx| {
@@ -310,11 +311,9 @@ impl QueryItem {
                             h_flex()
                                 .w_full()
                                 .flex_none()
+                                .h(px(28.0))
                                 .border_b_1()
                                 .border_color(colors.border)
-                                .when(row_index % 2 == 1, |element| {
-                                    element.bg(colors.element_background)
-                                })
                                 .when(row_selected, |element| {
                                     element.bg(colors.ghost_element_selected)
                                 })
@@ -394,6 +393,8 @@ impl QueryItem {
             .on_action(cx.listener(Self::select_all_query_results))
             .on_action(cx.listener(Self::clear_query_result_selection))
             .size_full()
+            .bg(colors.editor_background)
+            .font_family(cx.theme().mono_font_family.clone())
             .overflow_x_scroll()
             .child(
                 v_flex()

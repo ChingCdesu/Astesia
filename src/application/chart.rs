@@ -1,10 +1,19 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use serde_json::Value;
 
+#[cfg(test)]
 use crate::db::ColumnInfo;
+use crate::db::StatementResult;
 
-use super::{GridLoadError, GridLoadRequest, GridQuery, GridService, QueryTarget};
+use super::{GridLoadError, GridLoadRequest, GridPage, GridQuery, GridService, QueryTarget};
 use crate::db::TableRef;
 
 const CHART_PAGE_SIZE: u32 = 1_000;
@@ -30,11 +39,9 @@ impl ChartService {
         target: QueryTarget,
         table: TableRef,
         query: GridQuery,
-    ) -> Result<ChartTableData, GridLoadError> {
-        let mut page_number = 1_u32;
-        let mut columns = Vec::new();
-        let mut rows = Vec::new();
-        loop {
+        cancelled: &AtomicBool,
+    ) -> Result<Option<ChartTableData>, GridLoadError> {
+        collect_table_pages(cancelled, |page_number| {
             let request = GridLoadRequest::for_chart_page(
                 target.clone(),
                 table.clone(),
@@ -42,23 +49,48 @@ impl ChartService {
                 page_number,
                 CHART_PAGE_SIZE,
             );
-            let page = self.grids.load(&request).await?;
-            if columns.is_empty() {
-                columns = page
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect();
-            }
-            let row_count = page.rows.len();
-            rows.extend(page.rows);
-            if row_count < CHART_PAGE_SIZE as usize {
-                break;
-            }
-            page_number = page_number.saturating_add(1);
-        }
-        Ok(ChartTableData { columns, rows })
+            async move { self.grids.load(&request).await }
+        })
+        .await
     }
+}
+
+async fn collect_table_pages<F, Fut>(
+    cancelled: &AtomicBool,
+    mut load_page: F,
+) -> Result<Option<ChartTableData>, GridLoadError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<GridPage, GridLoadError>>,
+{
+    let mut page_number = 1_u32;
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        // Shared driver streams must finish before their session can be reused.
+        let page = load_page(page_number).await;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let page = page?;
+        if columns.is_empty() {
+            columns = page
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
+        }
+        let row_count = page.rows.len();
+        rows.extend(page.rows);
+        if row_count < CHART_PAGE_SIZE as usize {
+            break;
+        }
+        page_number = page_number.saturating_add(1);
+    }
+    Ok(Some(ChartTableData { columns, rows }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,27 +132,56 @@ pub(crate) enum ChartDataError {
     ScatterRequiresNumericX,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ChartModel {
     columns: Vec<String>,
     numeric_columns: Vec<bool>,
-    rows: Vec<Vec<Value>>,
+    data: ChartRows,
     chart_type: ChartType,
     x_column: usize,
     y_columns: Vec<usize>,
 }
 
+#[derive(Debug)]
+enum ChartRows {
+    Owned(Vec<Vec<Value>>),
+    Statement(Arc<StatementResult>),
+}
+
+impl ChartRows {
+    fn rows(&self) -> &[Vec<Value>] {
+        match self {
+            Self::Owned(rows) => rows,
+            Self::Statement(result) => &result.rows,
+        }
+    }
+}
+
 impl ChartModel {
-    pub(crate) fn new(columns: &[ColumnInfo], rows: &[Vec<Value>]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(columns: &[ColumnInfo], rows: Vec<Vec<Value>>) -> Self {
         Self::from_names(
             columns.iter().map(|column| column.name.clone()).collect(),
             rows,
         )
     }
 
-    pub(crate) fn from_names(columns: Vec<String>, rows: &[Vec<Value>]) -> Self {
+    pub(crate) fn from_names(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Self {
+        Self::from_data(columns, ChartRows::Owned(rows))
+    }
+
+    pub(crate) fn from_statement(result: Arc<StatementResult>) -> Self {
+        let columns = result
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        Self::from_data(columns, ChartRows::Statement(result))
+    }
+
+    fn from_data(columns: Vec<String>, data: ChartRows) -> Self {
         let numeric_columns = (0..columns.len())
-            .map(|column| column_is_numeric(rows, column))
+            .map(|column| column_is_numeric(data.rows(), column))
             .collect::<Vec<_>>();
         let x_column = numeric_columns
             .iter()
@@ -135,14 +196,26 @@ impl ChartModel {
         Self {
             columns,
             numeric_columns,
-            rows: rows.to_vec(),
+            data,
             chart_type: ChartType::Bar,
             x_column,
             y_columns,
         }
     }
 
-    pub(crate) fn replace_data(&mut self, columns: Vec<String>, rows: &[Vec<Value>]) {
+    pub(crate) fn replace_data(&mut self, columns: Vec<String>, rows: Vec<Vec<Value>>) {
+        self.replace_model(Self::from_names(columns, rows));
+    }
+
+    pub(crate) fn replace_statement(&mut self, result: Arc<StatementResult>) {
+        self.replace_model(Self::from_statement(result));
+    }
+
+    pub(crate) fn release_data(&mut self) {
+        self.data = ChartRows::Owned(Vec::new());
+    }
+
+    fn replace_model(&mut self, mut replacement: Self) {
         let chart_type = self.chart_type;
         let x_name = self.columns.get(self.x_column).cloned();
         let y_names = self
@@ -150,7 +223,6 @@ impl ChartModel {
             .iter()
             .filter_map(|column| self.columns.get(*column).cloned())
             .collect::<Vec<_>>();
-        let mut replacement = Self::from_names(columns, rows);
         replacement.chart_type = chart_type;
         if let Some(x_column) = x_name
             .as_ref()
@@ -226,7 +298,8 @@ impl ChartModel {
     }
 
     pub(crate) fn series(&self) -> Result<Vec<ChartSeries>, ChartDataError> {
-        if self.rows.is_empty() || self.columns.is_empty() {
+        let rows = self.data.rows();
+        if rows.is_empty() || self.columns.is_empty() {
             return Err(ChartDataError::Empty);
         }
         if !self.numeric_columns.iter().any(|numeric| *numeric) {
@@ -239,15 +312,15 @@ impl ChartModel {
             return Err(ChartDataError::ScatterRequiresNumericX);
         }
 
-        let categorical_axis = (!self.numeric_columns[self.x_column])
-            .then(|| categorical_x_axis(&self.rows, self.x_column));
+        let categorical_axis =
+            (!self.numeric_columns[self.x_column]).then(|| categorical_x_axis(rows, self.x_column));
         let series = self
             .y_columns
             .iter()
             .filter_map(|column| {
                 let points = match &categorical_axis {
-                    Some(axis) => categorical_x_points(&self.rows, self.x_column, *column, axis),
-                    None => numeric_x_points(&self.rows, self.x_column, *column),
+                    Some(axis) => categorical_x_points(rows, self.x_column, *column, axis),
+                    None => numeric_x_points(rows, self.x_column, *column),
                 };
                 (!points.is_empty()).then(|| ChartSeries {
                     name: self.columns[*column].clone(),
@@ -364,6 +437,81 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cancelled_chart_does_not_fetch_the_first_page() {
+        let cancelled = AtomicBool::new(true);
+        let mut pages_loaded = 0;
+        let result = collect_table_pages(&cancelled, |_| {
+            pages_loaded += 1;
+            std::future::ready(Err(GridLoadError::Query("unexpected fetch".to_string())))
+        })
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(pages_loaded, 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_the_current_page_and_skips_remaining_pages() {
+        let cancelled = AtomicBool::new(false);
+        let mut pages_loaded = 0;
+        let pages_completed = std::cell::Cell::new(0);
+        let result = collect_table_pages(&cancelled, |page| {
+            pages_loaded += 1;
+            let cancelled = &cancelled;
+            let pages_completed = &pages_completed;
+            async move {
+                if page == 2 {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                tokio::task::yield_now().await;
+                pages_completed.set(pages_completed.get() + 1);
+                Ok(GridPage::new(
+                    vec![column("id")],
+                    vec![vec![Value::from(page)]; CHART_PAGE_SIZE as usize],
+                    None,
+                )
+                .unwrap())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(pages_loaded, 2);
+        assert_eq!(pages_completed.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn active_chart_keeps_every_matching_page_in_order() {
+        let cancelled = AtomicBool::new(false);
+        let mut pages_loaded = 0;
+        let result = collect_table_pages(&cancelled, |page| {
+            pages_loaded += 1;
+            let count = if page < 3 {
+                CHART_PAGE_SIZE as usize
+            } else {
+                1
+            };
+            std::future::ready(Ok(GridPage::new(
+                vec![column("id")],
+                vec![vec![Value::from(page)]; count],
+                None,
+            )
+            .unwrap()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(pages_loaded, 3);
+        assert_eq!(result.rows.len(), 2_001);
+        assert_eq!(result.rows[0][0], Value::from(1));
+        assert_eq!(result.rows[1_000][0], Value::from(2));
+        assert_eq!(result.rows[2_000][0], Value::from(3));
+    }
+
     #[test]
     fn categorical_axes_aggregate_duplicate_labels() {
         let columns = vec![column("region"), column("revenue")];
@@ -372,7 +520,7 @@ mod tests {
             vec![Value::from("West"), Value::from(4)],
             vec![Value::from("East"), Value::from(5)],
         ];
-        let model = ChartModel::new(&columns, &rows);
+        let model = ChartModel::new(&columns, rows);
 
         assert_eq!(model.x_column(), 0);
         assert_eq!(model.y_columns(), &[1]);
@@ -397,7 +545,7 @@ mod tests {
     fn chart_type_switching_preserves_column_mapping() {
         let columns = vec![column("day"), column("orders")];
         let rows = vec![vec![Value::from("Mon"), Value::from(3)]];
-        let mut model = ChartModel::new(&columns, &rows);
+        let mut model = ChartModel::new(&columns, rows);
 
         for chart_type in ChartType::ALL {
             model.set_chart_type(chart_type);
@@ -414,7 +562,7 @@ mod tests {
             vec![Value::from(1), Value::from(4)],
             vec![Value::from(1), Value::from(6)],
         ];
-        let mut model = ChartModel::new(&columns, &rows);
+        let mut model = ChartModel::new(&columns, rows);
         model.set_chart_type(ChartType::Scatter);
 
         assert_eq!(model.series().unwrap()[0].points.len(), 2);
@@ -427,7 +575,7 @@ mod tests {
             vec![Value::from("East"), Value::from(3), Value::Null],
             vec![Value::from("West"), Value::Null, Value::from(7)],
         ];
-        let model = ChartModel::new(&columns, &rows);
+        let model = ChartModel::new(&columns, rows);
 
         let series = model.series().expect("chart series");
         assert_eq!(series[0].points.len(), 2);
@@ -445,11 +593,11 @@ mod tests {
     fn empty_and_non_numeric_results_have_explicit_errors() {
         let columns = vec![column("name")];
         assert_eq!(
-            ChartModel::new(&columns, &[]).series(),
+            ChartModel::new(&columns, vec![]).series(),
             Err(ChartDataError::Empty)
         );
         assert_eq!(
-            ChartModel::new(&columns, &[vec![Value::from("Ada")]]).series(),
+            ChartModel::new(&columns, vec![vec![Value::from("Ada")]]).series(),
             Err(ChartDataError::NoNumericColumns)
         );
     }
@@ -458,9 +606,49 @@ mod tests {
     fn scatter_requires_a_numeric_x_column() {
         let columns = vec![column("name"), column("score")];
         let rows = vec![vec![Value::from("Ada"), Value::from(9)]];
-        let mut model = ChartModel::new(&columns, &rows);
+        let mut model = ChartModel::new(&columns, rows);
         model.set_chart_type(ChartType::Scatter);
 
         assert_eq!(model.series(), Err(ChartDataError::ScatterRequiresNumericX));
+    }
+
+    #[test]
+    fn table_data_moves_into_the_model_without_copying_rows() {
+        let rows = vec![vec![Value::from("East"), Value::from(7)]];
+        let storage = rows.as_ptr();
+        let model = ChartModel::new(&[column("region"), column("revenue")], rows);
+
+        assert_eq!(model.data.rows().as_ptr(), storage);
+        assert_eq!(model.series().unwrap()[0].points[0].y, 7.0);
+    }
+
+    #[test]
+    fn query_data_is_shared_and_released_without_losing_mappings() {
+        let result = Arc::new(StatementResult::from_query_result(
+            "SELECT x, y, label".to_string(),
+            crate::db::QueryResult {
+                columns: vec![column("x"), column("y"), column("label")],
+                rows: vec![vec![Value::from(1), Value::from(7), Value::from("East")]],
+                ..Default::default()
+            },
+        ));
+        let mut model = ChartModel::from_statement(result.clone());
+        model.set_x_column(0);
+        model.set_chart_type(ChartType::Scatter);
+        assert_eq!(Arc::strong_count(&result), 2);
+        assert_eq!(model.data.rows().as_ptr(), result.rows.as_ptr());
+
+        model.release_data();
+        assert_eq!(Arc::strong_count(&result), 1);
+        assert_eq!(model.series(), Err(ChartDataError::Empty));
+
+        model.replace_data(
+            vec!["label".to_string(), "y".to_string(), "x".to_string()],
+            vec![vec![Value::from("West"), Value::from(8), Value::from(2)]],
+        );
+        assert_eq!(model.chart_type(), ChartType::Scatter);
+        assert_eq!(model.x_column(), 2);
+        assert_eq!(model.y_columns(), &[1]);
+        assert_eq!(model.series().unwrap()[0].points[0].x, 2.0);
     }
 }

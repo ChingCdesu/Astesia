@@ -11,9 +11,9 @@ pub(super) struct WorkspaceTabsModel {
 impl WorkspaceTabsModel {
     pub(super) fn new() -> Self {
         Self {
-            tabs: vec![WorkspaceTabId(1)],
+            tabs: Vec::new(),
             active_index: 0,
-            next_id: 1,
+            next_id: 0,
         }
     }
 
@@ -21,8 +21,8 @@ impl WorkspaceTabsModel {
         &self.tabs
     }
 
-    pub(super) fn active(&self) -> WorkspaceTabId {
-        self.tabs[self.active_index]
+    pub(super) fn active(&self) -> Option<WorkspaceTabId> {
+        self.tabs.get(self.active_index).copied()
     }
 
     pub(super) fn add(&mut self) -> WorkspaceTabId {
@@ -46,25 +46,28 @@ impl WorkspaceTabsModel {
     }
 
     pub(super) fn close(&mut self, id: WorkspaceTabId) -> bool {
-        if self.tabs.len() == 1 {
-            return false;
-        }
         let Some(index) = self.tabs.iter().position(|candidate| *candidate == id) else {
             return false;
         };
         self.tabs.remove(index);
         if index < self.active_index || self.active_index == self.tabs.len() {
-            self.active_index -= 1;
+            self.active_index = self.active_index.saturating_sub(1);
         }
         true
     }
 
-    pub(super) fn next(&mut self) -> WorkspaceTabId {
+    pub(super) fn next(&mut self) -> Option<WorkspaceTabId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
         self.active_index = (self.active_index + 1) % self.tabs.len();
         self.active()
     }
 
-    pub(super) fn previous(&mut self) -> WorkspaceTabId {
+    pub(super) fn previous(&mut self) -> Option<WorkspaceTabId> {
+        if self.tabs.is_empty() {
+            return None;
+        }
         self.active_index = (self.active_index + self.tabs.len() - 1) % self.tabs.len();
         self.active()
     }
@@ -77,22 +80,31 @@ mod tests {
     #[test]
     fn tab_navigation_wraps_and_close_keeps_a_valid_active_tab() {
         let mut tabs = WorkspaceTabsModel::new();
-        let first = tabs.active();
+        let first = tabs.add();
         let second = tabs.add();
         let third = tabs.add();
 
-        assert_eq!(tabs.next(), first);
-        assert_eq!(tabs.previous(), third);
+        assert_eq!(tabs.next(), Some(first));
+        assert_eq!(tabs.previous(), Some(third));
         assert!(tabs.close(third));
-        assert_eq!(tabs.active(), second);
+        assert_eq!(tabs.active(), Some(second));
         assert!(tabs.close(first));
-        assert_eq!(tabs.active(), second);
-        assert!(!tabs.close(second));
+        assert_eq!(tabs.active(), Some(second));
+        assert!(tabs.close(second));
+        assert_eq!(tabs.active(), None);
+        assert_eq!(tabs.next(), None);
+        assert_eq!(tabs.previous(), None);
+        let reopened = tabs.add();
+        assert_ne!(reopened, second);
+        assert_eq!(tabs.active(), Some(reopened));
     }
 
     #[test]
     fn activating_an_unknown_tab_does_not_change_selection() {
         let mut tabs = WorkspaceTabsModel::new();
+        assert!(tabs.tabs().is_empty());
+        assert_eq!(tabs.next(), None);
+        assert_eq!(tabs.previous(), None);
         let active = tabs.active();
 
         assert!(!tabs.activate(WorkspaceTabId(999)));

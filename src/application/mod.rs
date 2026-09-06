@@ -1,3 +1,4 @@
+mod atomic_output;
 mod catalog_service;
 mod chart;
 mod connection_service;
@@ -9,8 +10,12 @@ mod engine_smoke_tests;
 mod er_diagram;
 mod export_service;
 mod grid_service;
+mod grid_transaction;
+pub(crate) use grid_transaction::GridTransaction;
 mod grid_session;
 mod grid_value;
+#[cfg(test)]
+mod memory_workloads;
 mod mutation_service;
 mod object_service;
 mod performance_dashboard;
@@ -68,7 +73,9 @@ pub use performance_snapshot::{
     ClickHouseMetrics, MongoMetrics, MySqlMetrics, PerformanceSnapshot, PostgresMetrics,
     RedisMetrics, SqlServerMetrics, SqliteMetrics,
 };
-pub(crate) use profile_editor::{ProfileDraft, ProfileDraftField, ProfileOrigin, ValidatedProfile};
+pub(crate) use profile_editor::{
+    ProfileDraft, ProfileDraftField, ProfileOrigin, ProfileValidationError, ValidatedProfile,
+};
 pub(crate) use query_completion::{
     QueryCompletion, QueryCompletionRequest, QueryCompletionService,
 };
@@ -77,7 +84,8 @@ pub use query_service::QueryService;
 pub use query_workspace::{QueryDocument, QueryExecutionScope, QueryTarget};
 pub(crate) use query_workspace::{QueryExecutionRequest, QueryOperation, QueryWorkspaceState};
 pub(crate) use redis_service::{
-    RedisCommand, RedisKeySnapshot, RedisListSide, RedisMutation, RedisService, RedisValue,
+    RedisCommand, RedisKeySnapshot, RedisListSide, RedisMutation, RedisPageCursor, RedisService,
+    RedisValue,
 };
 pub(crate) use table_structure::{
     TableStructureLoadError, TableStructureSnapshot, TableStructureState, TableStructureStatus,

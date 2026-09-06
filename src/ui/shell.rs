@@ -1,6 +1,5 @@
-use gpui::Entity;
-use serde_json::json;
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::Entity;
 
 use crate::platform::{DesktopPreferences, NativePreferencesStore, ThemePreference, UiLanguage};
 
@@ -47,6 +46,8 @@ impl ShellSettings {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.preferences.language = language;
+        cx.set_global(UiLocale(language));
+        cx.refresh_windows();
         self.persist_and_notify(cx)
     }
 
@@ -69,60 +70,27 @@ impl ShellSettings {
     }
 }
 
-pub(super) fn apply_theme(theme: ThemePreference, cx: &mut App) {
-    let mode = match theme {
-        ThemePreference::Light => "light",
-        ThemePreference::Dark => "dark",
-        ThemePreference::System => "system",
-    };
-    let settings = json!({
-        "telemetry": {
-            "diagnostics": false,
-            "metrics": false
-        },
-        "disable_ai": true,
-        "auto_update": false,
-        "theme": {
-            "mode": mode,
-            "light": "One Light",
-            "dark": "One Dark"
+pub(super) fn apply_theme(preference: ThemePreference, cx: &mut App) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    let mode = match preference {
+        ThemePreference::Light => ThemeMode::Light,
+        ThemePreference::Dark => ThemeMode::Dark,
+        ThemePreference::System => {
+            if matches!(
+                cx.window_appearance(),
+                gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
+            ) {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            }
         }
-    });
-    settings::SettingsStore::update(cx, |store, cx| {
-        store
-            .set_user_settings(&settings.to_string(), cx)
-            .result()
-            .expect("failed to apply isolated editor settings");
-    });
-    refresh_active_theme(theme, cx);
-}
-
-pub(super) fn refresh_active_theme(theme_preference: ThemePreference, cx: &mut App) {
-    let appearance = match theme_preference {
-        ThemePreference::Light => theme::Appearance::Light,
-        ThemePreference::Dark => theme::Appearance::Dark,
-        ThemePreference::System => theme::SystemAppearance::global(cx).0,
     };
-    let theme_name = match appearance {
-        theme::Appearance::Light => "One Light",
-        theme::Appearance::Dark => "One Dark",
-    };
-    let registry = theme::ThemeRegistry::default_global(cx);
-    let active_theme = registry.get(theme_name).unwrap_or_else(|_| {
-        registry
-            .list()
-            .into_iter()
-            .find(|candidate| candidate.appearance == appearance)
-            .and_then(|candidate| registry.get(&candidate.name).ok())
-            .unwrap_or_else(|| cx.theme().clone())
-    });
-    theme::GlobalTheme::update_theme(cx, active_theme);
+    Theme::change(mode, None, cx);
     cx.refresh_windows();
-    debug_assert!(match theme_preference {
-        ThemePreference::Light => cx.theme().appearance() == theme::Appearance::Light,
-        ThemePreference::Dark => cx.theme().appearance() == theme::Appearance::Dark,
-        ThemePreference::System => true,
-    });
+}
+pub(super) fn refresh_active_theme(preference: ThemePreference, cx: &mut App) {
+    apply_theme(preference, cx);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,6 +206,9 @@ pub(super) fn notify_preference_error(
         center.push(NotificationTone::Error, error, cx);
     });
 }
+
+pub(super) struct UiLocale(pub UiLanguage);
+impl gpui_kit::Global for UiLocale {}
 
 #[cfg(test)]
 mod tests {

@@ -5,7 +5,9 @@ use crate::{
 
 use super::{connections::ConnectionManager, QueryTarget};
 
-pub(crate) use crate::db::{RedisKeySnapshot, RedisListSide, RedisMutation, RedisValue};
+pub(crate) use crate::db::{
+    RedisKeySnapshot, RedisListSide, RedisMutation, RedisPageCursor, RedisValue,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RedisCommand {
@@ -50,12 +52,26 @@ impl RedisService {
         target: &QueryTarget,
         key: &str,
     ) -> Result<RedisKeySnapshot, String> {
+        self.key_page(target, key, None).await
+    }
+
+    pub(crate) async fn key_page(
+        &self,
+        target: &QueryTarget,
+        key: &str,
+        cursor: Option<RedisPageCursor>,
+    ) -> Result<RedisKeySnapshot, String> {
         let handle = self.driver(target).await?;
         let driver = handle.lock_active().await?;
-        driver
-            .get_redis_key(&target.database, key)
-            .await
-            .map_err(|error| format!("Could not load Redis key: {error}"))
+        let result = match cursor {
+            None => driver.get_redis_key(&target.database, key).await,
+            Some(_) => {
+                driver
+                    .get_redis_key_page(&target.database, key, cursor)
+                    .await
+            }
+        };
+        result.map_err(|error| format!("Could not load Redis key: {error}"))
     }
 
     pub(crate) async fn mutate(

@@ -128,6 +128,21 @@ pub(super) enum WorkspaceItemKey {
     McpService,
 }
 
+impl WorkspaceItemKey {
+    pub(super) fn target(&self) -> Option<&QueryTarget> {
+        match self {
+            Self::TableStructure(target, _)
+            | Self::DataGrid(target, _)
+            | Self::Document(target, _)
+            | Self::Redis(target, _)
+            | Self::Performance(target)
+            | Self::ErDiagram(target)
+            | Self::ObjectDefinition { target, .. } => Some(target),
+            Self::Query(_) | Self::TaskCenter | Self::McpService => None,
+        }
+    }
+}
+
 impl WorkspaceItemBehavior for Entity<QueryItem> {
     fn query(&self) -> Option<&Entity<QueryItem>> {
         Some(self)

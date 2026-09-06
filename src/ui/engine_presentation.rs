@@ -1,4 +1,4 @@
-use gpui::{rgb, Rgba};
+use gpui_kit::{rgb, Rgba};
 
 use crate::connection_repository::SharedConnectionProfile;
 use crate::db::DbType;

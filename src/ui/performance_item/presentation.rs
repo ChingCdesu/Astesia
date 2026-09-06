@@ -1,4 +1,4 @@
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
 
 use crate::{
     application::PerformanceSnapshot,
@@ -73,7 +73,7 @@ pub(super) fn render_refresh_error(error: String, cx: &mut Context<PerformanceIt
         .border_color(status.error_border)
         .bg(status.error_background)
         .child(
-            Icon::new(IconName::Warning)
+            Icon::new(IconName::TriangleAlert)
                 .size(IconSize::XSmall)
                 .color(Color::Custom(status.error)),
         )
@@ -91,7 +91,7 @@ fn render_snapshot(
     language: crate::platform::UiLanguage,
     cx: &mut Context<PerformanceItem>,
 ) -> AnyElement {
-    let colors = cx.theme().colors().clone();
+    let colors = cx.theme().colors();
     v_flex()
         .id("performance-sections")
         .flex_1()
@@ -121,7 +121,7 @@ fn render_snapshot(
                                 .child(
                                     Label::new(section.title)
                                         .size(LabelSize::XSmall)
-                                        .weight(gpui::FontWeight::SEMIBOLD),
+                                        .weight(gpui_kit::FontWeight::SEMIBOLD),
                                 ),
                         )
                         .child(h_flex().items_stretch().flex_wrap().children(
@@ -145,7 +145,7 @@ fn render_snapshot(
                                         .child(
                                             Label::new(metric.value)
                                                 .size(LabelSize::Small)
-                                                .weight(gpui::FontWeight::SEMIBOLD)
+                                                .weight(gpui_kit::FontWeight::SEMIBOLD)
                                                 .truncate(),
                                         )
                                         .child(

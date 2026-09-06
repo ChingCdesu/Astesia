@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::mcp_sync_server::McpConnectionsSnapshot;
+use crate::{mcp_sync_server::McpConnectionsSnapshot, tasks::BackgroundTask};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
@@ -12,7 +12,7 @@ pub enum UiEvent {
         message: String,
     },
     TaskCompleted {
-        id: String,
+        task: Arc<BackgroundTask>,
     },
     McpConnectionsChanged(McpConnectionsSnapshot),
 }
@@ -60,15 +60,20 @@ mod tests {
         let bus = UiEventBus::new();
         let mut events = bus.subscribe();
 
-        bus.emit(UiEvent::TaskCompleted {
+        let task = Arc::new(BackgroundTask {
             id: "backup-1".to_string(),
+            name: "Backup".to_string(),
+            status: crate::tasks::TaskStatus::Completed,
+            progress: 1.0,
+            message: "Done".to_string(),
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
         });
+        bus.emit(UiEvent::TaskCompleted { task: task.clone() });
 
         assert_eq!(
             events.recv().await.expect("event"),
-            UiEvent::TaskCompleted {
-                id: "backup-1".to_string(),
-            }
+            UiEvent::TaskCompleted { task }
         );
     }
 }

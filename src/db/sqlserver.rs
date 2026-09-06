@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use futures::TryStreamExt;
 use std::time::Instant;
 use tiberius::{AuthMethod, Client, ColumnData, Config};
 use tokio::net::TcpStream;
@@ -9,7 +10,8 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use super::{
     bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo,
     ConstraintKind, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo,
-    QueryResult, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+    QueryResult, QueryRowCollector, QueryRowSink, SqlDialect, StatementResult, TableInfo, TableRef,
+    TriggerInfo, UserInfo, ViewInfo,
 };
 
 /// Decode a SQL Server cell into a JSON value by matching on the tiberius
@@ -60,57 +62,65 @@ async fn run_mssql_query(
 ) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
     let stream = client.query(sql, &[]).await?;
-    let rows = stream.into_first_result().await?;
-    Ok(mssql_result(rows, start.elapsed().as_millis() as u64))
+    let mut collector = QueryRowCollector::new(None);
+    let result = consume_mssql_stream(stream, &mut collector, start).await?;
+    Ok(collector.finish(result))
 }
 
-async fn run_mssql_batch(
+pub(super) async fn run_mssql_batch(
     client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
     sql: &str,
 ) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
     let stream = client.simple_query(sql).await?;
-    let rows = stream.into_first_result().await?;
-    Ok(mssql_result(rows, start.elapsed().as_millis() as u64))
+    let mut collector = QueryRowCollector::new(None);
+    let result = consume_mssql_stream(stream, &mut collector, start).await?;
+    Ok(collector.finish(result))
 }
 
-fn mssql_result(rows: Vec<tiberius::Row>, elapsed: u64) -> QueryResult {
-    if rows.is_empty() {
-        return QueryResult {
-            execution_time_ms: elapsed,
-            ..Default::default()
+pub(super) async fn consume_mssql_stream(
+    mut stream: tiberius::QueryStream<'_>,
+    sink: &mut dyn QueryRowSink,
+    start: Instant,
+) -> anyhow::Result<QueryResult> {
+    let mut columns = Vec::new();
+    while let Some(item) = stream.try_next().await? {
+        let tiberius::QueryItem::Row(row) = item else {
+            continue;
         };
+        if row.result_index() != 0 {
+            continue;
+        }
+        if columns.is_empty() {
+            columns = row
+                .columns()
+                .iter()
+                .map(|column| ColumnInfo {
+                    name: column.name().to_string(),
+                    data_type: format!("{:?}", column.column_type()),
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    comment: None,
+                })
+                .collect();
+            sink.columns(&columns).await;
+        }
+        if sink.wants_rows() {
+            sink.row(
+                row.cells()
+                    .enumerate()
+                    .map(|(index, (_, cell))| mssql_cell_to_json(&row, index, cell))
+                    .collect(),
+            )
+            .await;
+        }
     }
-
-    let columns: Vec<ColumnInfo> = rows[0]
-        .columns()
-        .iter()
-        .map(|c| ColumnInfo {
-            name: c.name().to_string(),
-            data_type: format!("{:?}", c.column_type()),
-            nullable: true,
-            is_primary_key: false,
-            default_value: None,
-            comment: None,
-        })
-        .collect();
-
-    let data_rows: Vec<Vec<serde_json::Value>> = rows
-        .iter()
-        .map(|row| {
-            row.cells()
-                .enumerate()
-                .map(|(i, (_, cell))| mssql_cell_to_json(row, i, cell))
-                .collect()
-        })
-        .collect();
-
-    QueryResult {
+    Ok(QueryResult {
         columns,
-        rows: data_rows,
-        affected_rows: 0,
-        execution_time_ms: elapsed,
-    }
+        execution_time_ms: start.elapsed().as_millis() as u64,
+        ..Default::default()
+    })
 }
 
 fn use_database_sql(database: &str) -> anyhow::Result<String> {
@@ -405,6 +415,23 @@ impl DatabaseDriver for SqlServerDriver {
         run_mssql_batch(&mut client, sql).await
     }
 
+    async fn execute_query_stream(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut dyn QueryRowSink,
+    ) -> anyhow::Result<QueryResult> {
+        let mutex = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let mut client = mutex.lock().await;
+        run_mssql_query(&mut client, &use_database_sql(database)?).await?;
+        let start = Instant::now();
+        let stream = client.simple_query(sql).await?;
+        consume_mssql_stream(stream, sink, start).await
+    }
+
     async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
         let mutex = self
             .client
@@ -455,6 +482,30 @@ impl DatabaseDriver for SqlServerDriver {
             }
         }
         Ok(results)
+    }
+
+    async fn begin_transaction(
+        &self,
+        database: &str,
+        isolation: super::TransactionIsolation,
+    ) -> anyhow::Result<Box<dyn super::DatabaseTransaction>> {
+        anyhow::ensure!(
+            self.db_type().transaction_isolations().contains(&isolation),
+            "Unsupported transaction isolation"
+        );
+        let mut connection = self.create_client().await?;
+        run_mssql_batch(&mut connection, &use_database_sql(database)?).await?;
+        if let Some(level) = isolation.sql() {
+            run_mssql_batch(
+                &mut connection,
+                &format!("SET TRANSACTION ISOLATION LEVEL {level}"),
+            )
+            .await?;
+        }
+        run_mssql_batch(&mut connection, "BEGIN TRANSACTION").await?;
+        Ok(Box::new(super::transaction::OwnedTransaction(
+            super::transaction::TransactionConnection::SqlServer(Box::new(connection)),
+        )))
     }
 
     async fn execute_mutation_batch(

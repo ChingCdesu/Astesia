@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use gpui::{ClickEvent, Entity, FocusHandle, Subscription, Task};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{ClickEvent, Entity, FocusHandle, Subscription, Task};
 
 mod presentation;
 
@@ -85,7 +85,7 @@ impl PerformanceItem {
         cx.notify();
         let service = self.application.performance().clone();
         let target = request.target().clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move { service.metrics(&target).await });
+        let load = crate::ui::runtime::spawn(cx, async move { service.metrics(&target).await });
         cx.spawn(async move |item, cx| {
             let result = match load.await {
                 Ok(result) => result,
@@ -166,7 +166,7 @@ impl PerformanceItem {
         available: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         h_flex()
             .h(px(40.0))
             .flex_none()
@@ -184,7 +184,7 @@ impl PerformanceItem {
             .child(
                 Label::new(text(language, "性能监控", "Performance Monitor"))
                     .size(LabelSize::Small)
-                    .weight(gpui::FontWeight::SEMIBOLD),
+                    .weight(gpui_kit::FontWeight::SEMIBOLD),
             )
             .child(
                 Label::new(format!("{} · {}", target.connection_name, target.database))
@@ -230,7 +230,7 @@ impl PerformanceItem {
 
 impl Render for PerformanceItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let target = self.state.target().clone();
         let snapshot = self.state.snapshot().cloned();

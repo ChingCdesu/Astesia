@@ -1,13 +1,17 @@
+mod input;
+#[cfg(test)]
+mod tests;
 mod view;
 
 use std::sync::Arc;
 
-use gpui::{
+use crate::ui::components::prelude::*;
+use gpui_kit::component::input::InputEvent as ErasedEditorEvent;
+use gpui_kit::{
     actions, App, Context, DismissEvent, Entity, EventEmitter, ScrollHandle, Subscription, Window,
 };
-use ui_input::{ErasedEditorEvent, InputField};
+use input::InputField;
 use uuid::Uuid;
-use zed_ui::prelude::*;
 
 use crate::application::{
     Application, ConnectionOutcome, ProfileDraft, ProfileDraftField, ProfileOrigin,
@@ -24,35 +28,35 @@ actions!(astesia, [SubmitConnectionProfile]);
 
 pub(super) fn bind_connection_profile_form_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "cmd-enter",
             SubmitConnectionProfile,
             Some("ConnectionProfileForm"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "ctrl-enter",
             SubmitConnectionProfile,
             Some("ConnectionProfileForm"),
         ),
-        gpui::KeyBinding::new("escape", menu::Cancel, Some("ConnectionProfileForm")),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new("escape", menu::Cancel, Some("ConnectionProfileForm")),
+        gpui_kit::KeyBinding::new(
             "tab",
             menu::SelectNext,
-            Some("ConnectionProfileForm > Editor"),
+            Some("ConnectionProfileForm > Input"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "shift-tab",
             menu::SelectPrevious,
-            Some("ConnectionProfileForm > Editor"),
+            Some("ConnectionProfileForm > Input"),
         ),
-        gpui::KeyBinding::new("tab", menu::SelectNext, Some("ConnectionProfileForm")),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new("tab", menu::SelectNext, Some("ConnectionProfileForm")),
+        gpui_kit::KeyBinding::new(
             "shift-tab",
             menu::SelectPrevious,
             Some("ConnectionProfileForm"),
         ),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("ConnectionProfileFormControl")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileFormControl")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("ConnectionProfileFormControl")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileFormControl")),
     ]);
 }
 
@@ -82,6 +86,7 @@ pub(super) struct ConnectionProfileSaved {
 
 #[derive(Clone, Copy)]
 enum NoticeKind {
+    Info,
     Success,
     Warning,
     Error,
@@ -197,27 +202,23 @@ impl ConnectionProfileForm {
                 cx,
                 text(language, "请输入连接名称", "Enter a connection name"),
                 text(language, "连接名称", "Connection Name"),
-                1,
+                8,
             ),
-            endpoint: input(
+            endpoint: code_input(
                 window,
                 cx,
-                text(
-                    language,
-                    "主机地址或 SQLite 文件路径",
-                    "Host address or SQLite file path",
-                ),
-                text(language, "主机 / 文件路径", "Host / File Path"),
+                endpoint_placeholder(db_type, language),
+                endpoint_label(db_type, language),
                 9,
             ),
-            port: input(
+            port: code_input(
                 window,
                 cx,
                 text(language, "数据库端口", "Database port"),
                 text(language, "端口", "Port"),
                 10,
             ),
-            username: input(
+            username: code_input(
                 window,
                 cx,
                 text(language, "请输入用户名", "Enter a username"),
@@ -225,7 +226,7 @@ impl ConnectionProfileForm {
                 11,
             ),
             password: cx.new(|cx| {
-                InputField::new(
+                InputField::password(
                     window,
                     cx,
                     if values.has_credential {
@@ -241,12 +242,11 @@ impl ConnectionProfileForm {
                             "Enter a password (optional)",
                         )
                     },
+                    12,
                 )
                 .label(text(language, "密码", "Password"))
-                .tab_index(12)
-                .masked(true)
             }),
-            database: input(
+            database: code_input(
                 window,
                 cx,
                 text(
@@ -254,14 +254,14 @@ impl ConnectionProfileForm {
                     "请输入数据库名（可选）",
                     "Enter a database (optional)",
                 ),
-                text(language, "数据库", "Database"),
+                text(language, "数据库 · 可选", "Database · Optional"),
                 13,
             ),
             group_name: input(
                 window,
                 cx,
                 text(language, "输入分组名称（可选）", "Enter a group (optional)"),
-                text(language, "分组", "Group"),
+                text(language, "分组 · 可选", "Group · Optional"),
                 14,
             ),
             tags: input(
@@ -272,15 +272,15 @@ impl ConnectionProfileForm {
                     "以逗号分隔标签（最多 20 个）",
                     "Comma-separated tags (up to 20)",
                 ),
-                text(language, "标签", "Tags"),
-                15,
+                text(language, "标签 · 可选", "Tags · Optional"),
+                16,
             ),
-            color: input(
+            color: code_input(
                 window,
                 cx,
                 text(language, "#RRGGBB（可选）", "#RRGGBB (optional)"),
                 text(language, "颜色", "Color"),
-                16,
+                15,
             ),
         };
 
@@ -297,16 +297,9 @@ impl ConnectionProfileForm {
             .all()
             .into_iter()
             .map(|field| {
-                let editor = field.read(cx).editor().clone();
-                let form = cx.weak_entity();
-                editor.subscribe(
-                    Box::new(move |event, _, cx| {
-                        form.update(cx, |form, cx| form.handle_input_event(&event, cx))
-                            .ok();
-                    }),
-                    window,
-                    cx,
-                )
+                cx.subscribe(field, |form, _, event: &ErasedEditorEvent, cx| {
+                    form.handle_input_event(event, cx);
+                })
             })
             .collect();
 
@@ -325,7 +318,7 @@ impl ConnectionProfileForm {
     }
 
     fn handle_input_event(&mut self, event: &ErasedEditorEvent, cx: &mut Context<Self>) {
-        if !matches!(event, ErasedEditorEvent::BufferEdited) {
+        if !matches!(event, ErasedEditorEvent::Change) {
             return;
         }
         if !self.operation.is_busy() {
@@ -337,7 +330,7 @@ impl ConnectionProfileForm {
 
     fn set_inputs_read_only(&self, read_only: bool, cx: &mut Context<Self>) {
         for field in self.fields.all() {
-            field.read(cx).editor().clone().set_read_only(read_only, cx);
+            field.update(cx, |field, cx| field.set_read_only(read_only, cx));
         }
     }
 
@@ -347,6 +340,10 @@ impl ConnectionProfileForm {
         }
 
         self.db_type = db_type;
+        self.fields.endpoint.update(cx, |field, cx| {
+            field.set_label(endpoint_label(db_type, self.language), cx);
+            field.set_placeholder_text(endpoint_placeholder(db_type, self.language), window, cx);
+        });
         let spec = db_type.profile_spec();
         set_text(
             &self.fields.port,
@@ -400,7 +397,7 @@ impl ConnectionProfileForm {
         self.dismiss(cx);
     }
 
-    fn cancel_click(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_click(&mut self, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(cx);
     }
 
@@ -436,7 +433,7 @@ impl ConnectionProfileForm {
         window.focus_prev(cx);
     }
 
-    fn test_click(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn test_click(&mut self, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.test(cx);
     }
 
@@ -444,7 +441,7 @@ impl ConnectionProfileForm {
         self.test(cx);
     }
 
-    fn save_click(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn save_click(&mut self, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.save(cx);
     }
 
@@ -470,7 +467,7 @@ impl ConnectionProfileForm {
         self.set_inputs_read_only(true, cx);
         self.test_notice = None;
         let application = self.application.clone();
-        let task = gpui_tokio::Tokio::spawn(cx, async move {
+        let task = crate::ui::runtime::spawn(cx, async move {
             application
                 .connections()
                 .test_connection(request.config().clone())
@@ -482,11 +479,14 @@ impl ConnectionProfileForm {
                 form.operation = FormOperation::Idle;
                 form.set_inputs_read_only(false, cx);
                 form.test_notice = Some(match result {
-                    Ok(Ok(ConnectionOutcome::Succeeded)) => {
-                        FormNotice::success(text(form.language, "连接成功", "Connection succeeded"))
+                    Ok(Ok(ConnectionOutcome::Succeeded)) => FormNotice::success(
+                        text(form.language, "连接成功", "Connection succeeded"),
+                        form.language,
+                    ),
+                    Ok(Ok(ConnectionOutcome::Rejected(message))) => {
+                        FormNotice::test_failed(message, form.language)
                     }
-                    Ok(Ok(ConnectionOutcome::Rejected(message))) => FormNotice::error(message),
-                    Ok(Err(error)) => FormNotice::error(error),
+                    Ok(Err(error)) => FormNotice::test_failed(error, form.language),
                     Err(error) => FormNotice::error(format!(
                         "{}: {error}",
                         text(
@@ -522,7 +522,7 @@ impl ConnectionProfileForm {
         self.set_inputs_read_only(true, cx);
         self.save_notice = None;
         let application = self.application.clone();
-        let task = gpui_tokio::Tokio::spawn(cx, async move {
+        let task = crate::ui::runtime::spawn(cx, async move {
             application.connections().save_profile(request).await
         });
         cx.spawn(async move |form, cx| {
@@ -585,14 +585,14 @@ impl ConnectionProfileForm {
             Ok(request) => Some(request),
             Err(errors) => {
                 for error in errors {
-                    let field = match error.field {
+                    let field = match error.field() {
                         ProfileDraftField::Name => &self.fields.name,
                         ProfileDraftField::Endpoint => &self.fields.endpoint,
                         ProfileDraftField::Port => &self.fields.port,
                         ProfileDraftField::Tags => &self.fields.tags,
                         ProfileDraftField::Color => &self.fields.color,
                     };
-                    set_error(field, error.message, cx);
+                    set_error(field, validation_message(error, self.language), cx);
                 }
                 None
             }
@@ -604,11 +604,18 @@ impl EventEmitter<ConnectionProfileSaved> for ConnectionProfileForm {}
 impl EventEmitter<DismissEvent> for ConnectionProfileForm {}
 
 impl FormNotice {
-    fn success(message: impl Into<String>) -> Self {
+    fn success(message: impl Into<String>, language: UiLanguage) -> Self {
         Self {
             kind: NoticeKind::Success,
             message: message.into(),
-            detail: None,
+            detail: Some(
+                text(
+                    language,
+                    "连接配置尚未保存。",
+                    "The connection profile has not been saved.",
+                )
+                .to_string(),
+            ),
         }
     }
 
@@ -628,16 +635,33 @@ impl FormNotice {
         }
     }
 
-    fn repository_error(error: ConnectionRepositoryError, language: UiLanguage) -> Self {
+    fn test_failed(detail: impl Into<String>, language: UiLanguage) -> Self {
         Self {
             kind: NoticeKind::Error,
-            message: error.message,
-            detail: Some(format!(
-                "{} {}{}",
+            message: text(language, "连接测试失败", "Connection test failed").to_string(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn repository_error(error: ConnectionRepositoryError, language: UiLanguage) -> Self {
+        let detail = if language == UiLanguage::English
+            && error.code
+                == crate::connection_repository::ConnectionRepositoryErrorCode::StorageBusy
+        {
+            "Connection storage is busy. Wait for the other operation to finish, then retry.\nError code: storage_busy".to_string()
+        } else {
+            format!(
+                "{}\n{} {}{}",
+                error.message,
                 error.remediation,
                 text(language, "错误码：", "Error code: "),
                 error.code.as_str()
-            )),
+            )
+        };
+        Self {
+            kind: NoticeKind::Error,
+            message: text(language, "连接保存失败", "Could not save the connection").to_string(),
+            detail: Some(detail),
         }
     }
 }
@@ -651,9 +675,80 @@ fn input(
 ) -> Entity<InputField> {
     cx.new(|cx| {
         InputField::new(window, cx, placeholder)
-            .label(label)
             .tab_index(tab_index)
+            .label(label)
     })
+}
+
+fn code_input(
+    window: &mut Window,
+    cx: &mut Context<ConnectionProfileForm>,
+    placeholder: &str,
+    label: &str,
+    tab_index: isize,
+) -> Entity<InputField> {
+    cx.new(|cx| {
+        InputField::new(window, cx, placeholder)
+            .tab_index(tab_index)
+            .label(label)
+            .code_value()
+    })
+}
+
+fn endpoint_label(db_type: DbType, language: UiLanguage) -> &'static str {
+    if db_type.profile_spec().is_file() {
+        text(language, "数据库文件路径", "Database File Path")
+    } else {
+        text(language, "主机", "Host")
+    }
+}
+
+fn endpoint_placeholder(db_type: DbType, language: UiLanguage) -> &'static str {
+    if db_type.profile_spec().is_file() {
+        text(
+            language,
+            "请输入 SQLite 文件路径",
+            "Enter a SQLite file path",
+        )
+    } else {
+        text(language, "请输入主机地址", "Enter a host address")
+    }
+}
+
+fn validation_message(
+    error: crate::application::ProfileValidationError,
+    language: UiLanguage,
+) -> &'static str {
+    use crate::application::ProfileValidationError::*;
+    match error {
+        NameRequired => text(language, "连接名称不能为空", "Connection name is required"),
+        FilePathRequired => text(
+            language,
+            "SQLite 文件路径不能为空",
+            "SQLite file path is required",
+        ),
+        HostRequired => text(language, "主机地址不能为空", "Host address is required"),
+        InvalidPort => text(
+            language,
+            "端口必须是 1–65535 的整数",
+            "Port must be an integer from 1 to 65535",
+        ),
+        InvalidColor => text(
+            language,
+            "颜色必须使用 #RRGGBB 格式",
+            "Use #RRGGBB format for the color",
+        ),
+        InvalidTag => text(
+            language,
+            "每个标签最多 64 个字符，且不能包含控制字符",
+            "Each tag allows up to 64 characters and no control characters",
+        ),
+        TooManyTags => text(
+            language,
+            "每个连接最多可设置 20 个标签",
+            "Use no more than 20 tags per connection",
+        ),
+    }
 }
 
 fn set_text(

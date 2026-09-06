@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use gpui::{ClickEvent, Entity, FocusHandle, Subscription};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{ClickEvent, Entity, FocusHandle, Subscription};
 
 use crate::application::{
     Application, QueryTarget, TableStructureLoadError, TableStructureSnapshot, TableStructureState,
@@ -93,7 +93,7 @@ impl TableStructureItem {
         let connection_id = self.state.target().connection_id.clone();
         let database = self.state.target().database.clone();
         let table = self.state.table().clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move {
+        let load = crate::ui::runtime::spawn(cx, async move {
             application
                 .catalog()
                 .table_structure(&connection_id, &database, &table)
@@ -157,7 +157,7 @@ impl TableStructureItem {
         let grid_width = px(1044.0);
         let header = h_flex()
             .id("table-structure-column-header")
-            .role(gpui::Role::Row)
+            .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
             .border_b_1()
@@ -207,7 +207,7 @@ impl TableStructureItem {
             ));
         let rows = div()
             .id("table-structure-column-rows")
-            .role(gpui::Role::RowGroup)
+            .role(gpui_kit::Role::RowGroup)
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -215,7 +215,7 @@ impl TableStructureItem {
                 v_flex().children(columns.iter().enumerate().map(|(index, column)| {
                     h_flex()
                         .id(("table-structure-column-row", index))
-                        .role(gpui::Role::Row)
+                        .role(gpui_kit::Role::Row)
                         .w_full()
                         .flex_none()
                         .border_b_1()
@@ -275,7 +275,7 @@ impl TableStructureItem {
 
         div()
             .id("table-structure-columns")
-            .role(gpui::Role::Table)
+            .role(gpui_kit::Role::Table)
             .aria_label(text(language, "表列", "Table columns"))
             .size_full()
             .overflow_x_scroll()
@@ -307,7 +307,7 @@ impl TableStructureItem {
         let grid_width = px(884.0);
         let header = h_flex()
             .id("table-structure-index-header")
-            .role(gpui::Role::Row)
+            .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
             .border_b_1()
@@ -345,7 +345,7 @@ impl TableStructureItem {
             ));
         let rows = div()
             .id("table-structure-index-rows")
-            .role(gpui::Role::RowGroup)
+            .role(gpui_kit::Role::RowGroup)
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -353,7 +353,7 @@ impl TableStructureItem {
                 v_flex().children(indexes.iter().enumerate().map(|(index, item)| {
                     h_flex()
                         .id(("table-structure-index-row", index))
-                        .role(gpui::Role::Row)
+                        .role(gpui_kit::Role::Row)
                         .w_full()
                         .flex_none()
                         .border_b_1()
@@ -397,7 +397,7 @@ impl TableStructureItem {
 
         div()
             .id("table-structure-indexes")
-            .role(gpui::Role::Table)
+            .role(gpui_kit::Role::Table)
             .aria_label(text(language, "表索引", "Table indexes"))
             .size_full()
             .overflow_x_scroll()
@@ -431,7 +431,7 @@ impl TableStructureItem {
         }
         let header = h_flex()
             .id("table-structure-constraint-header")
-            .role(gpui::Role::Row)
+            .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
             .border_b_1()
@@ -463,11 +463,11 @@ impl TableStructureItem {
             ));
         let rows = v_flex()
             .id("table-structure-constraint-rows")
-            .role(gpui::Role::RowGroup)
+            .role(gpui_kit::Role::RowGroup)
             .children(constraints.iter().enumerate().map(|(index, item)| {
                 h_flex()
                     .id(("table-structure-constraint-row", index))
-                    .role(gpui::Role::Row)
+                    .role(gpui_kit::Role::Row)
                     .w_full()
                     .flex_none()
                     .border_b_1()
@@ -510,7 +510,7 @@ impl TableStructureItem {
             }));
         div()
             .id("table-structure-constraints")
-            .role(gpui::Role::Table)
+            .role(gpui_kit::Role::Table)
             .aria_label(text(language, "表约束", "Table constraints"))
             .size_full()
             .overflow_scroll()
@@ -537,7 +537,7 @@ impl TableStructureItem {
         }
         let header = h_flex()
             .id("table-structure-foreign-key-header")
-            .role(gpui::Role::Row)
+            .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
             .border_b_1()
@@ -575,11 +575,11 @@ impl TableStructureItem {
             ));
         let rows = v_flex()
             .id("table-structure-foreign-key-rows")
-            .role(gpui::Role::RowGroup)
+            .role(gpui_kit::Role::RowGroup)
             .children(foreign_keys.iter().enumerate().map(|(index, item)| {
                 h_flex()
                     .id(("table-structure-foreign-key-row", index))
-                    .role(gpui::Role::Row)
+                    .role(gpui_kit::Role::Row)
                     .w_full()
                     .flex_none()
                     .border_b_1()
@@ -620,7 +620,7 @@ impl TableStructureItem {
             }));
         div()
             .id("table-structure-foreign-keys")
-            .role(gpui::Role::Table)
+            .role(gpui_kit::Role::Table)
             .aria_label(text(language, "表外键", "Table foreign keys"))
             .size_full()
             .overflow_scroll()
@@ -658,7 +658,7 @@ impl TableStructureItem {
 
 impl Render for TableStructureItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let status = self.state.status();
         let loading = matches!(status, TableStructureStatus::Loading);
@@ -776,7 +776,7 @@ impl Render for TableStructureItem {
                                 div().max_w(px(360.0)).child(
                                     Label::new(label)
                                         .size(LabelSize::Small)
-                                        .weight(gpui::FontWeight::MEDIUM)
+                                        .weight(gpui_kit::FontWeight::MEDIUM)
                                         .truncate(),
                                 ),
                             )
@@ -895,7 +895,7 @@ fn structure_cell(
 ) -> AnyElement {
     div()
         .id(id)
-        .role(gpui::Role::Cell)
+        .role(gpui_kit::Role::Cell)
         .w(px(width))
         .flex_none()
         .px_2()
@@ -913,7 +913,7 @@ fn structure_header_cell(
 ) -> AnyElement {
     div()
         .id(id)
-        .role(gpui::Role::ColumnHeader)
+        .role(gpui_kit::Role::ColumnHeader)
         .w(px(width))
         .flex_none()
         .px_2()

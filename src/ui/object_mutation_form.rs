@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use editor::Editor;
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Window};
-use ui_input::InputField;
-use workspace::{DismissDecision, ModalView};
-use zed_ui::{
-    prelude::*, Checkbox, ElevationIndex, Modal, ModalFooter, ModalHeader, Section, ToggleState,
-};
+use crate::ui::components::{prelude::*, Modal, ModalFooter, ModalHeader};
+use crate::ui::input_field::InputField;
+use crate::ui::modal::{DismissDecision, ModalView};
+use crate::ui::text_editor::Editor;
+use gpui_kit::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Window};
 
 use crate::application::{
     object_creation_policy, trigger_event_supported, trigger_timing_supported,
@@ -164,7 +162,12 @@ impl ObjectMutationForm {
         ))
     }
 
-    fn add_column(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_column(
+        &mut self,
+        _: &gpui_kit::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.operation == FormOperation::Executing {
             return;
         }
@@ -191,22 +194,22 @@ impl ObjectMutationForm {
         }
     }
 
-    fn set_column_nullable(&mut self, id: u64, state: ToggleState, cx: &mut Context<Self>) {
+    fn set_column_nullable(&mut self, id: u64, state: bool, cx: &mut Context<Self>) {
         let Some(fields) = self.table_fields_mut() else {
             return;
         };
         if let Some(column) = fields.columns.iter_mut().find(|column| column.id == id) {
-            column.nullable = state == ToggleState::Selected;
+            column.nullable = state;
             cx.notify();
         }
     }
 
-    fn set_column_primary_key(&mut self, id: u64, state: ToggleState, cx: &mut Context<Self>) {
+    fn set_column_primary_key(&mut self, id: u64, state: bool, cx: &mut Context<Self>) {
         let Some(fields) = self.table_fields_mut() else {
             return;
         };
         if let Some(column) = fields.columns.iter_mut().find(|column| column.id == id) {
-            column.primary_key = state == ToggleState::Selected;
+            column.primary_key = state;
             if column.primary_key {
                 column.nullable = false;
             }
@@ -333,7 +336,7 @@ impl ObjectMutationForm {
         let target = self.state.target().clone();
         let kind = self.state.kind();
         let identity = mutation.display_identity();
-        let operation = gpui_tokio::Tokio::spawn(cx, {
+        let operation = crate::ui::runtime::spawn(cx, {
             let target = target.clone();
             async move { application.objects().execute(&target, &mutation).await }
         });
@@ -364,7 +367,7 @@ impl ObjectMutationForm {
         .detach();
     }
 
-    fn cancel(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.operation == FormOperation::Idle {
             cx.emit(DismissEvent);
         }
@@ -424,10 +427,11 @@ impl ObjectMutationForm {
                     .child(div().flex_1().min_w_0().child(column.data_type.clone()))
                     .child(div().w(rems(10.0)).child(column.default_value.clone()))
                     .child(
-                        Checkbox::new(
-                            ("column-primary-key", id as usize),
-                            toggle_state(column.primary_key),
-                        )
+                        gpui_kit::component::checkbox::Checkbox::new((
+                            "column-primary-key",
+                            id as usize,
+                        ))
+                        .checked(column.primary_key)
                         .label("PK")
                         .disabled(self.operation == FormOperation::Executing)
                         .on_click(move |state, _, cx| {
@@ -437,10 +441,11 @@ impl ObjectMutationForm {
                         }),
                     )
                     .child(
-                        Checkbox::new(
-                            ("column-nullable", id as usize),
-                            toggle_state(column.nullable),
-                        )
+                        gpui_kit::component::checkbox::Checkbox::new((
+                            "column-nullable",
+                            id as usize,
+                        ))
+                        .checked(column.nullable)
                         .label("NULL")
                         .disabled(self.operation == FormOperation::Executing || column.primary_key)
                         .on_click(move |state, _, cx| {
@@ -622,7 +627,11 @@ impl Render for ObjectMutationForm {
         div()
             .tab_group()
             .track_focus(&self.focus_handle(cx))
-            .elevation_3(cx)
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius_lg)
+            .shadow_lg()
             .occlude()
             .w(rems(46.0))
             .max_h(rems(46.0))
@@ -635,7 +644,9 @@ impl Render for ObjectMutationForm {
                             .show_dismiss_button(!busy),
                     )
                     .section(
-                        Section::new()
+                        v_flex()
+                            .p_3()
+                            .gap_3()
                             .child(v_flex().gap_3().children(fields))
                             .when_some(self.error.clone(), |section, error| {
                                 section.child(
@@ -664,7 +675,6 @@ impl Render for ObjectMutationForm {
                                         text(self.language_setting, "执行", "Execute"),
                                     )
                                     .style(ButtonStyle::Filled)
-                                    .layer(ElevationIndex::ModalSurface)
                                     .loading(busy)
                                     .disabled(busy)
                                     .on_click(
@@ -827,14 +837,6 @@ fn rename_default_name(original_name: &str) -> &str {
         .rsplit('.')
         .next()
         .unwrap_or(original_name)
-}
-
-fn toggle_state(selected: bool) -> ToggleState {
-    if selected {
-        ToggleState::Selected
-    } else {
-        ToggleState::Unselected
-    }
 }
 
 pub(super) fn kind_label(kind: DatabaseObjectKind, language: UiLanguage) -> &'static str {

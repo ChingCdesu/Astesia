@@ -1,35 +1,35 @@
 # Interface quality
 
 Load for visual implementation, material visual change, or full design review. Read
-[zed-design.md](zed-design.md) first. The pinned Zed UI source owns visual primitives; `DESIGN.md`
+[gpui-kit-design.md](gpui-kit-design.md) first. The locked GPUI Kit source owns visual primitives; `DESIGN.md`
 owns only Astesia-specific composition and semantic extensions.
 
 Astesia is a desktop-native GPUI application for macOS, Windows, and Linux. Browser DOM detectors,
 web-responsive conventions, and iOS or Android platform references do not validate it. Use current
-GPUI/Zed component APIs, native desktop behavior, repository acceptance evidence, and the running
+GPUI Kit component APIs, native desktop behavior, repository acceptance evidence, and the running
 application.
 
-## Zed-native operator standard
+## Native operator standard
 
 - Keep the query, data, and system state dominant. Brand expression lives in precise typography,
   spacing, engine identity, and interaction detail rather than decorative chrome.
-- Use the Zed UI component that owns the interaction before composing raw GPUI elements. Configure
+- Use the GPUI Kit component that owns the interaction before composing raw GPUI elements. Configure
   its semantic style, size, density, elevation, tooltip, and accessibility APIs instead of copying
   its rendered values.
-- Use active-theme Zed surface, element, border, text, and status roles. Engine colors identify
+- Use active-theme Kit surface, element, border, text, and status roles. Engine colors identify
   database types; status colors accompany words or icons and do not carry meaning alone.
-- Keep persistent panes on Zed's Background, Surface, or EditorSurface layers. Use ElevatedSurface
-  and ModalSurface for the temporary content those roles name.
+- Keep persistent panes on the active theme background and surface roles. Use popover roles
+  and dialog roles for the temporary content those roles name.
 - Preserve the sidebar, tab strip, work area, and status hierarchy. Hiding the sidebar may increase
   space; the active tab and runtime context remain visible.
 - Keep dense operator controls scannable and keyboard reachable. Pointer affordances supplement,
   rather than replace, focus and shortcuts.
 - Preserve platform-native window, prompt, file, clipboard, and text-input behavior. Astesia owns
-  the workspace around the embedded Zed editor.
+  the workspace around the GPUI Kit editor.
 
 ## Content stress
 
-Inspect both languages and Zed Compact, Default, and Comfortable density with long profile names,
+Inspect both languages and compact and wide layouts with long profile names,
 qualified object names, endpoints, values, errors, and task details. Growing content scrolls or
 truncates within its owning region; it does not resize the application hierarchy or hide the primary
 action. The supported window floor is 960 by 600; also inspect a representative wide window.

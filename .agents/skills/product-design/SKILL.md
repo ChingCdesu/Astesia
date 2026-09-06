@@ -55,7 +55,7 @@ Resolve conflicts in this order:
 1. The user's explicit goal and constraints.
 2. Verified product behavior, user evidence, and system truth.
 3. `PRODUCT.md`, `CONTEXT.md`, applicable ADRs, and milestone acceptance contracts.
-4. The pinned Zed UI component, theme, spacing, typography, elevation, interaction, and
+4. The locked GPUI Kit component, theme, spacing, typography, interaction, and
    accessibility APIs for visual primitives.
 5. `DESIGN.md` for Astesia-specific composition and semantic extensions, plus accepted rules in
    [references/rules.md](references/rules.md).
@@ -77,8 +77,8 @@ surface or a different mode.
 
 Read the applicable `AGENTS.md` chain and the source that owns the behavior. For material changes,
 read `PRODUCT.md`, `CONTEXT.md`, and the relevant acceptance rows. For visual or interaction work,
-also read [references/zed-design.md](references/zed-design.md), `DESIGN.md`, the incumbent GPUI
-implementation, and the pinned Zed source for every component being changed. Read the GPUI ADR when
+also read [references/gpui-kit-design.md](references/gpui-kit-design.md), `DESIGN.md`, the incumbent GPUI
+implementation, and the locked GPUI Kit source for every component being changed. Read the GPUI ADR when
 changing the native runtime, editor integration, platform access, or Legacy Shell boundary.
 
 Completion: every claimed product constraint has a current canonical source.
@@ -105,7 +105,7 @@ where the product can actually reach them.
 | Need | Load |
 | --- | --- |
 | Product, flow, default, scope, or consequence | [product-judgment.md](references/product-judgment.md) |
-| Visual implementation, material visual change, or full review | [zed-design.md](references/zed-design.md) + [interface-quality.md](references/interface-quality.md) |
+| Visual implementation, material visual change, or full review | [gpui-kit-design.md](references/gpui-kit-design.md) + [interface-quality.md](references/interface-quality.md) |
 | Labels, errors, confirmations, accessible names, or terminology | [copy.md](references/copy.md) |
 | Loading, empty, stale, permission, partial, cancellation, or destructive behavior | [resilience.md](references/resilience.md) |
 | Established cross-surface decisions | [rules.md](references/rules.md) |
@@ -128,8 +128,8 @@ security, performance, or support claims.
 - Verify Simplified Chinese and English when copy, layout, or accessible labels change.
 - Verify keyboard order, focus ownership, shortcuts, and IME behavior when interaction changes.
 - Verify light, dark, compact, and wide layouts when the affected surface renders in them.
-- Confirm that changed primitives use the pinned Zed component and semantic theme APIs, or document
-  why no suitable Zed primitive exists.
+- Confirm that changed primitives use GPUI Kit components and semantic theme APIs, or document
+  why no suitable Kit primitive exists.
 - Manually exercise affected engine capabilities and unsupported-action absence when relevant.
 - For visible changes, inspect the native application in one batched pass, fix the observed defects
   together, then perform at most one confirmation pass.

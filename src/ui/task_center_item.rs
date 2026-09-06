@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use gpui::{ClickEvent, Entity, FocusHandle, Subscription, Task};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{ClickEvent, Entity, FocusHandle, Subscription, Task};
 
 use crate::{
     application::Application,
     platform::UiEvent,
-    tasks::{BackgroundTask, TaskStatus},
+    tasks::{BackgroundTask, TaskStatus, MAX_COMPLETED_TASKS},
 };
 
 use super::{localization::text, shell::ShellSettings};
@@ -16,6 +16,7 @@ pub(super) struct TaskCenterItem {
     tasks: Vec<BackgroundTask>,
     error: Option<String>,
     loading: bool,
+    refresh_pending: bool,
     load_generation: u64,
     focus_handle: FocusHandle,
     settings: Entity<ShellSettings>,
@@ -48,6 +49,7 @@ impl TaskCenterItem {
             tasks: Vec::new(),
             error: None,
             loading: false,
+            refresh_pending: false,
             load_generation: 0,
             focus_handle: cx.focus_handle(),
             settings,
@@ -80,12 +82,16 @@ impl TaskCenterItem {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            self.refresh_pending = true;
+            return;
+        }
         self.load_generation = self.load_generation.saturating_add(1);
         let generation = self.load_generation;
         self.loading = true;
         cx.notify();
         let tasks = self.application.tasks().clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move { tasks.list_tasks().await });
+        let load = crate::ui::runtime::spawn(cx, async move { tasks.list_tasks().await });
         cx.spawn(async move |item, cx| {
             let result = load.await.map_err(|error| error.to_string());
             item.update(cx, |item, cx| {
@@ -101,6 +107,9 @@ impl TaskCenterItem {
                     Err(error) => item.error = Some(error),
                 }
                 cx.notify();
+                if std::mem::take(&mut item.refresh_pending) {
+                    item.refresh(cx);
+                }
             })
             .ok();
         })
@@ -109,7 +118,7 @@ impl TaskCenterItem {
 
     fn cancel(&mut self, id: String, cx: &mut Context<Self>) {
         let manager = self.application.tasks().clone();
-        let cancel = gpui_tokio::Tokio::spawn(cx, async move { manager.cancel_task(&id).await });
+        let cancel = crate::ui::runtime::spawn(cx, async move { manager.cancel_task(&id).await });
         cx.spawn(async move |item, cx| {
             let result = match cancel.await {
                 Ok(result) => result,
@@ -129,7 +138,7 @@ impl TaskCenterItem {
 
 impl Render for TaskCenterItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let content = if self.tasks.is_empty() && !self.loading {
             v_flex()
@@ -176,7 +185,7 @@ impl Render for TaskCenterItem {
                                 .child(
                                     Label::new(task.name.clone())
                                         .size(LabelSize::Small)
-                                        .weight(gpui::FontWeight::MEDIUM)
+                                        .weight(gpui_kit::FontWeight::MEDIUM)
                                         .truncate()
                                         .flex_1(),
                                 )
@@ -239,7 +248,7 @@ impl Render for TaskCenterItem {
                     .child(
                         Label::new(text(language, "后台任务", "Background Tasks"))
                             .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::MEDIUM)
+                            .weight(gpui_kit::FontWeight::MEDIUM)
                             .flex_1(),
                     )
                     .child(
@@ -266,6 +275,14 @@ impl Render for TaskCenterItem {
                         ),
                 )
             })
+            .child(
+                h_flex().px_3().py_1().child(
+                    Label::new(match language {
+                        crate::platform::UiLanguage::Chinese => format!("显示本次运行的活动任务和最近 {MAX_COMPLETED_TASKS} 个已结束任务"),
+                        crate::platform::UiLanguage::English => format!("Active tasks and the latest {MAX_COMPLETED_TASKS} finished tasks from this run"),
+                    }).size(LabelSize::XSmall).color(Color::Muted).truncate(),
+                ),
+            )
             .child(content)
     }
 }

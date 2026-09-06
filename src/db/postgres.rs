@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use futures::TryStreamExt;
 use sqlx::postgres::types::{
     Oid, PgBox, PgCircle, PgInterval, PgLSeg, PgLine, PgMoney, PgPath, PgPoint, PgPolygon, PgRange,
     PgTimeTz,
@@ -14,7 +15,8 @@ use std::time::Instant;
 use super::{
     bytes_to_hex, f32_to_json, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo,
     ConstraintKind, DatabaseDriver, DbType, ForeignKeyInfo, FunctionInfo, IndexInfo, ProcedureInfo,
-    QueryResult, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, UserInfo, ViewInfo,
+    QueryResult, QueryRowCollector, QueryRowSink, SqlDialect, StatementResult, TableInfo, TableRef,
+    TriggerInfo, UserInfo, ViewInfo,
 };
 
 /// Render a `BitVec` (BIT / VARBIT) as a string of '0'/'1' characters.
@@ -231,61 +233,65 @@ fn pg_array_to_json(row: &PgRow, i: usize, elem: &str) -> serde_json::Value {
     }
 }
 
-async fn run_pg_query(conn: &mut PgConnection, sql: &str) -> anyhow::Result<QueryResult> {
+pub(super) async fn run_pg_query(
+    conn: &mut PgConnection,
+    sql: &str,
+) -> anyhow::Result<QueryResult> {
+    let mut collector = QueryRowCollector::new(None);
+    let result = stream_pg_query(conn, sql, &mut collector).await?;
+    Ok(collector.finish(result))
+}
+
+pub(super) async fn stream_pg_query(
+    conn: &mut PgConnection,
+    sql: &str,
+    sink: &mut dyn QueryRowSink,
+) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
     let trimmed = sql.trim().to_uppercase();
-
     if trimmed.starts_with("SELECT")
         || trimmed.starts_with("SHOW")
         || trimmed.starts_with("EXPLAIN")
         || trimmed.starts_with("WITH ")
         || trimmed.starts_with("VALUES")
     {
-        let rows: Vec<PgRow> = sqlx::query(sql).fetch_all(&mut *conn).await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        if rows.is_empty() {
-            return Ok(QueryResult {
-                execution_time_ms: elapsed,
-                ..Default::default()
-            });
+        let mut stream = sqlx::query(sql).fetch(&mut *conn);
+        let mut columns = Vec::new();
+        let mut type_names: Vec<String> = Vec::new();
+        while let Some(row) = stream.try_next().await? {
+            if columns.is_empty() {
+                columns = row
+                    .columns()
+                    .iter()
+                    .map(|column| ColumnInfo {
+                        name: column.name().to_string(),
+                        data_type: column.type_info().name().to_string(),
+                        nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                        comment: None,
+                    })
+                    .collect();
+                type_names = row
+                    .columns()
+                    .iter()
+                    .map(|column| column.type_info().name().to_ascii_uppercase())
+                    .collect();
+                sink.columns(&columns).await;
+            }
+            if sink.wants_rows() {
+                sink.row(
+                    (0..type_names.len())
+                        .map(|i| pg_value_to_json(&row, i, &type_names[i]))
+                        .collect(),
+                )
+                .await;
+            }
         }
-
-        let columns: Vec<ColumnInfo> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| ColumnInfo {
-                name: c.name().to_string(),
-                data_type: c.type_info().name().to_string(),
-                nullable: true,
-                is_primary_key: false,
-                default_value: None,
-                comment: None,
-            })
-            .collect();
-
-        // Pre-compute each column's (upper-cased) PostgreSQL type name once;
-        // value decoding then dispatches on it for every row.
-        let type_names: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.type_info().name().to_ascii_uppercase())
-            .collect();
-
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|row| {
-                (0..type_names.len())
-                    .map(|i| pg_value_to_json(row, i, &type_names[i]))
-                    .collect()
-            })
-            .collect();
-
         Ok(QueryResult {
             columns,
-            rows: data_rows,
-            affected_rows: 0,
-            execution_time_ms: elapsed,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            ..Default::default()
         })
     } else {
         let result = sqlx::query(sql).execute(&mut *conn).await?;
@@ -570,6 +576,17 @@ impl DatabaseDriver for PostgresDriver {
         run_pg_query(&mut conn, sql).await
     }
 
+    async fn execute_query_stream(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut dyn QueryRowSink,
+    ) -> anyhow::Result<QueryResult> {
+        let pool = self.pool_for_db(database).await?;
+        let mut conn = pool.acquire().await?;
+        stream_pg_query(&mut conn, sql, sink).await
+    }
+
     async fn execute_statements(
         &self,
         database: &str,
@@ -590,6 +607,29 @@ impl DatabaseDriver for PostgresDriver {
             }
         }
         Ok(results)
+    }
+
+    async fn begin_transaction(
+        &self,
+        database: &str,
+        isolation: super::TransactionIsolation,
+    ) -> anyhow::Result<Box<dyn super::DatabaseTransaction>> {
+        anyhow::ensure!(
+            self.db_type().transaction_isolations().contains(&isolation),
+            "Unsupported transaction isolation"
+        );
+        let mut connection = self.pool_for_db(database).await?.acquire().await?.detach();
+        run_pg_query(&mut connection, "BEGIN").await?;
+        if let Some(level) = isolation.sql() {
+            run_pg_query(
+                &mut connection,
+                &format!("SET TRANSACTION ISOLATION LEVEL {level}"),
+            )
+            .await?;
+        }
+        Ok(Box::new(super::transaction::OwnedTransaction(
+            super::transaction::TransactionConnection::Postgres(connection),
+        )))
     }
 
     async fn execute_mutation_batch(

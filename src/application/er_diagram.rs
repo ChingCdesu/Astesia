@@ -179,10 +179,11 @@ pub(crate) struct ErBounds {
 }
 
 impl ErLayout {
+    pub(crate) const HEADER_HEIGHT: f32 = 34.0;
+    pub(crate) const ROW_HEIGHT: f32 = 28.0;
+
     pub(crate) fn build(schema: &ErSchema) -> Self {
-        const NODE_WIDTH: f32 = 240.0;
-        const HEADER_HEIGHT: f32 = 38.0;
-        const ROW_HEIGHT: f32 = 20.0;
+        const NODE_WIDTH: f32 = 260.0;
         const RANK_GAP: f32 = 140.0;
         const NODE_GAP: f32 = 48.0;
         const MARGIN: f32 = 48.0;
@@ -229,9 +230,13 @@ impl ErLayout {
             let x = MARGIN + rank as f32 * (NODE_WIDTH + RANK_GAP);
             let mut y = MARGIN;
             for table in tables {
-                let node_height = HEADER_HEIGHT
-                    + schema.tables[*table].columns.len().min(12) as f32 * ROW_HEIGHT
-                    + 8.0;
+                let node_height = Self::HEADER_HEIGHT
+                    + schema.tables[*table].columns.len().min(12) as f32 * Self::ROW_HEIGHT
+                    + if schema.tables[*table].columns.len() > 12 {
+                        Self::ROW_HEIGHT
+                    } else {
+                        0.0
+                    };
                 nodes.push(ErLayoutNode {
                     table: *table,
                     position: ErPoint { x, y },

@@ -136,7 +136,7 @@ impl AstesiaMcp {
         }
         let row_limit = Self::bounded_row_limit(args.max_rows);
         match self
-            .execute_sql(&query.connection_id, &query.database, &query.sql)
+            .execute_sql_limited(&query.connection_id, &query.database, &query.sql, row_limit)
             .await
         {
             Ok(result) => Self::success(json!({

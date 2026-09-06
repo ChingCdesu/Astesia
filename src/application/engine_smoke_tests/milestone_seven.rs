@@ -81,7 +81,7 @@ async fn smoke_charts(application: &Application, target: &crate::application::Qu
         )
         .await
         .unwrap_or_else(|error| panic!("{engine:?} chart query failed: {error}"));
-    let mut model = ChartModel::new(&result.columns, &result.rows);
+    let mut model = ChartModel::new(&result.columns, result.rows);
     for chart_type in [
         ChartType::Bar,
         ChartType::Line,
@@ -162,9 +162,11 @@ async fn smoke_charts(application: &Application, target: &crate::application::Qu
                 filter: None,
                 sort: vec![],
             },
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .await
-        .unwrap_or_else(|error| panic!("{engine:?} chart table load failed: {error}"));
+        .unwrap_or_else(|error| panic!("{engine:?} chart table load failed: {error}"))
+        .expect("chart table load was not cancelled");
     assert_eq!(table_data.rows.len(), 3);
     assert!(table_data.columns.iter().any(|column| column == "revenue"));
     let _ = application
