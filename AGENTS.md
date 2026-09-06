@@ -2,27 +2,35 @@
 
 ## Project Structure & Module Organization
 
-The React 19/TypeScript frontend lives in `src/`: feature UI belongs in `components/<Feature>/index.tsx`, shared primitives in `components/ui/`, Zustand state in `stores/`, and common code in `types/`, `lib/`, `i18n/`, and `styles/`. The Rust backend is in `src-tauri/src/`; keep IPC handlers in `commands/`, database adapters in `db/`, MCP tools in `mcp/`, and background work in `tasks/`. Static assets are under `public/`; Tauri permissions and configuration are under `src-tauri/capabilities/` and `tauri.conf.json`.
+The repository root is the Cargo package, and the native Rust application lives in `src/`:
+UI-independent workflows belong in
+`application/`, platform adapters in `platform/`, GPUI views in `ui/`, database adapters in `db/`,
+MCP tools in `mcp/`, and background work in `tasks/`. The standalone MCP entry point is
+`src/bin/astesia-mcp.rs`. Internal package definitions live in `packaging/`, with build
+entry points under `scripts/`.
 
 ## Build, Test, and Development Commands
 
-- `pnpm install` installs locked frontend and Tauri CLI dependencies.
-- `pnpm tauri:dev` starts the full desktop app with Vite hot reload.
-- `pnpm dev` runs the browser frontend only.
-- `pnpm lint` checks TypeScript and React rules with ESLint.
-- `pnpm build` type-checks TypeScript and creates the frontend production bundle.
-- `pnpm mcp:prepare:debug` builds and stages the target-named debug MCP sidecar.
-- `cargo test --manifest-path src-tauri/Cargo.toml` compiles and tests the Rust backend.
-- `pnpm mcp:build` compiles and stages the release MCP sidecar.
-- `pnpm tauri:build` produces platform installers; use it for release validation.
+- `cargo run --locked --bin astesia` starts the native app.
+- `cargo test --locked` compiles and tests the application.
+- `cargo clippy --locked --all-targets` checks Rust lints.
+- `cargo fmt -- --check` checks Rust formatting.
+- `scripts/package-macos.sh <target>` builds an internal macOS application archive.
+- `scripts/package-linux.sh x86_64-unknown-linux-gnu` builds the internal Linux archive.
+- `scripts/package-windows.ps1 -Target x86_64-pc-windows-msvc` builds the Windows archive.
 
 ## Coding Style & Naming Conventions
 
-Use two-space indentation in TypeScript/TSX and standard four-space `rustfmt` output in Rust. Follow surrounding TypeScript style (single quotes and semicolons) and run ESLint before committing. Name React components and types in `PascalCase`, functions and variables in `camelCase`, Zustand files as `camelCaseStore.ts`, and UI primitives in lowercase kebab-case. Rust modules and functions use `snake_case`; structs and enums use `PascalCase`. Preserve intentional snake_case fields shared across Tauri IPC, such as `db_type`.
+Use standard four-space `rustfmt` output. Rust modules and functions use `snake_case`; structs and
+enums use `PascalCase`. Keep Application Core types independent of GPUI, and preserve intentional
+serialized snake_case fields such as `db_type`.
 
 ## Testing Guidelines
 
-No frontend test suite or coverage threshold is configured. Changes should pass `pnpm lint`, `pnpm build`, and the Rust tests above. Manually exercise affected database engines through `pnpm tauri:dev`, including failure paths. Name future frontend tests `*.test.ts(x)`; place Rust unit tests in `#[cfg(test)]` modules.
+Changes should pass the Rust tests, Clippy, formatting, and `git diff --check`. Manually exercise
+affected database engines through the native application, including failure paths. Put Rust unit
+tests in `#[cfg(test)]` modules; keep environment-dependent engine checks ignored by default and
+record explicit runs in the relevant acceptance document.
 
 ## Commit & Pull Request Guidelines
 
@@ -30,4 +38,27 @@ Recent history favors `type: concise summary`, especially `feat:`, `fix:`, and `
 
 ## Security & Configuration
 
-Never commit database credentials, signing keys, or real connection strings. Use disposable test accounts. Treat `src-tauri/capabilities/default.json` and security settings in `tauri.conf.json` as sensitive; explain and minimize any permission expansion.
+Never commit database credentials, signing keys, or real connection strings. Use disposable test
+accounts. Keep MCP Sidecar secrets in environment variables rather than process arguments, and
+explain any expansion of native platform access.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+
+### Product design
+
+When shaping, implementing, reviewing, copy-editing, or hardening user-facing Astesia behavior,
+load `.agents/skills/product-design/SKILL.md`. This includes GPUI surfaces and backend changes that
+alter a visible outcome. Skip it for backend-only work with no shipped UI effect, tests-only
+changes, telemetry, packaging, and marketing.

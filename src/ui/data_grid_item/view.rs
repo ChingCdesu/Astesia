@@ -1,0 +1,640 @@
+use super::*;
+
+impl Render for DataGridItem {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let language = self.settings.read(cx).language();
+        let status = self.state.status();
+        let page = self.state.page();
+        let loading = matches!(status, GridSessionStatus::Loading);
+        let active_loading = loading || (self.showing_chart && self.chart_loading);
+        let saving = matches!(status, GridSessionStatus::Saving) || self.transaction_busy;
+        let transaction_closed = self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.is_closed());
+        let unavailable = matches!(status, GridSessionStatus::Unavailable { .. })
+            || transaction_closed
+            || self.save_recovery_sql.is_some();
+        let has_changes = self.state.has_changes();
+        let has_unsaved_changes = self.has_unsaved_changes();
+        let navigation_locked = self.has_local_changes() || saving;
+        let query = self.state.query();
+        let filter_active = query.filter.is_some();
+        let export_in_progress = self.export_in_progress;
+        let can_previous =
+            page.is_some() && query.page > 1 && !loading && !unavailable && !navigation_locked;
+        let can_next = page.is_some_and(|page| can_advance(page, query.page, query.page_size))
+            && !loading
+            && !unavailable
+            && !navigation_locked;
+        let editing_error = self
+            .editing
+            .as_ref()
+            .and_then(|editing| editing.error.clone());
+        let editing_null = self
+            .editing
+            .as_ref()
+            .and_then(|editing| editing.column.nullable.then_some(editing.null_requested));
+        let editing_default = self.editing.as_ref().and_then(|editing| {
+            matches!(editing.target, CellEditorTarget::Draft { .. })
+                .then_some(editing.initial_value.is_none() && !editing.modified)
+        });
+        let expanded_editor = self
+            .editing
+            .as_ref()
+            .filter(|editing| editing.expanded)
+            .map(|editing| {
+                (
+                    editing.editor.clone(),
+                    editing.column.name.clone(),
+                    editing.column.data_type.clone(),
+                    editing.null_requested,
+                )
+            });
+        let notice = match status {
+            GridSessionStatus::Failed { error } => {
+                Some((Color::Error, IconName::TriangleAlert, error.to_string()))
+            }
+            GridSessionStatus::Unavailable { reason } => {
+                Some((Color::Warning, IconName::TriangleAlert, reason.to_string()))
+            }
+            GridSessionStatus::SaveFailed { error } => {
+                Some((Color::Error, IconName::TriangleAlert, error.to_string()))
+            }
+            _ => editing_error
+                .map(|error| (Color::Error, IconName::TriangleAlert, error))
+                .or_else(|| {
+                    self.chart_error
+                        .clone()
+                        .map(|error| (Color::Error, IconName::TriangleAlert, error))
+                })
+                .or_else(|| self.operation_notice.clone().map(GridNotice::presentation)),
+        };
+        let editability = self.state.editability();
+        let editable = matches!(editability, GridEditability::Editable { .. });
+        let editability_warning = !editable || unavailable;
+        let editability_message = page.map(|_| {
+            if unavailable {
+                text(
+                    language,
+                    "只读 · 连接会话已失效",
+                    "Read-only · Connection session is unavailable",
+                )
+                .to_string()
+            } else {
+                editability_label(editability, language)
+            }
+        });
+        let changes_message =
+            has_changes.then(|| change_summary_message(self.state.change_summary(), language));
+        let show_edit_controls = editable || has_unsaved_changes;
+        let show_change_bar = page.is_some() && !self.showing_chart;
+        let show_edit_bar = show_change_bar && (has_unsaved_changes || !editable);
+        let show_filter_bar = page.is_some() || filter_active;
+        let content = if self.showing_chart {
+            self.chart
+                .as_ref()
+                .map(|chart| chart.clone().into_any_element())
+                .unwrap_or_else(|| centered_grid_state(status, language))
+        } else {
+            match page {
+                Some(page) => self.render_grid(page, cx),
+                None => centered_grid_state(status, language),
+            }
+        };
+        let can_chart = page.is_some_and(|page| !page.columns.is_empty())
+            && !has_unsaved_changes
+            && !unavailable;
+        let grid_label = page.map_or_else(
+            || {
+                format!(
+                    "{}: {}",
+                    self.state.table(),
+                    text(language, "表数据", "table data")
+                )
+            },
+            |page| {
+                format!(
+                    "{}: {}. {} {}, {} {}.",
+                    self.state.table(),
+                    text(language, "表数据", "table data"),
+                    page.rows.len(),
+                    text(language, "行", "rows"),
+                    page.columns.len(),
+                    text(language, "列", "columns")
+                )
+            },
+        );
+
+        v_flex()
+            .key_context("DataGridItem")
+            .on_action(cx.listener(Self::save_grid_changes))
+            .on_action(cx.listener(Self::undo_grid_changes))
+            .on_action(cx.listener(Self::discard_grid_changes))
+            .on_action(cx.listener(Self::apply_grid_filter))
+            .on_action(cx.listener(Self::copy_grid_selection))
+            .on_action(cx.listener(Self::paste_grid_selection))
+            .size_full()
+            .overflow_hidden()
+            .bg(colors.editor_background)
+            .child(
+                h_flex()
+                    .h(DynamicSpacing::Base32.rems(cx))
+                    .flex_none()
+                    .gap(DynamicSpacing::Base04.rems(cx))
+                    .px(DynamicSpacing::Base08.rems(cx))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface_background)
+                    .child(
+                        grid_toolbar_action(
+                            "refresh-data-grid",
+                            if active_loading {
+                                IconName::LoaderCircle
+                            } else {
+                                IconName::RotateCw
+                            },
+                            text(language, "刷新", "Refresh"),
+                        )
+                        .disabled(active_loading || unavailable || navigation_locked)
+                        .on_click(cx.listener(Self::refresh)),
+                    )
+                    .when(editable, |bar| {
+                        bar.child(
+                            grid_toolbar_action(
+                                "add-data-grid-row",
+                                IconName::Plus,
+                                text(language, "新增行", "Add Row"),
+                            )
+                            .disabled(saving || unavailable)
+                            .on_click(cx.listener(Self::add_row_click)),
+                        )
+                    })
+                    .child(
+                        grid_toolbar_action(
+                            "export-grid-data",
+                            if export_in_progress {
+                                IconName::LoaderCircle
+                            } else {
+                                IconName::Download
+                            },
+                            text(language, "导出", "Export"),
+                        )
+                        .disabled(export_in_progress || page.is_none())
+                        .on_click(cx.listener(Self::export_data)),
+                    )
+                    .child(
+                        crate::ui::components::ButtonLike::new("toggle-data-grid-chart", "")
+                            .size(ButtonSize::Compact)
+                            .aria_label(text(language, "图表", "Chart"))
+                            .tooltip(Tooltip::text(text(language, "图表", "Chart")))
+                            .child(Icon::from_path("icons/astesia/chart.svg").size(IconSize::Small))
+                            .toggle_state(self.showing_chart)
+                            .disabled(!can_chart)
+                            .on_click(cx.listener(Self::toggle_chart)),
+                    )
+                    .when(
+                        !self
+                            .state
+                            .target()
+                            .db_type
+                            .transaction_isolations()
+                            .is_empty(),
+                        |bar| bar.child(self.transaction_menu(cx)),
+                    )
+                    .when(self.manual_transaction, |bar| {
+                        bar.child(
+                            Button::new(
+                                "commit-grid-transaction",
+                                text(language, "提交", "Commit"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .disabled(
+                                saving
+                                    || loading
+                                    || unavailable
+                                    || has_changes
+                                    || self
+                                        .editing
+                                        .as_ref()
+                                        .is_some_and(|editing| editing.modified),
+                            )
+                            .on_click(cx.listener(Self::commit_transaction)),
+                        )
+                        .child(
+                            Button::new(
+                                "rollback-grid-transaction",
+                                text(language, "回滚", "Roll Back"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .disabled(saving || loading || unavailable)
+                            .on_click(cx.listener(Self::rollback_transaction)),
+                        )
+                    })
+                    .when(
+                        (transaction_closed && has_unsaved_changes)
+                            || self.save_recovery_sql.is_some(),
+                        |bar| {
+                            bar.child(
+                                Button::new(
+                                    "copy-grid-transaction-recovery",
+                                    text(language, "复制恢复 SQL", "Copy Recovery SQL"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(Self::copy_transaction_recovery)),
+                            )
+                        },
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(format!(
+                            "{} / {} / {}",
+                            self.state.target().connection_name,
+                            self.state.target().database,
+                            self.state.table()
+                        ))
+                        .size(LabelSize::XSmall)
+                        .truncate(),
+                    ),
+            )
+            .when(show_filter_bar, |element| {
+                element.child(grid_filter_bar(&self.filter_editor, &self.sort_editor, cx))
+            })
+            .children(notice.map(|(color, icon, message)| {
+                h_flex()
+                    .min_h(px(30.0))
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface_background)
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+                    .child(
+                        Label::new(message)
+                            .size(LabelSize::XSmall)
+                            .color(color)
+                            .line_clamp(2),
+                    )
+            }))
+            .when(show_edit_bar, |element| {
+                element.child(
+                    h_flex()
+                        .h(px(32.0))
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .bg(colors.surface_background)
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_2()
+                                .overflow_hidden()
+                                .children(editability_message.map(|message| {
+                                    Label::new(message)
+                                        .size(LabelSize::XSmall)
+                                        .color(if editability_warning {
+                                            Color::Warning
+                                        } else {
+                                            Color::Muted
+                                        })
+                                        .truncate()
+                                }))
+                                .children(changes_message.map(|message| {
+                                    Label::new(message)
+                                        .size(LabelSize::XSmall)
+                                        .weight(FontWeight::MEDIUM)
+                                        .truncate()
+                                })),
+                        )
+                        .when(show_edit_controls, |bar| {
+                            bar.children(editing_default.map(|selected| {
+                                Button::new(
+                                    "use-default-for-data-grid-cell",
+                                    text(language, "使用 DEFAULT", "Use DEFAULT"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .toggle_state(selected)
+                                .on_click(cx.listener(Self::use_default_for_draft_click))
+                            }))
+                            .children(editing_null.map(|selected| {
+                                Button::new(
+                                    "set-data-grid-cell-null",
+                                    text(language, "设为 NULL", "Set NULL"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .toggle_state(selected)
+                                .on_click(cx.listener(Self::toggle_cell_null))
+                            }))
+                            .child(
+                                Button::new(
+                                    "undo-data-grid-change",
+                                    text(language, "撤销", "Undo"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .disabled(!self.state.can_undo() || saving)
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &UndoGridChanges,
+                                    cx,
+                                ))
+                                .on_click(cx.listener(Self::undo_changes_click)),
+                            )
+                            .child(
+                                Button::new(
+                                    "discard-data-grid-changes",
+                                    text(language, "放弃", "Discard"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .disabled(!has_unsaved_changes || saving || transaction_closed)
+                                .on_click(cx.listener(Self::discard_changes_click)),
+                            )
+                            .child(
+                                Button::new(
+                                    "save-data-grid-changes",
+                                    text(language, "保存更改", "Save Changes"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .style(ButtonStyle::Filled)
+                                .loading(saving)
+                                .disabled(!self.has_local_changes() || saving || unavailable)
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &SaveGridChanges,
+                                    cx,
+                                ))
+                                .on_click(cx.listener(Self::save_changes_click)),
+                            )
+                        }),
+                )
+            })
+            .children(
+                expanded_editor.map(|(editor, column, data_type, null_requested)| {
+                    v_flex()
+                        .h(px(190.0))
+                        .flex_none()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .bg(colors.editor_background)
+                        .child(
+                            h_flex()
+                                .h(px(32.0))
+                                .flex_none()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child(
+                                    Label::new(column)
+                                        .size(LabelSize::Small)
+                                        .weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new(data_type)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .children(null_requested.then(|| {
+                                    Label::new("NULL")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning)
+                                }))
+                                .child(div().flex_1())
+                                .child(
+                                    Label::new(text(language, "⌘↵ 暂存", "⌘↵ Stage"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Button::new(
+                                        "cancel-expanded-grid-editor",
+                                        text(language, "取消", "Cancel"),
+                                    )
+                                    .size(ButtonSize::Compact)
+                                    .on_click(cx.listener(Self::cancel_cell_edit_click)),
+                                )
+                                .child(
+                                    Button::new(
+                                        "stage-expanded-grid-editor",
+                                        text(language, "暂存值", "Stage Value"),
+                                    )
+                                    .size(ButtonSize::Compact)
+                                    .style(ButtonStyle::Filled)
+                                    .on_click(cx.listener(Self::commit_cell_edit_click)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .key_context("DataGridLongEditor")
+                                .flex_1()
+                                .min_h_0()
+                                .p_2()
+                                .when(null_requested, |element| element.opacity(0.45))
+                                .child(editor),
+                        )
+                }),
+            )
+            .child(
+                div()
+                    .id("data-grid-focus-surface")
+                    .role(gpui_kit::Role::Grid)
+                    .aria_label(grid_label)
+                    .tab_index(0)
+                    .track_focus(&self.focus_handle)
+                    .key_context("DataGrid")
+                    .on_action(cx.listener(Self::move_grid_up))
+                    .on_action(cx.listener(Self::move_grid_down))
+                    .on_action(cx.listener(Self::move_grid_left))
+                    .on_action(cx.listener(Self::move_grid_right))
+                    .on_action(cx.listener(Self::extend_grid_up))
+                    .on_action(cx.listener(Self::extend_grid_down))
+                    .on_action(cx.listener(Self::extend_grid_left))
+                    .on_action(cx.listener(Self::extend_grid_right))
+                    .on_action(cx.listener(Self::begin_active_grid_cell_edit))
+                    .on_action(cx.listener(Self::commit_grid_cell_edit))
+                    .on_action(cx.listener(Self::cancel_grid_cell_edit))
+                    .on_action(cx.listener(Self::select_active_grid_cell))
+                    .on_action(cx.listener(Self::select_active_grid_row))
+                    .on_action(cx.listener(Self::clear_grid_selection))
+                    .flex_1()
+                    .min_h_0()
+                    .child(content),
+            )
+            .child(
+                h_flex()
+                    .h(DynamicSpacing::Base32.rems(cx))
+                    .flex_none()
+                    .px(DynamicSpacing::Base12.rems(cx))
+                    .gap(DynamicSpacing::Base08.rems(cx))
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface_background)
+                    .child(
+                        Label::new(format!(
+                            "{} {} / {}",
+                            query.page_size,
+                            text(language, "行", "rows"),
+                            text(language, "页", "page")
+                        ))
+                        .text_size(px(12.0))
+                        .color(Color::Muted),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        IconButton::new("previous-data-grid-page", IconName::ChevronLeft)
+                            .icon_size(IconSize::XSmall)
+                            .size(ButtonSize::Compact)
+                            .aria_label(text(language, "上一页", "Previous page"))
+                            .tooltip(Tooltip::text(text(language, "上一页", "Previous page")))
+                            .disabled(!can_previous)
+                            .on_click(cx.listener(Self::previous_page)),
+                    )
+                    .child(
+                        Label::new(match language {
+                            crate::platform::UiLanguage::Chinese => format!("第 {} 页", query.page),
+                            _ => format!("Page {}", query.page),
+                        })
+                        .text_size(px(12.0))
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        IconButton::new("next-data-grid-page", IconName::ChevronRight)
+                            .icon_size(IconSize::XSmall)
+                            .size(ButtonSize::Compact)
+                            .aria_label(text(language, "下一页", "Next page"))
+                            .tooltip(Tooltip::text(text(language, "下一页", "Next page")))
+                            .disabled(!can_next)
+                            .on_click(cx.listener(Self::next_page)),
+                    ),
+            )
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        .anchor(Anchor::TopLeft)
+                        .child(crate::ui::components::menu_surface(menu.clone())),
+                )
+                .with_priority(3)
+            }))
+    }
+}
+
+fn grid_toolbar_action(id: &'static str, icon: IconName, label: &'static str) -> IconButton {
+    IconButton::new(id, icon)
+        .icon_size(IconSize::Small)
+        .size(ButtonSize::Compact)
+        .aria_label(label)
+        .tooltip(Tooltip::text(label))
+}
+
+fn grid_filter_bar(filter: &Entity<Editor>, sort: &Entity<Editor>, cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .h(px(34.0))
+        .flex_none()
+        .border_b_1()
+        .border_color(colors.border)
+        .bg(colors.surface_background)
+        .child(grid_filter_control(
+            "WHERE",
+            "icons/astesia/data-filter.svg",
+            filter,
+            cx,
+        ))
+        .child(grid_filter_control(
+            "ORDER BY",
+            "icons/astesia/data-sort.svg",
+            sort,
+            cx,
+        ))
+}
+
+fn grid_filter_control(
+    label: &'static str,
+    icon: &'static str,
+    editor: &Entity<Editor>,
+    cx: &App,
+) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .debug_selector(move || label.into())
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .rounded(px(3.0))
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .h_full()
+                .flex_none()
+                .px_2()
+                .gap(px(6.0))
+                .child(
+                    Icon::from_path(icon)
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .flex_shrink_0(),
+                )
+                .child(Label::new(label).text_size(px(11.0))),
+        )
+        .child(
+            h_flex()
+                .key_context("DataGridFilter")
+                .h_full()
+                .flex_1()
+                .min_w_0()
+                .px_2()
+                .bg(colors.editor_background)
+                .child(editor.clone()),
+        )
+}
+
+#[cfg(test)]
+mod filter_layout_tests {
+    use super::*;
+
+    struct FilterBarTest {
+        filter: Entity<Editor>,
+        sort: Entity<Editor>,
+        width: Pixels,
+    }
+
+    impl Render for FilterBarTest {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(self.width)
+                .child(grid_filter_bar(&self.filter, &self.sort, cx))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn filter_controls_share_width_without_outer_spacing(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            crate::ui::initialize_editor_runtime(crate::platform::ThemePreference::Light, cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| FilterBarTest {
+            filter: cx.new(|cx| Editor::inline_single_line("WHERE", px(11.0), window, cx)),
+            sort: cx.new(|cx| Editor::inline_single_line("ORDER BY", px(11.0), window, cx)),
+            width: px(1024.0),
+        });
+        for width in [1024.0, 400.0] {
+            view.update(cx, |view, cx| {
+                view.width = px(width);
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let filter = cx.debug_bounds("WHERE").unwrap();
+            let sort = cx.debug_bounds("ORDER BY").unwrap();
+            assert_eq!(filter.size.width, px(width / 2.0));
+            assert_eq!(sort.size.width, filter.size.width);
+            assert_eq!(filter.right(), sort.left());
+            assert_eq!(filter.top(), sort.top());
+            assert_eq!(filter.size.height, sort.size.height);
+        }
+    }
+}

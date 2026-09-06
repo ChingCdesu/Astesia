@@ -1,0 +1,4 @@
+interface:
+  display_name: "Astesia Product Design"
+  short_description: "Shape and review Astesia product experiences"
+  default_prompt: "Use $product-design to shape or review this Astesia user-facing change."
