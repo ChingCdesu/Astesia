@@ -37,3 +37,16 @@ impl MenuExt for ContextMenu {
         self.item(ContextMenuEntry::element(render).handler(handler))
     }
 }
+
+pub fn menu_surface(menu: Entity<ContextMenu>) -> Div {
+    div()
+        .font_family(if cfg!(target_os = "macos") {
+            ".SystemUIFont"
+        } else if cfg!(target_os = "windows") {
+            "Segoe UI"
+        } else {
+            "sans-serif"
+        })
+        .font_weight(FontWeight::NORMAL)
+        .child(menu)
+}

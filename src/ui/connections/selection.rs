@@ -1,6 +1,27 @@
 use super::*;
 
 impl ConnectionProfilesPanel {
+    pub(in crate::ui) fn select_query_context(
+        &mut self,
+        target: QueryTarget,
+        databases: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.query_target_is_live(&target) {
+            self.state.clear_database_state(&target.connection_id);
+            if let Some(request) = self.state.begin_database_load(&target.connection_id) {
+                self.state.finish_database_load(
+                    &request,
+                    Ok(crate::application::LoadedDatabases {
+                        session_generation: target.session_generation,
+                        databases,
+                    }),
+                );
+            }
+        }
+        self.synchronize_context(target, None, cx);
+    }
+
     pub(in crate::ui) fn synchronize_context(
         &mut self,
         target: QueryTarget,

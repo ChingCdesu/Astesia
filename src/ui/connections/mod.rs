@@ -59,6 +59,8 @@ pub(super) fn bind_connection_profiles_keys(cx: &mut App) {
 pub(super) struct ConnectionProfilesPanel {
     application: Arc<Application>,
     sidebar_list: gpui_kit::ListState,
+    #[cfg(test)]
+    profile_commands: Option<Vec<ProfileOperationCommand>>,
     sidebar_rows_cache: std::cell::RefCell<Option<std::rc::Rc<Vec<virtual_rows::SidebarRow>>>>,
     #[cfg(test)]
     sidebar_rendered_rows: std::cell::RefCell<Vec<usize>>,
@@ -254,6 +256,8 @@ impl ConnectionProfilesPanel {
         });
         Self {
             application,
+            #[cfg(test)]
+            profile_commands: None,
             #[cfg(test)]
             sidebar_rendered_rows: std::cell::RefCell::new(Vec::new()),
             #[cfg(test)]

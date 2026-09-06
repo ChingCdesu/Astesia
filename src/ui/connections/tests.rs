@@ -6,58 +6,8 @@ use crate::db::DbType;
 
 #[gpui_kit::test]
 fn expanded_sidebar_only_renders_visible_rows(cx: &mut gpui_kit::TestAppContext) {
-    use crate::application::connection_workspace::{CatalogEntry, CatalogKind, CatalogSection};
-    use crate::application::LoadedDatabases;
-    let (window, _directory) = sidebar_test_window(cx);
+    let (window, _directory) = populated_sidebar(cx, 10_000);
     let panel = window.root(cx).unwrap();
-    panel.update(cx, |panel, cx| {
-        let request = panel.state.begin_refresh();
-        panel
-            .state
-            .finish_refresh(request, Ok(snapshot(profile("primary"))));
-        let request = panel.state.begin_database_load("primary").unwrap();
-        panel.state.finish_database_load(
-            &request,
-            Ok(LoadedDatabases {
-                session_generation: 7,
-                databases: vec!["test".into()],
-            }),
-        );
-        let target = QueryTarget {
-            connection_id: "primary".into(),
-            connection_name: "primary".into(),
-            database: "test".into(),
-            db_type: DbType::PostgreSQL,
-            session_generation: 7,
-        };
-        let requests = panel.state.begin_object_load(&target).unwrap();
-        for request in requests {
-            let entry = match request.kind() {
-                CatalogKind::Tables => CatalogEntry::Tables(CatalogSection::Ready(
-                    (0..10_000)
-                        .map(|index| TableInfo {
-                            reference: TableRef::qualified("public", format!("table_{index:05}")),
-                            row_count: None,
-                            comment: None,
-                        })
-                        .collect(),
-                )),
-                CatalogKind::Schemas => {
-                    CatalogEntry::Schemas(CatalogSection::Ready(vec!["public".into()]))
-                }
-                kind => CatalogEntry::failed(
-                    kind,
-                    "Test error with enough text to wrap over several lines in the sidebar.",
-                ),
-            };
-            assert!(panel.state.finish_object_load(&request, entry));
-        }
-        panel
-            .expanded_databases
-            .insert(("primary".into(), 7, "test".into()));
-        panel.sidebar_rendered_rows.borrow_mut().clear();
-        panel.notify_sidebar(cx);
-    });
     cx.run_until_parked();
     panel.read_with(cx, |panel, _| {
         let rendered = panel.sidebar_rendered_rows.borrow();
@@ -495,6 +445,7 @@ fn double_click_keeps_the_single_click_sidebar_state(cx: &mut gpui_kit::TestAppC
     panel.update(&mut visual, |panel, cx| {
         let mut disconnected = snapshot(profile("primary"));
         disconnected.profiles[0].session.generation = None;
+        panel.profile_commands = Some(Vec::new());
         let request = panel.state.begin_refresh();
         panel.state.finish_refresh(request, Ok(disconnected));
         panel.collapsed_groups.clear();
@@ -518,10 +469,121 @@ fn double_click_keeps_the_single_click_sidebar_state(cx: &mut gpui_kit::TestAppC
             modifiers: Default::default(),
             click_count,
         });
-        assert!(panel.read_with(&visual, |panel, _| panel
-            .state
-            .operation("primary")
-            .is_none()));
         visual.run_until_parked();
+        panel.read_with(&visual, |panel, _| {
+            assert_eq!(panel.selected_profile_id.as_deref(), Some("primary"));
+            assert!(panel.state.operation("primary").is_some(), "activation must start connection");
+            let commands = panel.profile_commands.as_ref().unwrap();
+            assert_eq!(commands.len(), 1, "double click must not send duplicate connection commands");
+            assert!(matches!(&commands[0], ProfileOperationCommand::Connect { connection_id } if connection_id == "primary"));
+        });
     }
+}
+
+fn populated_sidebar(
+    cx: &mut gpui_kit::TestAppContext,
+    table_count: usize,
+) -> (
+    gpui_kit::WindowHandle<ConnectionProfilesPanel>,
+    tempfile::TempDir,
+) {
+    use crate::application::connection_workspace::{CatalogEntry, CatalogKind, CatalogSection};
+    use crate::application::LoadedDatabases;
+    let (window, directory) = sidebar_test_window(cx);
+    let panel = window.root(cx).unwrap();
+    panel.update(cx, |panel, cx| {
+        let request = panel.state.begin_refresh();
+        panel
+            .state
+            .finish_refresh(request, Ok(snapshot(profile("primary"))));
+        let request = panel.state.begin_database_load("primary").unwrap();
+        panel.state.finish_database_load(
+            &request,
+            Ok(LoadedDatabases {
+                session_generation: 7,
+                databases: vec!["test".into()],
+            }),
+        );
+        let target = QueryTarget {
+            connection_id: "primary".into(),
+            connection_name: "primary".into(),
+            database: "test".into(),
+            db_type: DbType::PostgreSQL,
+            session_generation: 7,
+        };
+        let requests = panel.state.begin_object_load(&target).unwrap();
+        for request in requests {
+            let entry = match request.kind() {
+                CatalogKind::Tables => CatalogEntry::Tables(CatalogSection::Ready(
+                    (0..table_count)
+                        .map(|index| TableInfo {
+                            reference: TableRef::qualified("public", format!("table_{index:05}")),
+                            row_count: None,
+                            comment: None,
+                        })
+                        .collect(),
+                )),
+                CatalogKind::Schemas => {
+                    CatalogEntry::Schemas(CatalogSection::Ready(vec!["public".into()]))
+                }
+                kind => CatalogEntry::failed(
+                    kind,
+                    "Test error with enough text to wrap over several lines in the sidebar.",
+                ),
+            };
+            assert!(panel.state.finish_object_load(&request, entry));
+        }
+        panel
+            .expanded_databases
+            .insert(("primary".into(), 7, "test".into()));
+        panel.sidebar_rendered_rows.borrow_mut().clear();
+        panel.notify_sidebar(cx);
+    });
+    (window, directory)
+}
+
+#[gpui_kit::test]
+#[ignore = "sidebar scroll timing probe"]
+fn measure_sidebar_scroll(cx: &mut gpui_kit::TestAppContext) {
+    let mut medians = Vec::new();
+    for count in [100, 10_000] {
+        let (window, _directory) = populated_sidebar(cx, count);
+        cx.run_until_parked();
+        let panel = window.root(cx).unwrap();
+        let builds = panel.read_with(cx, |panel, _| panel.sidebar_model_builds.get());
+        let mut timings = Vec::new();
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            window
+                .update(cx, |panel, window, cx| {
+                    panel.sidebar_rendered_rows.borrow_mut().clear();
+                    window.dispatch_event(
+                        gpui_kit::PlatformInput::ScrollWheel(gpui_kit::ScrollWheelEvent {
+                            position: point(px(100.0), px(150.0)),
+                            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-28.0))),
+                            touch_phase: gpui_kit::TouchPhase::Moved,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .unwrap();
+            cx.run_until_parked();
+            timings.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.sidebar_list.logical_scroll_top().item_ix > 0);
+            assert_eq!(panel.sidebar_model_builds.get(), builds);
+        });
+        timings.sort_by(f64::total_cmp);
+        eprintln!(
+            "sidebar scroll: tables={count}, median={:.2}ms p95={:.2}ms",
+            timings[10], timings[18]
+        );
+        medians.push(timings[10]);
+    }
+    assert!(
+        medians[1] < medians[0] * 2.0,
+        "scroll cost grows with table count: {medians:?}"
+    );
 }

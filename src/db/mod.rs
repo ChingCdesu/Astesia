@@ -420,6 +420,18 @@ pub trait DatabaseDriver: Send + Sync {
         }
         Ok(results)
     }
+    async fn execute_statements_in_schema(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        if schema.is_some() {
+            return Err(UnsupportedFeature::new(self.db_type(), "query schema selection").into());
+        }
+        self.execute_statements(database, statements).await
+    }
+
     async fn execute_mutation_batch(
         &self,
         _database: &str,

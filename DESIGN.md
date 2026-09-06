@@ -31,7 +31,9 @@ product conventions; use a component directly when no application convention is 
 The light and dark palettes in `src/ui/theme.rs` follow the [Figma Screens](https://www.figma.com/design/okmpEaSEEhS2uX8VkuEhEY/Astesia?node-id=7-8) colors. Kit background is the editor/data canvas; sidebar is the persistent surface; title-bar color is the workspace/status chrome. Both configs are installed before applying the saved appearance so live system changes retain the same palette.
 
 The active theme owns foreground, background, border, focus, selection, status, and typography.
-UI text, including navigation and actions, uses the bundled Geist Mono family. Chinese text uses
+Workspace text uses the bundled Geist Mono family. Popup menus use the platform proportional UI
+font at normal weight, with Kit-owned inset selection, rounded surfaces, and separators between
+action groups. Chinese text uses
 platform glyph fallback. Queries, identifiers, and code-like values retain the editor monospace font. Engine colors identify database types and never substitute for action or error semantics.
 State also needs readable text or an icon.
 
@@ -46,6 +48,15 @@ controls, 11px text, 14px icons, and 8px horizontal padding inside each label an
 Enter applies both fields; clearing a field and pressing Enter removes that condition. Keep the
 input regions flush with their labels and use the editor background without inset input borders.
 
+Grid selection actions live in the cell context menu. Right-clicking within a cell or row selection
+preserves it; right-clicking outside selects the target cell. Copy, copy with headers, paste, and
+row deletion retain their existing editability and availability rules.
+
+Result grids use Kit `DataTable` and `TableState` for header layout, column resizing, and row/column
+virtual scrolling. Rows remain 28px tall and headers show names only. A table delegate renders
+cells from `GridSession`; Astesia retains selection, inline editing, clipboard, context menu,
+and staged mutation behavior. Empty text is centered within the visible table body.
+
 Custom GPUI drawing remains appropriate for result grids, charts, and ER diagrams. The catalog's
 variable-height virtual list retains inline loading/error and Redis input rows while using Kit
 list controls. Preserve scroll anchoring when asynchronous children appear or disappear.
@@ -56,6 +67,20 @@ sidebar preserves its width within the current workspace; the width is not saved
 
 The title bar uses Kit's platform controls. Theme selection supports light, dark, and live system
 appearance. Form content scrolls independently of its persistent action footer.
+
+## Query context selection
+
+The query toolbar exposes database selection across connected SQL profiles. Each query tab keeps
+its own PostgreSQL schema selection, with an explicit database-default option. Switching databases
+resets the selected schema. Changing context preserves SQL text and clears results from the old
+context; selection is disabled during execution. Database selection synchronizes sidebar context.
+
+PostgreSQL executes a selected schema on a dedicated connection using a bound schema name and
+validates schema USAGE permission. The connection is detached from the pool so search_path and
+unfinished transactions cannot leak into another query tab. Completion uses the same schema for
+unqualified names while retaining explicitly qualified references. Other engines currently expose
+database selection without a schema override. Context choices are scoped to the open tab and are
+not persisted across application restarts.
 
 ## Local schema snapshots
 
@@ -75,7 +100,8 @@ this schema cache. Unreadable cache storage falls back to live metadata and reco
 ## Interaction and recovery
 
 Sidebar items execute their primary click action once per click sequence. Double-clicking has
-the same result as a single click; connection establishment uses the explicit connection action.
+the same result as a single click. Activating a disconnected connection profile by click or keyboard
+connects it; activating a connected profile selects it without reconnecting.
 
 - Preserve keyboard order, focus return, shortcut precedence, and Chinese IME composition.
 - Query execution respects selection/current-statement/full-document scope. Search fields and

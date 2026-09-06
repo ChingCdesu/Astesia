@@ -12,7 +12,7 @@ pub(super) struct Editor {
     search: Option<Entity<super::editor_search::SearchBar>>,
     state: State,
     readonly: bool,
-    inline_label: Option<&'static str>,
+    inline_style: Option<(&'static str, Pixels)>,
     last_value: SharedString,
     _observation: Subscription,
     _subscription: Subscription,
@@ -73,7 +73,7 @@ impl Editor {
             search: Some(search),
             state: State::Code(state),
             readonly: false,
-            inline_label: None,
+            inline_style: None,
             last_value,
             _observation: observation,
             _subscription: subscription,
@@ -100,7 +100,7 @@ impl Editor {
             search: None,
             state: State::Line(state),
             readonly: false,
-            inline_label: None,
+            inline_style: None,
             last_value,
             _observation: observation,
             _subscription: subscription,
@@ -108,12 +108,20 @@ impl Editor {
     }
     pub(super) fn inline_single_line(
         label: &'static str,
+        font_size: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut editor = Self::single_line(window, cx);
-        editor.inline_label = Some(label);
+        editor.inline_style = Some((label, font_size));
         editor
+    }
+    #[cfg(test)]
+    pub(super) fn input_bounds(&self, cx: &App) -> Bounds<Pixels> {
+        match &self.state {
+            State::Code(state) => state.read(cx).input_bounds(),
+            State::Line(state) => state.read(cx).input_bounds(),
+        }
     }
     pub(super) fn code_state(&self) -> Option<&Entity<EditorState>> {
         match &self.state {
@@ -241,7 +249,7 @@ impl Render for Editor {
             State::Line(s) => Input::new(s)
                 .readonly(self.readonly)
                 .w_full()
-                .when_some(self.inline_label, |input, label| {
+                .when_some(self.inline_style, |input, (label, font_size)| {
                     input
                         .aria_label(label)
                         .appearance(false)
@@ -249,7 +257,7 @@ impl Render for Editor {
                         .h_full()
                         .px_0()
                         .py_0()
-                        .text_size(px(11.0))
+                        .text_size(font_size)
                 })
                 .into_any_element(),
         }

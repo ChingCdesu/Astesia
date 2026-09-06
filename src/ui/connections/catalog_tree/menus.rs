@@ -100,7 +100,10 @@ impl ConnectionProfilesPanel {
                     RenameSchema => text(language, "重命名 Schema…", "Rename Schema…"),
                     DropSchema => text(language, "删除 Schema…", "Drop Schema…"),
                 };
-                if matches!(action, DropTable | DropSchema) {
+                if matches!(
+                    action,
+                    Copy | CreateTable | RenameTable | RenameSchema | DropTable | DropSchema
+                ) {
                     menu = menu.separator();
                 }
                 menu = menu.item(ContextMenuEntry::new(label).disabled(busy).handler(

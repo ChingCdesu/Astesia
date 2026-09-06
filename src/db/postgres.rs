@@ -609,6 +609,46 @@ impl DatabaseDriver for PostgresDriver {
         Ok(results)
     }
 
+    async fn execute_statements_in_schema(
+        &self,
+        database: &str,
+        schema: Option<&str>,
+        statements: Vec<String>,
+    ) -> anyhow::Result<Vec<StatementResult>> {
+        let Some(schema) = schema else {
+            return self.execute_statements(database, statements).await;
+        };
+        // A detached connection cannot return its search_path or an unfinished transaction to the pool.
+        let mut conn = self.pool_for_db(database).await?.acquire().await?.detach();
+        let selected: Option<String> = sqlx::query_scalar(
+            "SELECT set_config('search_path', quote_ident(nspname), false)
+             FROM pg_namespace WHERE nspname = $1 AND has_schema_privilege(oid, 'USAGE')",
+        )
+        .bind(schema)
+        .fetch_optional(&mut conn)
+        .await?;
+        anyhow::ensure!(
+            selected.is_some(),
+            "Schema is unavailable or lacks USAGE permission: {schema}"
+        );
+        let mut results = Vec::with_capacity(statements.len());
+        for sql in statements {
+            let start = Instant::now();
+            match run_pg_query(&mut conn, &sql).await {
+                Ok(result) => results.push(StatementResult::from_query_result(sql, result)),
+                Err(error) => {
+                    results.push(StatementResult::from_error(
+                        sql,
+                        error,
+                        start.elapsed().as_millis() as u64,
+                    ));
+                    break;
+                }
+            }
+        }
+        Ok(results)
+    }
+
     async fn begin_transaction(
         &self,
         database: &str,
@@ -944,8 +984,8 @@ impl DatabaseDriver for PostgresDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::table_data_sql;
-    use crate::db::TableRef;
+    use super::{table_data_sql, PostgresDriver};
+    use crate::db::{ConnectionConfig, DatabaseDriver, DbType, TableRef};
 
     #[test]
     fn pagination_quotes_postgres_schema_and_table_delimiters() {
@@ -957,5 +997,82 @@ mod tests {
             table_data_sql(&TableRef::qualified("tenant's", "events'archive"), 1, 10,).unwrap(),
             "SELECT * FROM \"tenant's\".\"events'archive\" LIMIT 10 OFFSET 0"
         );
+    }
+    #[tokio::test]
+    #[ignore = "requires disposable localhost PostgreSQL via ASTESIA_TEST_PG_PORT"]
+    async fn query_schema_is_isolated_and_resolves_unqualified_tables() {
+        let port = std::env::var("ASTESIA_TEST_PG_PORT")
+            .expect("local PostgreSQL port")
+            .parse()
+            .unwrap();
+        let mut driver = PostgresDriver::new(ConnectionConfig {
+            id: "schema-context-test".into(),
+            name: "Schema test".into(),
+            db_type: DbType::PostgreSQL,
+            host: "127.0.0.1".into(),
+            port,
+            username: "astesia_test".into(),
+            password: String::new(),
+            database: Some("postgres".into()),
+            color: None,
+        });
+        driver.connect().await.unwrap();
+        let setup = driver
+            .execute_statements(
+                "postgres",
+                vec![
+                    "CREATE SCHEMA context_a".into(),
+                    "CREATE SCHEMA context_b".into(),
+                    "CREATE TABLE public.context_probe (value TEXT)".into(),
+                    "CREATE TABLE context_a.context_probe (value TEXT)".into(),
+                    "CREATE TABLE context_b.context_probe (value TEXT)".into(),
+                    "INSERT INTO public.context_probe VALUES ('public')".into(),
+                    "INSERT INTO context_a.context_probe VALUES ('a')".into(),
+                    "INSERT INTO context_b.context_probe VALUES ('b')".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(setup.iter().all(|result| result.success));
+        for (schema, expected) in [
+            (Some("context_a"), "a"),
+            (Some("context_b"), "b"),
+            (None, "public"),
+        ] {
+            let results = driver
+                .execute_statements_in_schema(
+                    "postgres",
+                    schema,
+                    vec!["SELECT value FROM context_probe".into()],
+                )
+                .await
+                .unwrap();
+            assert!(results[0].success, "{:?}", results[0].error);
+            assert_eq!(results[0].rows[0][0], serde_json::json!(expected));
+        }
+        assert!(driver
+            .execute_statements_in_schema(
+                "postgres",
+                Some("missing; DROP SCHEMA public"),
+                vec!["SELECT 1".into()]
+            )
+            .await
+            .is_err());
+        let failed = driver
+            .execute_statements_in_schema(
+                "postgres",
+                Some("context_a"),
+                vec!["SELECT * FROM missing_table".into(), "SELECT 1".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert!(!failed[0].success);
+        let default = driver
+            .execute_query("postgres", "SELECT value FROM context_probe")
+            .await
+            .unwrap();
+        assert_eq!(default.rows[0][0], serde_json::json!("public"));
+        driver.disconnect().await.unwrap();
     }
 }

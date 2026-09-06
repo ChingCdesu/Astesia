@@ -233,8 +233,8 @@ impl ConnectionProfilesPanel {
                             );
                         }
                     }))
-                    .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
-                        panel.select_profile_id(profile_id_for_action.clone(), cx);
+                    .on_action(cx.listener(move |panel, _: &menu::Confirm, window, cx| {
+                        panel.activate_profile(profile_id_for_action.clone(), window, cx);
                     }))
                     .child(row)
                     .child(
@@ -478,7 +478,7 @@ impl Render for ConnectionProfilesPanel {
                     gpui_kit::anchored()
                         .position(*position)
                         .anchor(gpui_kit::Anchor::TopLeft)
-                        .child(menu.clone()),
+                        .child(crate::ui::components::menu_surface(menu.clone())),
                 )
                 .with_priority(3)
             }))

@@ -249,24 +249,6 @@ impl DataGridItem {
         self.copy_selection(false, cx);
     }
 
-    pub(super) fn copy_selection_click(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.copy_selection(false, cx);
-    }
-
-    pub(super) fn copy_selection_with_headers_click(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.copy_selection(true, cx);
-    }
-
     pub(super) fn copy_selection(&self, include_headers: bool, cx: &mut Context<Self>) {
         if let Some(tsv) = self.state.selection_tsv(include_headers) {
             cx.write_to_clipboard(ClipboardItem::new_string(tsv));
@@ -283,15 +265,6 @@ impl DataGridItem {
             cx.propagate();
             return;
         }
-        self.paste_selection(cx);
-    }
-
-    pub(super) fn paste_selection_click(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         self.paste_selection(cx);
     }
 
@@ -363,38 +336,6 @@ impl DataGridItem {
             .get(column)
             .copied()
             .unwrap_or(COLUMN_WIDTH)
-    }
-
-    pub(super) fn resize_column(
-        &mut self,
-        event: &DragMoveEvent<GridColumnResize>,
-        cx: &mut Context<Self>,
-    ) {
-        let column = event.drag(cx).column;
-        let left = ROW_NUMBER_WIDTH
-            + (0..column)
-                .map(|index| self.column_width(index))
-                .sum::<f32>();
-        let content_x = (event.event.position.x
-            - event.bounds.left()
-            - self.horizontal_scroll_handle.offset().x)
-            .as_f32();
-        let width = (content_x - left).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
-        if let Some(current) = self.column_widths.get_mut(column) {
-            if (*current - width).abs() > f32::EPSILON {
-                *current = width;
-                cx.notify();
-            }
-        }
-    }
-
-    pub(super) fn reset_column_width(&mut self, column: usize, cx: &mut Context<Self>) {
-        if let Some(width) = self.column_widths.get_mut(column) {
-            if (*width - COLUMN_WIDTH).abs() > f32::EPSILON {
-                *width = COLUMN_WIDTH;
-                cx.notify();
-            }
-        }
     }
 
     pub(super) fn move_active_cell(
@@ -732,12 +673,7 @@ impl DataGridItem {
         }
     }
 
-    pub(super) fn delete_selected_rows_click(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn delete_selected_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.commit_cell_edit(window, cx) || window.has_active_prompt() {
             return;
         }

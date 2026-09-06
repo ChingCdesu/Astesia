@@ -80,6 +80,55 @@ impl QueryService {
             .map_err(|error| format!("查询失败: {error}"))
     }
 
+    pub(crate) async fn execute_in_context(
+        &self,
+        target: &QueryTarget,
+        schema: Option<&str>,
+        operation: super::QueryOperation,
+    ) -> Result<Vec<StatementResult>, String> {
+        let (handle, generation) = self.manager.driver_session(&target.connection_id).await?;
+        if generation != target.session_generation {
+            return Err("Database Session changed before execution".into());
+        }
+        let driver = handle.lock_active().await?;
+        if driver.db_type() != target.db_type {
+            return Err("Database engine changed before execution".into());
+        }
+        let (statements, explained) = match operation {
+            super::QueryOperation::Statements(statements) => (statements, None),
+            super::QueryOperation::Explain(statement) if schema.is_none() => {
+                let started = Instant::now();
+                return Ok(vec![
+                    match driver.explain(&target.database, &statement).await {
+                        Ok(result) => StatementResult::from_query_result(statement, result),
+                        Err(error) => StatementResult::from_error(
+                            statement,
+                            error,
+                            started.elapsed().as_millis() as u64,
+                        ),
+                    },
+                ]);
+            }
+            super::QueryOperation::Explain(statement) => {
+                let sql = crate::db::SqlDialect::new(target.db_type)
+                    .build_explain_statement(&statement)
+                    .map_err(|error| error.to_string())?;
+                (vec![sql], Some(statement))
+            }
+            super::QueryOperation::Redis { .. } => {
+                return Err("Redis does not support SQL contexts".into())
+            }
+        };
+        let mut results = driver
+            .execute_statements_in_schema(&target.database, schema, statements)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let (Some(source), Some(result)) = (explained, results.first_mut()) {
+            result.sql = source;
+        }
+        Ok(results)
+    }
+
     pub async fn explain(
         &self,
         connection_id: &str,

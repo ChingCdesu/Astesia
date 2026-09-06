@@ -70,6 +70,14 @@ pub(super) struct QueryItem {
     result_focus: FocusHandle,
     completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
+    selected_schema: Option<String>,
+    context_picker_busy: bool,
+    context_picker_generation: u64,
+    context_menu: Option<(
+        Entity<crate::ui::components::ContextMenu>,
+        gpui_kit::Point<Pixels>,
+        Subscription,
+    )>,
     chart: Option<Entity<ChartView>>,
     showing_chart: bool,
     file_prompt_active: bool,
@@ -78,7 +86,13 @@ pub(super) struct QueryItem {
     _settings_observation: Subscription,
 }
 
+mod context_picker;
 mod result_view;
+
+pub(super) struct QueryContextChanged {
+    pub target: QueryTarget,
+    pub databases: Vec<String>,
+}
 
 impl QueryItem {
     pub(super) fn new(
@@ -110,6 +124,10 @@ impl QueryItem {
             result_focus: cx.focus_handle(),
             completion,
             state: QueryWorkspaceState::new(initial_text),
+            selected_schema: None,
+            context_picker_busy: false,
+            context_picker_generation: 0,
+            context_menu: None,
             chart: None,
             showing_chart: false,
             file_prompt_active: false,
@@ -125,6 +143,12 @@ impl QueryItem {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.state.target() != target.as_ref() {
+            self.selected_schema = None;
+            self.context_menu = None;
+            self.context_picker_busy = false;
+            self.context_picker_generation = self.context_picker_generation.wrapping_add(1);
+        }
         let should_focus = target.is_some();
         self.completion.set_target(
             target
@@ -133,6 +157,9 @@ impl QueryItem {
                 .cloned(),
         );
         if self.state.set_target(target) {
+            if let Some(editor) = self.editor.read(cx).code_state().cloned() {
+                editor.update(cx, |editor, cx| editor.dismiss_completion_overlay(cx));
+            }
             self.chart = None;
             self.showing_chart = false;
             cx.notify();
@@ -256,6 +283,10 @@ impl QueryItem {
     }
 
     fn clear_target(&mut self, cx: &mut Context<Self>) {
+        self.selected_schema = None;
+        self.context_menu = None;
+        self.context_picker_busy = false;
+        self.context_picker_generation = self.context_picker_generation.wrapping_add(1);
         self.completion.set_target(None);
         self.chart = None;
         self.showing_chart = false;
@@ -578,20 +609,16 @@ impl QueryItem {
         let application = self.application.clone();
         let target = request.target.clone();
         let operation = request.operation.clone();
+        let schema = self.selected_schema.clone();
         let language = self.settings.read(cx).language();
         let execution = crate::ui::runtime::spawn(cx, async move {
             match operation {
-                QueryOperation::Statements(statements) => {
+                operation @ (QueryOperation::Statements(_) | QueryOperation::Explain(_)) => {
                     application
                         .queries()
-                        .execute_statements(&target.connection_id, &target.database, statements)
+                        .execute_in_context(&target, schema.as_deref(), operation)
                         .await
                 }
-                QueryOperation::Explain(statement) => application
-                    .queries()
-                    .explain(&target.connection_id, &target.database, statement)
-                    .await
-                    .map(|result| vec![result]),
                 QueryOperation::Redis { source, command } => application
                     .redis()
                     .execute(&target, command)
@@ -634,6 +661,7 @@ impl QueryItem {
 }
 
 impl gpui_kit::EventEmitter<QueryDocumentStateChanged> for QueryItem {}
+impl gpui_kit::EventEmitter<QueryContextChanged> for QueryItem {}
 
 impl Render for QueryItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -802,7 +830,7 @@ impl Render for QueryItem {
                         .on_click(cx.listener(Self::clear)),
                     )
                     .child(div().flex_1())
-                    .child(Label::new(target_label).text_size(px(10.0)).truncate()),
+                    .child(self.render_context_picker(target_label, cx)),
             )
             .children(file_error.map(|error| {
                 h_flex()
@@ -822,8 +850,6 @@ impl Render for QueryItem {
             .child(
                 div()
                     .key_context("QueryEditor")
-                    .pt_2()
-                    .pl_2()
                     .pr(px(18.0))
                     .h(px(300.0))
                     .min_h(px(120.0))
@@ -903,7 +929,15 @@ impl Render for QueryItem {
             .children(self.render_result_tabs(cx))
             .child(div().flex_1().min_h_0().child(self.render_results(cx)));
 
-        content
+        content.children(self.context_menu.as_ref().map(|(menu, position, _)| {
+            gpui_kit::deferred(
+                gpui_kit::anchored()
+                    .position(*position)
+                    .anchor(gpui_kit::Anchor::TopLeft)
+                    .child(crate::ui::components::menu_surface(menu.clone())),
+            )
+            .with_priority(3)
+        }))
     }
 }
 
