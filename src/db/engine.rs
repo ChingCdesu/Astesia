@@ -279,6 +279,10 @@ impl EngineCapabilities {
 }
 
 impl DbType {
+    pub const fn supports_query_schema(self) -> bool {
+        matches!(self, Self::PostgreSQL)
+    }
+
     pub const fn all() -> [Self; 7] {
         [
             Self::MySQL,

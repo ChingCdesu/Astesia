@@ -57,8 +57,18 @@ impl ConnectionProfilesPanel {
         if event.click_count() > 1 {
             return;
         }
+        self.activate_profile(profile_id, window, cx);
+    }
+
+    pub(super) fn activate_profile(
+        &mut self,
+        profile_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_profile_id(profile_id, cx);
         window.focus(&self.selected_profile_focus, cx);
+        self.connect_selected(window, cx);
     }
 
     pub(super) fn select_profile_id(&mut self, profile_id: String, cx: &mut Context<Self>) {
@@ -168,6 +178,11 @@ impl ConnectionProfilesPanel {
         command: ProfileOperationCommand,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(test)]
+        if let Some(commands) = self.profile_commands.as_mut() {
+            commands.push(command);
+            return;
+        }
         let connection_id = command.connection_id().to_string();
         let operation_name = command.operation_name();
         let language = self.settings.read(cx).language();

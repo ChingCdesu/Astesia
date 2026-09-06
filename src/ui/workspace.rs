@@ -24,7 +24,7 @@ use super::{
     localization::{text, theme_label},
     object_definition_item::{ObjectDefinition, ObjectDefinitionItem},
     object_mutation_form::{ObjectMutationForm, ObjectMutationFormMode, ObjectMutationSaved},
-    query_item::{QueryDocumentStateChanged, QueryItem},
+    query_item::{QueryContextChanged, QueryDocumentStateChanged, QueryItem},
     shell::{
         notify_preference_error, refresh_active_theme, NotificationCenter, NotificationTone,
         ShellSettings,
@@ -665,6 +665,13 @@ impl AstesiaWorkspace {
         });
         let document_subscription =
             cx.subscribe(&item, |_, _, _: &QueryDocumentStateChanged, cx| cx.notify());
+        let context_subscription =
+            cx.subscribe(&item, |workspace, _, event: &QueryContextChanged, cx| {
+                workspace.connection_profiles.update(cx, |panel, cx| {
+                    panel.select_query_context(event.target.clone(), event.databases.clone(), cx)
+                });
+                cx.notify();
+            });
         if let Some(target) = target {
             item.update(cx, |item, cx| item.set_target(Some(target), window, cx));
         } else {
@@ -675,7 +682,7 @@ impl AstesiaWorkspace {
             id,
             key: WorkspaceItemKey::Query(id),
             item: WorkspaceItem::new(item),
-            _subscriptions: vec![document_subscription],
+            _subscriptions: vec![document_subscription, context_subscription],
         });
         self.focus_active_item(window, cx);
     }

@@ -21,13 +21,22 @@ pub(super) struct SqlCompletionHandle {
 struct CompletionState {
     epoch: u64,
     target: Option<QueryTarget>,
+    schema: Option<String>,
 }
 impl SqlCompletionHandle {
+    pub(super) fn set_schema(&self, schema: Option<String>) {
+        let mut state = self.state.write().expect("SQL completion state poisoned");
+        if state.schema != schema {
+            state.epoch = state.epoch.wrapping_add(1);
+            state.schema = schema;
+        }
+    }
     pub(super) fn set_target(&self, target: Option<QueryTarget>) {
         let mut state = self.state.write().expect("SQL completion state poisoned");
         if state.target != target {
             state.epoch = state.epoch.wrapping_add(1);
             state.target = target;
+            state.schema = None;
         }
     }
 }
@@ -86,6 +95,7 @@ impl CompletionProvider for SqlCompletionProvider {
             target,
             text_before_cursor: prefix.to_owned(),
             text_after_cursor: text[offset..].to_owned(),
+            schema: state.schema.clone(),
         };
         let service = self.service.clone();
         let current_state = self.state.clone();

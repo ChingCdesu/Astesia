@@ -137,11 +137,17 @@ impl DataGridItem {
         let expanded = column.kind() == GridColumnKind::Json
             || initial_text.contains(['\n', '\r'])
             || initial_text.chars().count() > 80;
+        let language = self.settings.read(cx).language();
         let editor = if expanded {
             cx.new(|cx| Editor::code(&initial_text, "json", window, cx))
         } else {
             cx.new(|cx| {
-                let mut editor = Editor::single_line(window, cx);
+                let mut editor = Editor::inline_single_line(
+                    text(language, "单元格值", "Cell value"),
+                    px(12.0),
+                    window,
+                    cx,
+                );
                 editor.set_text(initial_text.clone(), window, cx);
                 editor
             })

@@ -5,11 +5,14 @@ use std::sync::{
 
 use crate::ui::components::{prelude::*, Indicator, Tooltip};
 use crate::ui::text_editor::{Editor, EditorEvent};
+use gpui_kit::component::table::{TableEvent, TableState};
 use gpui_kit::{
-    actions, point, App, ClickEvent, ClipboardItem, DragMoveEvent, Entity, FocusHandle, FontWeight,
-    PromptButton, PromptLevel, ScrollHandle, ScrollStrategy, Subscription, UniformListScrollHandle,
+    actions, point, App, ClickEvent, ClipboardItem, Entity, FocusHandle, FontWeight, PromptButton,
+    PromptLevel, ScrollHandle, ScrollStrategy, Subscription,
 };
 use serde_json::Value;
+#[cfg(test)]
+use std::cell::RefCell;
 
 use crate::application::{
     Application, ChartModel, GridCell, GridCellInputError, GridCellSelection, GridColumn,
@@ -31,11 +34,6 @@ const ROW_NUMBER_WIDTH: f32 = 48.0;
 const COLUMN_WIDTH: f32 = 180.0;
 const MIN_COLUMN_WIDTH: f32 = 96.0;
 const MAX_COLUMN_WIDTH: f32 = 560.0;
-
-#[derive(Clone)]
-struct GridColumnResize {
-    column: usize,
-}
 
 actions!(
     astesia_data_grid,
@@ -189,6 +187,7 @@ pub(super) struct DataGridItem {
     state: GridSession,
     focus_handle: FocusHandle,
     active_cell: Option<GridCell>,
+    context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     editing: Option<ActiveCellEditor>,
     operation_notice: Option<GridNotice>,
     export_in_progress: bool,
@@ -200,7 +199,11 @@ pub(super) struct DataGridItem {
     filter_editor: Entity<Editor>,
     sort_editor: Entity<Editor>,
     column_widths: Vec<f32>,
-    rows_scroll_handle: UniformListScrollHandle,
+    rows_scroll_handle: gpui_kit::UniformListScrollHandle,
+    data_table: Entity<TableState<table::GridTableDelegate>>,
+    _table_subscription: Subscription,
+    #[cfg(test)]
+    rendered_rows: RefCell<Vec<usize>>,
     horizontal_scroll_handle: ScrollHandle,
     chart: Option<Entity<ChartView>>,
     showing_chart: bool,
@@ -223,9 +226,22 @@ impl DataGridItem {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut item = Self::new_unloaded(application, target, table, settings, window, cx);
+        item.load(cx);
+        item
+    }
+
+    fn new_unloaded(
+        application: Arc<Application>,
+        target: QueryTarget,
+        table: TableRef,
+        settings: Entity<ShellSettings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let filter_editor = cx.new(|cx| {
-            let mut editor = Editor::inline_single_line("WHERE", window, cx);
+            let mut editor = Editor::inline_single_line("WHERE", px(11.0), window, cx);
             editor.set_placeholder_text("status = 'active'", window, cx);
             editor
         });
@@ -235,7 +251,7 @@ impl DataGridItem {
             }
         });
         let sort_editor = cx.new(|cx| {
-            let mut editor = Editor::inline_single_line("ORDER BY", window, cx);
+            let mut editor = Editor::inline_single_line("ORDER BY", px(11.0), window, cx);
             editor.set_placeholder_text("id ASC", window, cx);
             editor
         });
@@ -244,12 +260,38 @@ impl DataGridItem {
                 cx.notify();
             }
         });
-        let mut item = Self {
+        let owner = cx.entity().downgrade();
+        let data_table = cx.new(|cx| {
+            TableState::new(table::GridTableDelegate::new(owner), window, cx)
+                .row_selectable(false)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .row_header(false)
+                .col_movable(false)
+        });
+        let rows_scroll_handle = data_table.read(cx).vertical_scroll_handle.clone();
+        let horizontal_scroll_handle = data_table
+            .read(cx)
+            .horizontal_scroll_handle
+            .base_handle()
+            .clone();
+        let table_subscription = cx.subscribe(&data_table, |item, _, event: &TableEvent, cx| {
+            if let TableEvent::ColumnWidthsChanged(widths) = event {
+                item.column_widths = widths
+                    .iter()
+                    .skip(1)
+                    .map(|width| f32::from(*width))
+                    .collect();
+                cx.notify();
+            }
+        });
+        Self {
             application,
             state: GridSession::new(target, table, DEFAULT_GRID_PAGE_SIZE)
                 .expect("default grid page size must be valid"),
             focus_handle: cx.focus_handle(),
             active_cell: None,
+            context_menu: None,
             editing: None,
             operation_notice: None,
             export_in_progress: false,
@@ -261,8 +303,12 @@ impl DataGridItem {
             filter_editor,
             sort_editor,
             column_widths: Vec::new(),
-            rows_scroll_handle: UniformListScrollHandle::new(),
-            horizontal_scroll_handle: ScrollHandle::new(),
+            rows_scroll_handle,
+            data_table,
+            _table_subscription: table_subscription,
+            #[cfg(test)]
+            rendered_rows: RefCell::new(Vec::new()),
+            horizontal_scroll_handle,
             chart: None,
             showing_chart: false,
             chart_generation: 0,
@@ -273,9 +319,7 @@ impl DataGridItem {
             _filter_observation: filter_observation,
             _sort_observation: sort_observation,
             _settings_observation: settings_observation,
-        };
-        item.load(cx);
-        item
+        }
     }
 
     pub(super) fn label(&self) -> String {
@@ -330,11 +374,13 @@ impl DataGridItem {
     }
 }
 
+mod context_menu;
 mod editing;
 mod export;
 mod grid_view;
 mod interactions;
 mod presentation;
+mod table;
 mod transaction;
 mod view;
 
@@ -342,3 +388,6 @@ use presentation::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scroll_tests;

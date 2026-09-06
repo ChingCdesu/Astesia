@@ -18,6 +18,7 @@ pub(crate) struct QueryCompletionRequest {
     pub(crate) target: QueryTarget,
     pub(crate) text_before_cursor: String,
     pub(crate) text_after_cursor: String,
+    pub(crate) schema: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -107,7 +108,7 @@ impl QueryCompletionService {
                 .map(|(name, _)| name.as_str())
                 .unwrap_or(qualifier);
             if !scope.relation {
-                let Some(table) = find_table(tables, resolved) else {
+                let Some(table) = find_table(tables, resolved, request.schema.as_deref()) else {
                     return Vec::new();
                 };
                 let Ok(columns) = catalog
@@ -132,13 +133,17 @@ impl QueryCompletionService {
 
         let mut completions = Vec::new();
         if scope.relation {
-            completions.extend(table_completions(request.target.db_type, tables));
+            completions.extend(table_completions(
+                request.target.db_type,
+                tables,
+                request.schema.as_deref(),
+            ));
             completions.extend(schema_completions(request.target.db_type, tables));
         } else {
             let qualify_columns = scope.tables.len() > 1 && !scope.using_columns;
             let mut column_sources = HashMap::<String, usize>::new();
             for (name, alias) in &scope.tables {
-                let Some(table) = find_table(tables, name) else {
+                let Some(table) = find_table(tables, name, request.schema.as_deref()) else {
                     continue;
                 };
                 if let Ok(columns) = catalog
@@ -310,16 +315,30 @@ impl TargetCatalog {
     }
 }
 
-fn find_table<'a>(tables: &'a [TableInfo], qualifier: &str) -> Option<&'a TableInfo> {
+fn find_table<'a>(
+    tables: &'a [TableInfo],
+    qualifier: &str,
+    schema: Option<&str>,
+) -> Option<&'a TableInfo> {
     tables.iter().find(|table| {
-        table.reference.name().eq_ignore_ascii_case(qualifier)
+        (table.reference.name().eq_ignore_ascii_case(qualifier)
+            && schema.is_none_or(|preferred| {
+                table
+                    .reference
+                    .schema()
+                    .is_some_and(|schema| schema == preferred)
+            }))
             || table.reference.schema().is_some_and(|schema| {
                 format!("{schema}.{}", table.reference.name()).eq_ignore_ascii_case(qualifier)
             })
     })
 }
 
-fn table_completions(db_type: DbType, tables: &[TableInfo]) -> Vec<QueryCompletion> {
+fn table_completions(
+    db_type: DbType,
+    tables: &[TableInfo],
+    schema: Option<&str>,
+) -> Vec<QueryCompletion> {
     tables
         .iter()
         .flat_map(|table| {
@@ -334,12 +353,14 @@ fn table_completions(db_type: DbType, tables: &[TableInfo]) -> Vec<QueryCompleti
                 detail: "table".to_string(),
                 kind: QueryCompletionKind::Table,
             };
-            let unqualified = qualified_label.map(|label| QueryCompletion {
-                label: name.to_string(),
-                new_text: completion_identifier(db_type, name),
-                detail: label,
-                kind: QueryCompletionKind::Table,
-            });
+            let unqualified = qualified_label
+                .filter(|_| schema.is_none_or(|schema| table.reference.schema() == Some(schema)))
+                .map(|label| QueryCompletion {
+                    label: name.to_string(),
+                    new_text: completion_identifier(db_type, name),
+                    detail: label,
+                    kind: QueryCompletionKind::Table,
+                });
             std::iter::once(qualified).chain(unqualified)
         })
         .collect()
@@ -477,6 +498,7 @@ mod tests {
                     target: target(DbType::PostgreSQL, 1),
                     text_before_cursor: sql.into(),
                     text_after_cursor: String::new(),
+                    schema: None,
                 }),
             )
             .await
@@ -569,6 +591,7 @@ mod tests {
                 target: target(DbType::PostgreSQL, 1),
                 text_before_cursor: "SELECT * FROM ".to_string(),
                 text_after_cursor: String::new(),
+                schema: None,
             })
             .await;
 
@@ -589,6 +612,7 @@ mod tests {
                 target: target(DbType::PostgreSQL, 1),
                 text_before_cursor: "SELECT ".to_string(),
                 text_after_cursor: String::new(),
+                schema: None,
             })
             .await;
         assert_eq!(catalog.table_loads.load(Ordering::SeqCst), 1);
@@ -611,6 +635,7 @@ mod tests {
                 target: target(DbType::MySQL, 1),
                 text_before_cursor: "SELECT users.".to_string(),
                 text_after_cursor: String::new(),
+                schema: None,
             })
             .await;
         assert_eq!(
@@ -628,6 +653,7 @@ mod tests {
                 target: target(DbType::MySQL, 2),
                 text_before_cursor: "SELECT * FROM ".to_string(),
                 text_after_cursor: String::new(),
+                schema: None,
             })
             .await;
         assert_eq!(catalog.table_loads.load(Ordering::SeqCst), 2);
@@ -657,6 +683,7 @@ mod tests {
                     target: target(DbType::PostgreSQL, 1),
                     text_before_cursor: sql.into(),
                     text_after_cursor: String::new(),
+                    schema: None,
                 })
                 .await;
             assert!(
@@ -689,6 +716,7 @@ mod tests {
                     target: target(DbType::PostgreSQL, 1),
                     text_before_cursor: sql.into(),
                     text_after_cursor: String::new(),
+                    schema: None,
                 })
                 .await;
             assert!(
@@ -710,6 +738,7 @@ mod tests {
                 target: target(DbType::PostgreSQL, 1),
                 text_before_cursor: "SELECT * FROM public.users AS u WHERE u.".into(),
                 text_after_cursor: String::new(),
+                schema: None,
             })
             .await;
         assert_eq!(result.len(), 1);
@@ -735,6 +764,7 @@ mod tests {
                     target: target(DbType::PostgreSQL, 1),
                     text_before_cursor: prefix.into(),
                     text_after_cursor: suffix.into(),
+                    schema: None,
                 })
                 .await;
             assert!(
@@ -798,6 +828,7 @@ mod tests {
                     target: target(DbType::PostgreSQL, 1),
                     text_before_cursor: before.into(),
                     text_after_cursor: after.into(),
+                    schema: None,
                 })
                 .await;
             let columns = result
@@ -813,6 +844,36 @@ mod tests {
                 "{before}|{after}"
             );
             assert!(columns.iter().all(|item| item.label == item.new_text));
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_schema_controls_unqualified_completion() {
+        let public = table(Some("public"), "users");
+        let audit = table(Some("audit"), "users");
+        let service = QueryCompletionService::with_catalog(Arc::new(TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: vec![public.clone(), audit.clone()],
+            columns: HashMap::from([
+                (public.reference, vec![column("email", "text")]),
+                (audit.reference, vec![column("event", "text")]),
+            ]),
+        }));
+        for (schema, expected) in [("public", "email"), ("audit", "event")] {
+            let result = service
+                .complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: "SELECT ".into(),
+                    text_after_cursor: " FROM users".into(),
+                    schema: Some(schema.into()),
+                })
+                .await;
+            let columns = result
+                .iter()
+                .filter(|item| item.kind == QueryCompletionKind::Column)
+                .collect::<Vec<_>>();
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].label, expected);
         }
     }
 

@@ -1,7 +1,7 @@
 use super::*;
 
 impl Render for DataGridItem {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let status = self.state.status();
@@ -18,11 +18,9 @@ impl Render for DataGridItem {
             || self.save_recovery_sql.is_some();
         let has_changes = self.state.has_changes();
         let has_unsaved_changes = self.has_unsaved_changes();
-        let selected_rows = self.state.selected_row_count();
         let navigation_locked = self.has_local_changes() || saving;
         let query = self.state.query();
         let filter_active = query.filter.is_some();
-        let selection_available = self.state.has_selection();
         let export_in_progress = self.export_in_progress;
         let can_previous =
             page.is_some() && query.page > 1 && !loading && !unavailable && !navigation_locked;
@@ -93,9 +91,7 @@ impl Render for DataGridItem {
         let show_edit_controls = editable || has_unsaved_changes;
         let show_change_bar = page.is_some() && !self.showing_chart;
         let show_edit_bar = show_change_bar && (has_unsaved_changes || !editable);
-        let show_selection_bar = show_change_bar && selection_available;
         let show_filter_bar = page.is_some() || filter_active;
-        let grid_focused = self.focus_handle.is_focused(window);
         let content = if self.showing_chart {
             self.chart
                 .as_ref()
@@ -103,7 +99,7 @@ impl Render for DataGridItem {
                 .unwrap_or_else(|| centered_grid_state(status, language))
         } else {
             match page {
-                Some(page) => self.render_grid(page, grid_focused, cx),
+                Some(page) => self.render_grid(page, cx),
                 None => centered_grid_state(status, language),
             }
         };
@@ -376,68 +372,6 @@ impl Render for DataGridItem {
                         }),
                 )
             })
-            .when(show_selection_bar, |element| {
-                element.child(
-                    h_flex()
-                        .h(px(32.0))
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .border_b_1()
-                        .border_color(colors.border)
-                        .bg(colors.surface_background)
-                        .child(
-                            Label::new(text(language, "选择与行", "Selection & Rows"))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            Button::new("copy-data-grid-selection", text(language, "复制", "Copy"))
-                                .size(ButtonSize::Compact)
-                                .disabled(!selection_available)
-                                .key_binding(crate::ui::components::KeyBinding::for_action(
-                                    &CopyGridSelection,
-                                    cx,
-                                ))
-                                .on_click(cx.listener(Self::copy_selection_click)),
-                        )
-                        .child(
-                            Button::new(
-                                "copy-data-grid-selection-with-headers",
-                                text(language, "复制含表头", "Copy + Headers"),
-                            )
-                            .size(ButtonSize::Compact)
-                            .disabled(!selection_available)
-                            .on_click(cx.listener(Self::copy_selection_with_headers_click)),
-                        )
-                        .when(editable, |bar| {
-                            bar.child(
-                                Button::new(
-                                    "paste-data-grid-selection",
-                                    text(language, "粘贴", "Paste"),
-                                )
-                                .size(ButtonSize::Compact)
-                                .disabled(saving || unavailable)
-                                .key_binding(crate::ui::components::KeyBinding::for_action(
-                                    &PasteGridSelection,
-                                    cx,
-                                ))
-                                .on_click(cx.listener(Self::paste_selection_click)),
-                            )
-                            .child(
-                                Button::new(
-                                    "delete-selected-data-grid-rows",
-                                    text(language, "删除所选行", "Delete Selected"),
-                                )
-                                .size(ButtonSize::Compact)
-                                .disabled(selected_rows == 0 || saving || unavailable)
-                                .on_click(cx.listener(Self::delete_selected_rows_click)),
-                            )
-                        }),
-                )
-            })
             .children(
                 expanded_editor.map(|(editor, column, data_type, null_requested)| {
                     v_flex()
@@ -578,6 +512,15 @@ impl Render for DataGridItem {
                             .on_click(cx.listener(Self::next_page)),
                     ),
             )
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        .anchor(Anchor::TopLeft)
+                        .child(crate::ui::components::menu_surface(menu.clone())),
+                )
+                .with_priority(3)
+            }))
     }
 }
 
@@ -675,8 +618,8 @@ mod filter_layout_tests {
             crate::ui::initialize_editor_runtime(crate::platform::ThemePreference::Light, cx)
         });
         let (view, cx) = cx.add_window_view(|window, cx| FilterBarTest {
-            filter: cx.new(|cx| Editor::inline_single_line("WHERE", window, cx)),
-            sort: cx.new(|cx| Editor::inline_single_line("ORDER BY", window, cx)),
+            filter: cx.new(|cx| Editor::inline_single_line("WHERE", px(11.0), window, cx)),
+            sort: cx.new(|cx| Editor::inline_single_line("ORDER BY", px(11.0), window, cx)),
             width: px(1024.0),
         });
         for width in [1024.0, 400.0] {

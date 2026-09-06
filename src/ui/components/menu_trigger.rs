@@ -80,7 +80,7 @@ impl RenderOnce for MenuTrigger {
                     anchored()
                         .position(position)
                         .anchor(Anchor::TopLeft)
-                        .child(menu),
+                        .child(super::menu_surface(menu)),
                 )
                 .with_priority(3)
             }))
