@@ -4,7 +4,7 @@ use gpui_kit::{ClickEvent, Context, Render, Window};
 use crate::application::QueryTarget;
 use crate::db::{TableInfo, TableRef};
 
-use super::{ConnectionProfilesEvent, ConnectionProfilesPanel, NoticeTone};
+use super::{ConnectionProfilesEvent, ConnectionProfilesPanel, NoticeTone, PanelNotice};
 
 #[derive(Clone, Debug)]
 pub(super) struct DraggedTableCopy {
@@ -157,10 +157,45 @@ impl ConnectionProfilesPanel {
         target: QueryTarget,
         cx: &mut Context<Self>,
     ) {
-        if self.state.query_target_is_live(&target) {
-            self.refresh_table_details(&target, cx);
-            self.state.clear_object_state(&target);
-            self.load_objects(target, cx);
+        if !self.state.query_target_is_live(&target) {
+            return;
         }
+        let application = self.application.clone();
+        let refresh_target = target.clone();
+        let refresh = crate::ui::runtime::spawn(cx, async move {
+            application
+                .catalog()
+                .refresh_schema(
+                    &refresh_target.connection_id,
+                    Some(&refresh_target.database),
+                )
+                .await
+        });
+        cx.spawn(async move |panel, cx| {
+            let result = refresh.await.unwrap_or_else(|error| Err(error.to_string()));
+            panel
+                .update(cx, |panel, cx| {
+                    if !panel.state.query_target_is_live(&target) {
+                        return;
+                    }
+                    if let Err(error) = result {
+                        panel.notice = Some(PanelNotice {
+                            tone: NoticeTone::Error,
+                            message: error,
+                        });
+                        panel.notify_sidebar(cx);
+                        return;
+                    }
+                    panel
+                        .application
+                        .query_completions()
+                        .invalidate_connection(&target.connection_id);
+                    panel.refresh_table_details(&target, cx);
+                    panel.state.clear_object_state(&target);
+                    panel.load_objects(target, cx);
+                })
+                .ok();
+        })
+        .detach();
     }
 }

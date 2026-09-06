@@ -12,6 +12,7 @@ pub(super) struct Editor {
     search: Option<Entity<super::editor_search::SearchBar>>,
     state: State,
     readonly: bool,
+    inline_label: Option<&'static str>,
     last_value: SharedString,
     _observation: Subscription,
     _subscription: Subscription,
@@ -38,18 +39,41 @@ impl Editor {
         });
         let search = cx.new(|cx| super::editor_search::SearchBar::new(state.clone(), window, cx));
         let last_value = state.read(cx).value();
-        let observation = cx.observe(&state, |this, state, cx| {
+        let observation = cx.observe_in(&state, window, |this, state, window, cx| {
             let value = state.read(cx).value();
             if this.last_value != value {
+                let refresh_completion = value.len() < this.last_value.len()
+                    && state.read(cx).lsp().completion_provider.is_some()
+                    && state.read(cx).focus_handle(cx).is_focused(window);
                 this.last_value = value;
                 cx.emit(InputEvent::Change);
                 cx.notify();
+                if refresh_completion {
+                    let refresh = state.update(cx, |editor, cx| {
+                        if editor.marked_text_range(window, cx).is_some() {
+                            return false;
+                        }
+                        let cursor = editor.cursor();
+                        let source = editor.text().to_string();
+                        let refresh = source[..cursor].chars().last().is_some_and(|c| {
+                            c.is_alphanumeric() || matches!(c, '_' | '$' | '@' | '.')
+                        });
+                        if !refresh {
+                            editor.present_completion_items(cursor, "", Vec::new(), cx);
+                        }
+                        refresh
+                    });
+                    if refresh {
+                        this.show_completions(&ShowCompletions, window, cx);
+                    }
+                }
             }
         });
         Self {
             search: Some(search),
             state: State::Code(state),
             readonly: false,
+            inline_label: None,
             last_value,
             _observation: observation,
             _subscription: subscription,
@@ -76,10 +100,20 @@ impl Editor {
             search: None,
             state: State::Line(state),
             readonly: false,
+            inline_label: None,
             last_value,
             _observation: observation,
             _subscription: subscription,
         }
+    }
+    pub(super) fn inline_single_line(
+        label: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut editor = Self::single_line(window, cx);
+        editor.inline_label = Some(label);
+        editor
     }
     pub(super) fn code_state(&self) -> Option<&Entity<EditorState>> {
         match &self.state {
@@ -196,6 +230,10 @@ impl Render for Editor {
                             ))
                             .readonly(self.readonly)
                             .bordered(false)
+                            .rounded_none()
+                            .p_0()
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
                             .size_full(),
                     ),
                 )
@@ -203,6 +241,16 @@ impl Render for Editor {
             State::Line(s) => Input::new(s)
                 .readonly(self.readonly)
                 .w_full()
+                .when_some(self.inline_label, |input, label| {
+                    input
+                        .aria_label(label)
+                        .appearance(false)
+                        .bordered(false)
+                        .h_full()
+                        .px_0()
+                        .py_0()
+                        .text_size(px(11.0))
+                })
                 .into_any_element(),
         }
     }

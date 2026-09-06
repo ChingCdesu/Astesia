@@ -105,3 +105,46 @@ mod tests {
         assert_eq!(groups[2].profiles[0].profile.id, "loose");
     }
 }
+
+pub(super) fn compact_column_type(db_type: crate::db::DbType, data_type: &str) -> &str {
+    if db_type != crate::db::DbType::PostgreSQL {
+        return data_type;
+    }
+    match data_type {
+        "character varying" => "varchar",
+        "character" => "char",
+        "timestamp with time zone" => "timestamptz",
+        "timestamp without time zone" => "timestamp",
+        "time with time zone" => "timetz",
+        "time without time zone" => "time",
+        "double precision" => "float8",
+        "bit varying" => "varbit",
+        "boolean" => "bool",
+        "integer" => "int",
+        _ => data_type,
+    }
+}
+
+#[cfg(test)]
+mod column_type_tests {
+    use super::compact_column_type;
+    use crate::db::DbType;
+
+    #[test]
+    fn compact_types_preserve_timezone_and_engine_meaning() {
+        for (source, expected) in [
+            ("character varying", "varchar"),
+            ("character", "char"),
+            ("timestamp with time zone", "timestamptz"),
+            ("timestamp without time zone", "timestamp"),
+            ("time with time zone", "timetz"),
+            ("time without time zone", "time"),
+            ("public.OrderStatus", "public.OrderStatus"),
+            ("varchar(128)", "varchar(128)"),
+            ("numeric(12,2)", "numeric(12,2)"),
+        ] {
+            assert_eq!(compact_column_type(DbType::PostgreSQL, source), expected);
+            assert_eq!(compact_column_type(DbType::SQLite, source), source);
+        }
+    }
+}

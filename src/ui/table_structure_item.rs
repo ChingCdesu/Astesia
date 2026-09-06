@@ -46,11 +46,15 @@ impl TableStructureItem {
             settings,
             _settings_observation: settings_observation,
         };
-        item.load(cx);
+        item.load(false, cx);
         item
     }
 
-    pub(super) fn label(&self) -> String {
+    pub(super) fn tab_label(&self) -> String {
+        self.state.table().name().to_string()
+    }
+
+    fn label(&self) -> String {
         format!(
             "{} · {}/{}",
             self.state.table(),
@@ -83,7 +87,7 @@ impl TableStructureItem {
         }
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
+    fn load(&mut self, refresh: bool, cx: &mut Context<Self>) {
         let Some(request) = self.state.begin_load() else {
             return;
         };
@@ -94,6 +98,16 @@ impl TableStructureItem {
         let database = self.state.target().database.clone();
         let table = self.state.table().clone();
         let load = crate::ui::runtime::spawn(cx, async move {
+            if refresh {
+                application
+                    .catalog()
+                    .refresh_schema(&connection_id, Some(&database))
+                    .await
+                    .map_err(TableStructureLoadError::Connection)?;
+                application
+                    .query_completions()
+                    .invalidate_connection(&connection_id);
+            }
             application
                 .catalog()
                 .table_structure(&connection_id, &database, &table)
@@ -115,7 +129,7 @@ impl TableStructureItem {
     }
 
     fn refresh(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.load(cx);
+        self.load(true, cx);
     }
 
     fn show_columns(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {

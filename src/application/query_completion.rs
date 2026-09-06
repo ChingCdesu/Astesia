@@ -1,7 +1,9 @@
 mod dialects;
+mod scope;
+use scope::CompletionScope;
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex as SyncMutex},
 };
 
@@ -15,6 +17,7 @@ use crate::db::{ColumnInfo, DbType, SqlDialect, TableInfo, TableRef};
 pub(crate) struct QueryCompletionRequest {
     pub(crate) target: QueryTarget,
     pub(crate) text_before_cursor: String,
+    pub(crate) text_after_cursor: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -67,8 +70,22 @@ impl QueryCompletionService {
             return Vec::new();
         }
 
-        let scope = CompletionScope::parse(&request.text_before_cursor);
+        let mut scope = CompletionScope::parse(&request.text_before_cursor, request.target.db_type);
+        scope.include_following_tables(
+            &request.text_before_cursor,
+            &request.text_after_cursor,
+            request.target.db_type,
+        );
+        if scope.suppressed {
+            return Vec::new();
+        }
         let mut fallback = dialects::completions(request.target.db_type);
+        if scope.relation {
+            fallback.retain(|item| item.kind == QueryCompletionKind::Keyword);
+        }
+        if !scope.relation && scope.qualifier.is_none() && scope.tables.is_empty() {
+            return fallback;
+        }
         let catalog = self.target_catalog(&request.target);
         let Ok(tables) = catalog
             .tables
@@ -78,40 +95,98 @@ impl QueryCompletionService {
             return fallback;
         };
 
-        if let Some(qualifier) = scope.qualifier {
-            if let Some(table) = find_table(tables, &qualifier) {
-                if let Ok(columns) = catalog
+        if let Some(qualifier) = &scope.qualifier {
+            let resolved = scope
+                .tables
+                .iter()
+                .find(|(_, alias)| {
+                    alias
+                        .as_ref()
+                        .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
+                })
+                .map(|(name, _)| name.as_str())
+                .unwrap_or(qualifier);
+            if !scope.relation {
+                let Some(table) = find_table(tables, resolved) else {
+                    return Vec::new();
+                };
+                let Ok(columns) = catalog
                     .columns(self.catalog.as_ref(), &request.target, &table.reference)
                     .await
-                {
-                    return column_completions(request.target.db_type, &columns);
-                }
-                return Vec::new();
+                else {
+                    return Vec::new();
+                };
+                return column_completions(request.target.db_type, &columns);
             }
-
             let schema_tables = tables
                 .iter()
                 .filter(|table| {
                     table
                         .reference
                         .schema()
-                        .is_some_and(|schema| schema.eq_ignore_ascii_case(&qualifier))
+                        .is_some_and(|schema| schema.eq_ignore_ascii_case(qualifier))
                 })
                 .collect::<Vec<_>>();
-            if !schema_tables.is_empty() {
-                return schema_table_completions(request.target.db_type, schema_tables);
-            }
+            return schema_table_completions(request.target.db_type, schema_tables);
         }
 
-        let mut completions = table_completions(request.target.db_type, tables);
-        completions.extend(schema_completions(request.target.db_type, tables));
-        completions.extend(
-            catalog
-                .cached_column_completions(request.target.db_type)
-                .await,
-        );
+        let mut completions = Vec::new();
+        if scope.relation {
+            completions.extend(table_completions(request.target.db_type, tables));
+            completions.extend(schema_completions(request.target.db_type, tables));
+        } else {
+            let qualify_columns = scope.tables.len() > 1 && !scope.using_columns;
+            let mut column_sources = HashMap::<String, usize>::new();
+            for (name, alias) in &scope.tables {
+                let Some(table) = find_table(tables, name) else {
+                    continue;
+                };
+                if let Ok(columns) = catalog
+                    .columns(self.catalog.as_ref(), &request.target, &table.reference)
+                    .await
+                {
+                    let mut candidates = column_completions(request.target.db_type, &columns);
+                    if scope.using_columns {
+                        let names = candidates
+                            .iter()
+                            .map(|item| item.label.clone())
+                            .collect::<HashSet<_>>();
+                        for name in names {
+                            *column_sources.entry(name).or_default() += 1;
+                        }
+                    }
+                    if qualify_columns {
+                        let qualifier = alias.as_deref().unwrap_or(name);
+                        let insertion_qualifier = alias
+                            .as_deref()
+                            .map(|alias| completion_identifier(request.target.db_type, alias))
+                            .unwrap_or_else(|| {
+                                completion_table_name(request.target.db_type, &table.reference)
+                            });
+                        for candidate in &mut candidates {
+                            candidate.label = format!("{qualifier}.{}", candidate.label);
+                            candidate.new_text =
+                                format!("{insertion_qualifier}.{}", candidate.new_text);
+                        }
+                    }
+                    completions.extend(candidates);
+                }
+            }
+            if scope.using_columns {
+                completions
+                    .retain(|item| column_sources.get(&item.label) == Some(&scope.tables.len()));
+                return deduplicate(completions);
+            }
+        }
         completions.append(&mut fallback);
         deduplicate(completions)
+    }
+
+    pub(crate) fn invalidate_connection(&self, connection_id: &str) {
+        self.targets
+            .lock()
+            .expect("completion target cache")
+            .retain(|(key, _)| key.connection_id != connection_id);
     }
 
     pub(crate) fn invalidate_session(&self, connection_id: &str, generation: u64) {
@@ -233,54 +308,6 @@ impl TargetCatalog {
             .await
             .cloned()
     }
-
-    async fn cached_column_completions(&self, db_type: DbType) -> Vec<QueryCompletion> {
-        let columns = self.columns.lock().await;
-        let cached = columns
-            .iter()
-            .filter_map(|(_, cell)| cell.get())
-            .flat_map(|columns| column_completions(db_type, columns))
-            .collect::<Vec<_>>();
-        deduplicate(cached)
-    }
-}
-
-struct CompletionScope {
-    qualifier: Option<String>,
-}
-
-impl CompletionScope {
-    fn parse(text: &str) -> Self {
-        let prefix_start = text
-            .char_indices()
-            .rev()
-            .find_map(|(index, character)| {
-                (!is_identifier_character(character)).then_some(index + character.len_utf8())
-            })
-            .unwrap_or(0);
-        let before_prefix = &text[..prefix_start];
-        let qualifier = before_prefix
-            .strip_suffix('.')
-            .and_then(identifier_before_dot);
-        Self { qualifier }
-    }
-}
-
-fn identifier_before_dot(text: &str) -> Option<String> {
-    let text = text.trim_end();
-    let start = text
-        .char_indices()
-        .rev()
-        .find_map(|(index, character)| {
-            (!is_identifier_character(character)).then_some(index + character.len_utf8())
-        })
-        .unwrap_or(0);
-    let identifier = &text[start..];
-    (!identifier.is_empty()).then(|| identifier.to_string())
-}
-
-fn is_identifier_character(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '_' | '$' | '@')
 }
 
 fn find_table<'a>(tables: &'a [TableInfo], qualifier: &str) -> Option<&'a TableInfo> {
@@ -429,6 +456,35 @@ mod tests {
         }
     }
 
+    struct PendingCatalog;
+    #[async_trait]
+    impl CompletionCatalog for PendingCatalog {
+        async fn tables(&self, _: &QueryTarget) -> Result<Vec<TableInfo>, String> {
+            std::future::pending().await
+        }
+        async fn columns(&self, _: &QueryTarget, _: &TableRef) -> Result<Vec<ColumnInfo>, String> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn keyword_completion_does_not_wait_for_database_metadata() {
+        let service = QueryCompletionService::with_catalog(Arc::new(PendingCatalog));
+        for sql in ["SEL", "SELECT ", "SELECT COU"] {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                service.complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: sql.into(),
+                    text_after_cursor: String::new(),
+                }),
+            )
+            .await
+            .expect("local completions must not await the database");
+            assert!(result.iter().any(|item| item.label == "SELECT"));
+        }
+    }
+
     #[tokio::test]
     async fn target_budget_evicts_old_catalogs_and_disconnect_drops_session_data() {
         let catalog = Arc::new(TestCatalog {
@@ -511,7 +567,8 @@ mod tests {
         let completions = service
             .complete(QueryCompletionRequest {
                 target: target(DbType::PostgreSQL, 1),
-                text_before_cursor: "SEL".to_string(),
+                text_before_cursor: "SELECT * FROM ".to_string(),
+                text_after_cursor: String::new(),
             })
             .await;
 
@@ -531,6 +588,7 @@ mod tests {
             .complete(QueryCompletionRequest {
                 target: target(DbType::PostgreSQL, 1),
                 text_before_cursor: "SELECT ".to_string(),
+                text_after_cursor: String::new(),
             })
             .await;
         assert_eq!(catalog.table_loads.load(Ordering::SeqCst), 1);
@@ -552,6 +610,7 @@ mod tests {
             .complete(QueryCompletionRequest {
                 target: target(DbType::MySQL, 1),
                 text_before_cursor: "SELECT users.".to_string(),
+                text_after_cursor: String::new(),
             })
             .await;
         assert_eq!(
@@ -567,10 +626,211 @@ mod tests {
         service
             .complete(QueryCompletionRequest {
                 target: target(DbType::MySQL, 2),
-                text_before_cursor: "SELECT ".to_string(),
+                text_before_cursor: "SELECT * FROM ".to_string(),
+                text_after_cursor: String::new(),
             })
             .await;
         assert_eq!(catalog.table_loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn candidates_follow_clauses_and_resolve_alias_columns() {
+        let users = table(Some("public"), "users");
+        let orders = table(Some("public"), "orders");
+        let service = QueryCompletionService::with_catalog(Arc::new(TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: vec![users.clone(), orders.clone()],
+            columns: HashMap::from([
+                (users.reference, vec![column("email", "text")]),
+                (orders.reference, vec![column("total", "numeric")]),
+            ]),
+        }));
+        for sql in [
+            "SELECT ",
+            "SELECT us",
+            "SELECT COUNT(",
+            "SELECT * FROM public.users u WHERE ",
+            "SELECT * FROM public.users u ORDER BY ",
+        ] {
+            let result = service
+                .complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: sql.into(),
+                    text_after_cursor: String::new(),
+                })
+                .await;
+            assert!(
+                !result.iter().any(|item| matches!(
+                    item.kind,
+                    QueryCompletionKind::Table | QueryCompletionKind::Schema
+                )),
+                "{sql}"
+            );
+            assert!(
+                !result.iter().any(|item| item.label == "total"),
+                "unrelated cached column in {sql}"
+            );
+            if sql.contains("FROM") {
+                assert!(result.iter().any(|item| item.label == "email"), "{sql}");
+            }
+        }
+        for sql in [
+            "SELECT * FROM ",
+            "SELECT * FROM us",
+            "SELECT * FROM public.",
+            "SELECT * FROM public.us",
+            "SELECT * FROM users JOIN ",
+            "SELECT * FROM users, ",
+            "UPDATE ",
+            "INSERT INTO ",
+        ] {
+            let result = service
+                .complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: sql.into(),
+                    text_after_cursor: String::new(),
+                })
+                .await;
+            assert!(
+                result
+                    .iter()
+                    .any(|item| item.kind == QueryCompletionKind::Table),
+                "{sql}"
+            );
+            assert!(
+                !result.iter().any(|item| matches!(
+                    item.kind,
+                    QueryCompletionKind::Column | QueryCompletionKind::Function
+                )),
+                "{sql}"
+            );
+        }
+        let result = service
+            .complete(QueryCompletionRequest {
+                target: target(DbType::PostgreSQL, 1),
+                text_before_cursor: "SELECT * FROM public.users AS u WHERE u.".into(),
+                text_after_cursor: String::new(),
+            })
+            .await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].label, "email");
+    }
+
+    #[tokio::test]
+    async fn select_columns_use_tables_and_aliases_after_cursor() {
+        let users = table(Some("public"), "users");
+        let service = QueryCompletionService::with_catalog(Arc::new(TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: vec![users.clone()],
+            columns: HashMap::from([(users.reference, vec![column("email", "text")])]),
+        }));
+        for prefix in ["SELECT ", "SELECT em", "SELECT u.", "SELECT COUNT("] {
+            let suffix = if prefix.ends_with('(') {
+                ") FROM public.users u"
+            } else {
+                " FROM public.users u"
+            };
+            let result = service
+                .complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: prefix.into(),
+                    text_after_cursor: suffix.into(),
+                })
+                .await;
+            assert!(
+                result.iter().any(|item| item.label == "email"),
+                "{prefix}|{suffix}"
+            );
+            assert!(!result
+                .iter()
+                .any(|item| item.kind == QueryCompletionKind::Table));
+        }
+    }
+
+    #[tokio::test]
+    async fn joins_offer_distinct_qualified_columns_and_resolve_each_alias() {
+        let users = table(None, "users");
+        let orders = table(None, "orders");
+        let service = QueryCompletionService::with_catalog(Arc::new(TestCatalog {
+            table_loads: AtomicUsize::new(0),
+            tables: vec![users.clone(), orders.clone()],
+            columns: HashMap::from([
+                (
+                    users.reference,
+                    vec![column("id", "int"), column("email", "text")],
+                ),
+                (
+                    orders.reference,
+                    vec![column("id", "int"), column("user_id", "int")],
+                ),
+            ]),
+        }));
+        for (before, after, expected) in [
+            ("SELECT * FROM users JOIN orders USING (", ")", vec!["id"]),
+            (
+                "SELECT ",
+                " FROM users u JOIN orders o ON u.id = o.user_id",
+                vec!["u.id", "u.email", "o.id", "o.user_id"],
+            ),
+            (
+                "SELECT * FROM users u LEFT JOIN orders o ON ",
+                "",
+                vec!["u.id", "u.email", "o.id", "o.user_id"],
+            ),
+            (
+                "SELECT u.",
+                " FROM users u JOIN orders o ON u.id = o.user_id",
+                vec!["id", "email"],
+            ),
+            (
+                "SELECT * FROM users u JOIN orders o ON o.",
+                "",
+                vec!["id", "user_id"],
+            ),
+            (
+                "SELECT ",
+                " FROM users u JOIN users manager ON u.id = manager.id",
+                vec!["u.id", "u.email", "manager.id", "manager.email"],
+            ),
+        ] {
+            let result = service
+                .complete(QueryCompletionRequest {
+                    target: target(DbType::PostgreSQL, 1),
+                    text_before_cursor: before.into(),
+                    text_after_cursor: after.into(),
+                })
+                .await;
+            let columns = result
+                .iter()
+                .filter(|item| item.kind == QueryCompletionKind::Column)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                columns
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{before}|{after}"
+            );
+            assert!(columns.iter().all(|item| item.label == item.new_text));
+        }
+    }
+
+    #[test]
+    fn scope_ignores_comments_literals_and_other_statements() {
+        for sql in [
+            "SELECT 'FROM users' ",
+            "SELECT /* FROM users */ ",
+            "SELECT * FROM users; SELECT ",
+            "SELECT * FROM users WHERE id IN (SELECT ",
+        ] {
+            let scope = CompletionScope::parse(sql, DbType::PostgreSQL);
+            assert!(!scope.relation, "{sql}");
+            assert!(scope.tables.is_empty(), "{sql}");
+        }
+        for sql in ["SELECT 'unfinished", "SELECT -- FROM users"] {
+            assert!(CompletionScope::parse(sql, DbType::PostgreSQL).suppressed);
+        }
     }
 
     #[test]

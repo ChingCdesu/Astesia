@@ -19,6 +19,9 @@ impl CatalogTableKey {
             table: table.clone(),
         }
     }
+    pub(super) fn belongs_to_connection(&self, connection: &str) -> bool {
+        self.connection == connection
+    }
     pub(super) fn matches(&self, target: &QueryTarget) -> bool {
         self.connection == target.connection_id
             && self.generation == target.session_generation
@@ -38,6 +41,7 @@ impl ConnectionProfilesPanel {
         key: (String, u64, String, String),
         cx: &mut Context<Self>,
     ) {
+        self.selected_sidebar_row = Some(format!("schema-{key:?}"));
         if !self.collapsed_schemas.remove(&key) {
             self.collapsed_schemas.insert(key);
         }
@@ -48,6 +52,7 @@ impl ConnectionProfilesPanel {
         key: (CatalogTableKey, u8),
         cx: &mut Context<Self>,
     ) {
+        self.selected_sidebar_row = Some(format!("detail-section-{key:?}"));
         if !self.collapsed_details.remove(&key) {
             self.collapsed_details.insert(key);
         }
@@ -101,6 +106,10 @@ impl ConnectionProfilesPanel {
     ) -> AnyElement {
         let key = CatalogTableKey::new(target, &table.reference);
         let expanded = self.expanded_tables.contains(&key);
+        let loading = matches!(
+            self.table_details.get(&key),
+            Some(CatalogDetail::Loading(_))
+        );
         let expansion_target = target.clone();
         let expansion_table = table.reference.clone();
         let browse_target = target.clone();
@@ -119,6 +128,8 @@ impl ConnectionProfilesPanel {
             .child(
                 h_flex()
                     .min_w_0()
+                    .pl(px(12.0))
+                    .gap_0p5()
                     .child(
                         IconButton::new(
                             format!("expand-table-{key:?}"),
@@ -129,7 +140,12 @@ impl ConnectionProfilesPanel {
                             },
                         )
                         .icon_size(IconSize::XSmall)
+                        .text_color(Color::Muted.color(cx))
                         .size(ButtonSize::Compact)
+                        .w(px(16.0))
+                        .min_w(px(16.0))
+                        .px_0()
+                        .flex_shrink_0()
                         .aria_label(format!(
                             "{} {}",
                             if expanded {
@@ -140,27 +156,31 @@ impl ConnectionProfilesPanel {
                             table.reference
                         ))
                         .aria_expanded(expanded)
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.toggle_table_details(
-                                expansion_target.clone(),
-                                expansion_table.clone(),
-                                cx,
-                            )
-                        })),
+                        .on_click(cx.listener(
+                            move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                panel.toggle_table_details(
+                                    expansion_target.clone(),
+                                    expansion_table.clone(),
+                                    cx,
+                                )
+                            },
+                        )),
                     )
                     .child(
-                        tree_row(
+                        tree_row_with_disclosure(
                             format!("browse-sql-table-{key:?}"),
                             table.reference.name().to_string(),
                             "table",
+                            CatalogDisclosure::External,
                             None,
+                            loading.then(|| text(language, "正在加载…", "Loading…")),
                             cx,
                         )
                         .flex_1()
                         .min_w_0()
-                        .when(self.selected_catalog_table.as_ref() == Some(&key), |row| {
-                            row.bg(cx.theme().colors().ghost_element_selected)
-                        })
                         .when(
                             target.db_type.capabilities().table_copy
                                 != crate::db::TableCopyMode::None,
@@ -179,13 +199,18 @@ impl ConnectionProfilesPanel {
                                 cx,
                             )
                         }))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.request_primary_data(
-                                browse_target.clone(),
-                                browse_table.clone(),
-                                cx,
-                            )
-                        }))
+                        .on_click(
+                            cx.listener(move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                panel.request_primary_data(
+                                    browse_target.clone(),
+                                    browse_table.clone(),
+                                    cx,
+                                )
+                            }),
+                        )
                         .on_mouse_down(
                             gpui_kit::MouseButton::Right,
                             cx.listener(
@@ -213,6 +238,7 @@ impl ConnectionProfilesPanel {
         cx: &mut Context<Self>,
     ) {
         let key = CatalogTableKey::new(&target, &table);
+        self.selected_sidebar_row = Some(format!("table-{key:?}"));
         if !self.expanded_tables.remove(&key) {
             self.expanded_tables.insert(key.clone());
             if !matches!(
@@ -281,6 +307,11 @@ pub(super) fn catalog_icon(kind: &str) -> Icon {
     Icon::from_path(path)
 }
 
+enum CatalogDisclosure {
+    Inline(Option<bool>),
+    External,
+}
+
 pub(super) fn tree_row(
     id: String,
     label: String,
@@ -288,42 +319,170 @@ pub(super) fn tree_row(
     expanded: Option<bool>,
     cx: &App,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
+    tree_row_loading(id, label, kind, expanded, None, cx)
+}
+
+pub(super) fn tree_row_loading(
+    id: String,
+    label: String,
+    kind: &str,
+    expanded: Option<bool>,
+    loading_label: Option<&'static str>,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    tree_row_with_disclosure(
+        id,
+        label,
+        kind,
+        CatalogDisclosure::Inline(expanded),
+        None,
+        loading_label,
+        cx,
+    )
+}
+
+pub(super) fn column_row(
+    id: String,
+    name: String,
+    detail: String,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let label = format!("{name} {detail}");
+    let content = h_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .overflow_hidden()
+        .child(Label::new(name).flex_shrink_0().max_w_full().truncate())
+        .child(
+            Label::new(detail)
+                .color(Color::Muted)
+                .text_size(px(11.0))
+                .buffer_font(cx)
+                .flex_1()
+                .min_w_0()
+                .truncate(),
+        )
+        .into_any_element();
+    tree_row_with_disclosure(
+        id,
+        label,
+        "column",
+        CatalogDisclosure::Inline(None),
+        Some(content),
+        None,
+        cx,
+    )
+}
+
+fn tree_row_with_disclosure(
+    id: String,
+    label: String,
+    kind: &str,
+    disclosure: CatalogDisclosure,
+    label_content: Option<AnyElement>,
+    loading_label: Option<&'static str>,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let expanded = match disclosure {
+        CatalogDisclosure::Inline(expanded) => expanded,
+        CatalogDisclosure::External => None,
+    };
     h_flex()
         .id(id)
         .key_context("SchemaObjectRow")
         .role(gpui_kit::Role::TreeItem)
         .tab_index(0)
-        .aria_label(label.clone())
+        .aria_label(
+            loading_label.map_or_else(|| label.clone(), |loading| format!("{label}, {loading}")),
+        )
+        .tooltip(crate::ui::components::Tooltip::text(label.clone()))
         .when_some(expanded, |row, expanded| row.aria_expanded(expanded))
         .min_w_0()
         .cursor_pointer()
-        .hover(|row| row.bg(cx.theme().colors().ghost_element_hover))
-        .focus_visible(|row| row.bg(cx.theme().colors().ghost_element_selected))
-        .child(catalog_row_content(label, kind, expanded))
+        .w_full()
+        .focus_visible(|row| {
+            row.shadow(vec![gpui_kit::BoxShadow {
+                inset: true,
+                color: cx.theme().colors().border_focused,
+                offset: point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(1.0),
+            }])
+        })
+        .child(catalog_row_content(
+            loading_label.map_or(label, str::to_string),
+            kind,
+            disclosure,
+            label_content,
+            loading_label.is_some(),
+        ))
 }
 
-pub(super) fn catalog_row_content(
+fn catalog_row_content(
     label: String,
     kind: &str,
-    expanded: Option<bool>,
-) -> crate::ui::components::ListItem {
-    crate::ui::components::ListItem::new("catalog-row-content")
-        .spacing(crate::ui::components::ListItemSpacing::Dense)
-        .selectable(false)
+    disclosure: CatalogDisclosure,
+    label_content: Option<AnyElement>,
+    loading: bool,
+) -> gpui_kit::Div {
+    let inline = matches!(disclosure, CatalogDisclosure::Inline(_));
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .text_size(px(12.0))
+        .py_0p5()
+        .pr_3()
+        .pl(px(if inline { 12.0 } else { 0.0 }))
         .child(
             h_flex()
+                .flex_1()
+                .min_w_0()
                 .gap_0p5()
-                .when_some(expanded, |row, expanded| {
+                .when(inline, |row| {
                     row.child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .color(Color::Muted),
+                        h_flex()
+                            .w(px(16.0))
+                            .flex_shrink_0()
+                            .justify_center()
+                            .when_some(
+                                match disclosure {
+                                    CatalogDisclosure::Inline(expanded) => expanded,
+                                    CatalogDisclosure::External => None,
+                                },
+                                |slot, expanded| {
+                                    slot.child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                                },
+                            ),
                     )
                 })
-                .child(catalog_icon(kind)),
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1p5()
+                        .child(
+                            catalog_icon(kind)
+                                .size(IconSize::Small)
+                                .flex_shrink_0()
+                                .when(loading, |icon| icon.color(Color::Muted)),
+                        )
+                        .child(h_flex().h_6().flex_1().min_w_0().child(
+                            label_content.unwrap_or_else(|| {
+                                Label::new(label)
+                                    .truncate()
+                                    .when(loading, |label| label.color(Color::Muted))
+                                    .into_any_element()
+                            }),
+                        )),
+                ),
         )
-        .child(h_flex().h_6().child(Label::new(label).truncate()))
 }

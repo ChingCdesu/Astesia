@@ -85,6 +85,7 @@ impl CompletionProvider for SqlCompletionProvider {
         let request = QueryCompletionRequest {
             target,
             text_before_cursor: prefix.to_owned(),
+            text_after_cursor: text[offset..].to_owned(),
         };
         let service = self.service.clone();
         let current_state = self.state.clone();
@@ -111,9 +112,7 @@ impl CompletionProvider for SqlCompletionProvider {
                 items
                     .into_iter()
                     .map(|item| CompletionItem {
-                        filter_text: Some(
-                            item.label.chars().take(filter.chars().count()).collect(),
-                        ),
+                        filter_text: Some(filter.clone()),
                         label: item.label,
                         detail: Some(item.detail),
                         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
@@ -212,6 +211,45 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
+        window
+            .update(cx, |editor, window, cx| {
+                editor
+                    .code_state()
+                    .unwrap()
+                    .clone()
+                    .update(cx, |state, cx| {
+                        state.replace_text_in_range(None, "ZZZ", window, cx);
+                    });
+                editor.show_completions(&super::super::text_editor::ShowCompletions, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.simulate_keystrokes(window.into(), "backspace");
+            cx.run_until_parked();
+        }
+        assert!(editor.read_with(cx, |editor, cx| {
+            editor
+                .code_state()
+                .unwrap()
+                .read(cx)
+                .completion_menu_state()
+                .open
+        }));
+        cx.simulate_keystrokes(window.into(), "backspace");
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| {
+                editor
+                    .code_state()
+                    .unwrap()
+                    .read(cx)
+                    .completion_menu_state()
+                    .query
+                    .clone()
+            }),
+            "SE"
+        );
         cx.simulate_keystrokes(window.into(), "enter");
         cx.run_until_parked();
         assert_eq!(editor.read_with(cx, |editor, cx| editor.text(cx)), "SELECT");
@@ -257,5 +295,27 @@ mod tests {
             editor.read_with(cx, |editor, cx| editor.text(cx)),
             "SELECT FROM"
         );
+        window
+            .update(cx, |editor, window, cx| {
+                editor.show_completions(&super::super::text_editor::ShowCompletions, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for _ in 0..4 {
+            cx.simulate_keystrokes(window.into(), "backspace");
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "SELECT "
+        );
+        assert!(!editor.read_with(cx, |editor, cx| {
+            editor
+                .code_state()
+                .unwrap()
+                .read(cx)
+                .completion_menu_state()
+                .open
+        }));
     }
 }

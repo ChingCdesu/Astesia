@@ -37,7 +37,7 @@ impl AstesiaWorkspace {
                         workspace.activate_tab(id, window, cx);
                     }))
                     .when(dirty, |tab| {
-                        tab.prefix(Indicator::dot().color(Color::Warning))
+                        tab.prefix(div().pl_2().child(Indicator::dot().color(Color::Warning)))
                     })
                     .suffix(
                         IconButton::new(format!("close-workspace-tab-{index}"), IconName::Close)

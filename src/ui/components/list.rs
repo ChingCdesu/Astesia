@@ -82,13 +82,6 @@ impl ListItem {
     pub fn aria_role(self, role: Role) -> Self {
         self.role(role)
     }
-    pub fn selectable(self, selectable: bool) -> Self {
-        if selectable {
-            self
-        } else {
-            self.role(Role::Group)
-        }
-    }
 }
 
 impl ListItem {

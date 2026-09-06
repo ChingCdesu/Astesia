@@ -1,5 +1,7 @@
 use super::*;
 
+const GRID_HEADER_HEIGHT: Pixels = px(28.0);
+
 impl DataGridItem {
     pub(super) fn render_grid(
         &self,
@@ -17,6 +19,7 @@ impl DataGridItem {
                 .sum::<f32>());
         let header = h_flex()
             .id("data-grid-header")
+            .h_full()
             .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
@@ -47,7 +50,6 @@ impl DataGridItem {
                     .enumerate()
                     .map(|(column_index, column)| {
                         let column_name = column.name.clone();
-                        let column_type = column.data_type.clone();
                         let sort_direction = self
                             .state
                             .query()
@@ -101,23 +103,13 @@ impl DataGridItem {
                             })
                             .focus_visible(|element| element.bg(colors.ghost_element_selected))
                             .child(
-                                v_flex()
+                                Label::new(column_name)
+                                    .buffer_font(cx)
+                                    .size(LabelSize::XSmall)
+                                    .weight(FontWeight::SEMIBOLD)
                                     .min_w_0()
                                     .flex_1()
-                                    .child(
-                                        Label::new(column_name)
-                                            .buffer_font(cx)
-                                            .size(LabelSize::XSmall)
-                                            .weight(FontWeight::SEMIBOLD)
-                                            .truncate(),
-                                    )
-                                    .child(
-                                        Label::new(column_type)
-                                            .buffer_font(cx)
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted)
-                                            .truncate(),
-                                    ),
+                                    .truncate(),
                             )
                             .children(sort_direction.map(|direction| {
                                 Icon::new(match direction {
@@ -165,26 +157,9 @@ impl DataGridItem {
                     }),
             );
 
-        let rows: AnyElement = if page.rows.is_empty() && self.state.drafts().is_empty() {
-            v_flex()
-                .flex_1()
-                .justify_center()
-                .items_center()
-                .gap_1()
-                .child(
-                    Label::new(text(language, "当前页没有数据", "No rows on this page"))
-                        .size(LabelSize::Small),
-                )
-                .child(
-                    Label::new(text(
-                        language,
-                        "可以返回上一页或刷新数据。",
-                        "Go to the previous page or refresh the data.",
-                    ))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-                )
-                .into_any_element()
+        let empty = page.rows.is_empty() && self.state.drafts().is_empty();
+        let rows: AnyElement = if empty {
+            grid_empty_placeholder(language).into_any_element()
         } else {
             gpui_kit::uniform_list(
                 "data-grid-rows",
@@ -650,22 +625,132 @@ impl DataGridItem {
             .into_any_element()
         };
 
-        div()
-            .id("data-grid")
-            .size_full()
-            .overflow_x_scroll()
-            .track_scroll(&self.horizontal_scroll_handle)
-            .on_drag_move::<GridColumnResize>(cx.listener(|item, event, _, cx| {
-                item.resize_column(event, cx);
-            }))
-            .child(
-                v_flex()
-                    .w(grid_width)
-                    .min_w_full()
-                    .h_full()
-                    .child(header)
-                    .child(rows),
-            )
-            .into_any_element()
+        grid_viewport(
+            header,
+            rows,
+            empty,
+            grid_width,
+            &self.horizontal_scroll_handle,
+        )
+        .on_drag_move::<GridColumnResize>(cx.listener(|item, event, _, cx| {
+            item.resize_column(event, cx);
+        }))
+        .into_any_element()
+    }
+}
+
+fn grid_empty_placeholder(language: crate::platform::UiLanguage) -> gpui_kit::Div {
+    v_flex()
+        .flex_1()
+        .justify_center()
+        .items_center()
+        .gap_1()
+        .child(
+            div().debug_selector(|| "empty-title".into()).child(
+                Label::new(text(language, "当前页没有数据", "No rows on this page"))
+                    .size(LabelSize::Small),
+            ),
+        )
+        .child(
+            Label::new(text(
+                language,
+                "可以返回上一页或刷新数据。",
+                "Go to the previous page or refresh the data.",
+            ))
+            .size(LabelSize::XSmall)
+            .color(Color::Muted),
+        )
+}
+
+fn grid_viewport(
+    header: impl IntoElement,
+    rows: AnyElement,
+    empty: bool,
+    width: Pixels,
+    scroll: &ScrollHandle,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let (rows, placeholder) = if empty {
+        (div().flex_1().into_any_element(), Some(rows))
+    } else {
+        (rows, None)
+    };
+    div()
+        .id("data-grid")
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .child(
+            div()
+                .id("data-grid-scroll")
+                .size_full()
+                .overflow_x_scroll()
+                .track_scroll(scroll)
+                .child(
+                    v_flex()
+                        .w(width)
+                        .min_w_full()
+                        .h_full()
+                        .child(div().h(GRID_HEADER_HEIGHT).flex_none().child(header))
+                        .child(rows),
+                ),
+        )
+        .children(placeholder.map(|placeholder| {
+            v_flex()
+                .absolute()
+                .top(GRID_HEADER_HEIGHT)
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .child(placeholder)
+        }))
+}
+
+#[cfg(test)]
+mod empty_layout_tests {
+    use super::*;
+
+    struct EmptyGridTest {
+        scroll: ScrollHandle,
+        width: Pixels,
+    }
+    impl Render for EmptyGridTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).h(px(400.0)).child(grid_viewport(
+                div().h(px(28.0)).flex_none(),
+                grid_empty_placeholder(crate::platform::UiLanguage::English).into_any_element(),
+                true,
+                px(3000.0),
+                &self.scroll,
+            ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn empty_message_stays_centered_in_visible_grid(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            crate::ui::initialize_editor_runtime(crate::platform::ThemePreference::Light, cx)
+        });
+        let scroll = ScrollHandle::new();
+        let (view, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            move |_, _| EmptyGridTest {
+                scroll,
+                width: px(600.0),
+            }
+        });
+        for width in [600.0, 400.0, 960.0] {
+            view.update(cx, |view, cx| {
+                view.width = px(width);
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            for offset in [0.0, -1200.0, width - 3000.0] {
+                scroll.set_offset(point(px(offset), px(0.0)));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                assert_eq!(scroll.offset().x, px(offset));
+                let title = cx.debug_bounds("empty-title").unwrap();
+                assert_eq!(title.center().x, px(width / 2.0));
+            }
+        }
     }
 }

@@ -202,7 +202,7 @@ impl WorkspaceItemBehavior for Entity<QueryItem> {
 
 impl WorkspaceItemBehavior for Entity<TableStructureItem> {
     fn label(&self, _fallback: &str, cx: &App) -> String {
-        self.read(cx).label()
+        self.read(cx).tab_label()
     }
 
     fn element(&self) -> AnyElement {
@@ -260,7 +260,7 @@ impl WorkspaceItemBehavior for Entity<DataGridItem> {
     }
 
     fn label(&self, _fallback: &str, cx: &App) -> String {
-        self.read(cx).label(cx)
+        self.read(cx).label()
     }
 
     fn element(&self) -> AnyElement {

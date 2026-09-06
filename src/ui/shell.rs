@@ -87,6 +87,7 @@ pub(super) fn apply_theme(preference: ThemePreference, cx: &mut App) {
         }
     };
     Theme::change(mode, None, cx);
+    super::theme::restore_selection_surfaces(cx);
     cx.refresh_windows();
 }
 pub(super) fn refresh_active_theme(preference: ThemePreference, cx: &mut App) {

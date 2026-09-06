@@ -359,3 +359,169 @@ fn first_catalog_load_preserves_parent_measurement(cx: &mut gpui_kit::TestAppCon
         );
     }
 }
+
+#[gpui_kit::test]
+fn expanded_column_details_render_with_tooltips(cx: &mut gpui_kit::TestAppContext) {
+    use super::catalog_tree::{CatalogDetail, CatalogTableKey};
+    use crate::application::TableStructureSnapshot;
+    use crate::db::ColumnInfo;
+    let (window, _directory) = sidebar_test_window(cx);
+    let panel = window.root(cx).unwrap();
+    panel.update(cx, |panel, cx| {
+        let target = QueryTarget {
+            connection_id: "primary".into(),
+            connection_name: "primary".into(),
+            database: "test".into(),
+            db_type: DbType::PostgreSQL,
+            session_generation: 7,
+        };
+        let key = CatalogTableKey::new(&target, &TableRef::qualified("public", "orders"));
+        panel.table_details.insert(
+            key.clone(),
+            CatalogDetail::Ready(TableStructureSnapshot {
+                columns: vec![ColumnInfo {
+                    name: "customer_display_name".into(),
+                    data_type: "VARCHAR(128)".into(),
+                    nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    comment: None,
+                }],
+                indexes: vec![],
+                constraints: None,
+                foreign_keys: None,
+            }),
+        );
+        let mut rows = Vec::new();
+        panel.append_detail_rows(&key, target.db_type, 2, &mut rows);
+        panel.sidebar_list.reset(rows.len());
+        *panel.sidebar_rows_cache.borrow_mut() = Some(std::rc::Rc::new(rows));
+        let request = panel.state.begin_refresh();
+        panel
+            .state
+            .finish_refresh(request, Ok(snapshot(profile("primary"))));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(panel.read_with(cx, |panel, _| panel
+        .sidebar_list
+        .bounds_for_item(1)
+        .is_some()));
+}
+
+#[gpui_kit::test]
+fn double_click_keeps_the_single_click_sidebar_state(cx: &mut gpui_kit::TestAppContext) {
+    use crate::application::connection_workspace::CatalogEntry;
+    use crate::application::LoadedDatabases;
+    let (window, _directory) = sidebar_test_window(cx);
+    let panel = window.root(cx).unwrap();
+    let target = QueryTarget {
+        connection_id: "primary".into(),
+        connection_name: "primary".into(),
+        database: "test".into(),
+        db_type: DbType::PostgreSQL,
+        session_generation: 7,
+    };
+    panel.update(cx, |panel, cx| {
+        let request = panel.state.begin_refresh();
+        panel
+            .state
+            .finish_refresh(request, Ok(snapshot(profile("primary"))));
+        let request = panel.state.begin_database_load("primary").unwrap();
+        panel.state.finish_database_load(
+            &request,
+            Ok(LoadedDatabases {
+                session_generation: 7,
+                databases: vec!["test".into()],
+            }),
+        );
+        for request in panel.state.begin_object_load(&target).unwrap() {
+            panel.state.finish_object_load(
+                &request,
+                CatalogEntry::failed(request.kind(), "test catalog"),
+            );
+        }
+        panel.notify_sidebar(cx);
+    });
+    cx.run_until_parked();
+    let mut visual = gpui_kit::VisualTestContext::from_window(window.into(), cx);
+    let database_position = panel.read_with(&visual, |panel, _| {
+        panel.sidebar_list.bounds_for_item(2).unwrap().center()
+    });
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui_kit::MouseDownEvent {
+            position: database_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+            first_mouse: false,
+        });
+        visual.simulate_event(gpui_kit::MouseUpEvent {
+            position: database_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+        });
+        visual.run_until_parked();
+        assert!(
+            panel.read_with(&visual, |panel, _| panel.expanded_databases.contains(&(
+                "primary".into(),
+                7,
+                "test".into()
+            )))
+        );
+    }
+    let group_position = panel.read_with(&visual, |panel, _| {
+        panel.sidebar_list.bounds_for_item(0).unwrap().center()
+    });
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui_kit::MouseDownEvent {
+            position: group_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+            first_mouse: false,
+        });
+        visual.simulate_event(gpui_kit::MouseUpEvent {
+            position: group_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+        });
+        visual.run_until_parked();
+        assert!(panel.read_with(&visual, |panel, _| panel.collapsed_groups.contains(&None)));
+    }
+
+    panel.update(&mut visual, |panel, cx| {
+        let mut disconnected = snapshot(profile("primary"));
+        disconnected.profiles[0].session.generation = None;
+        let request = panel.state.begin_refresh();
+        panel.state.finish_refresh(request, Ok(disconnected));
+        panel.collapsed_groups.clear();
+        panel.notify_sidebar(cx);
+    });
+    visual.run_until_parked();
+    let profile_position = panel.read_with(&visual, |panel, _| {
+        panel.sidebar_list.bounds_for_item(1).unwrap().center()
+    });
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui_kit::MouseDownEvent {
+            position: profile_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+            first_mouse: false,
+        });
+        visual.simulate_event(gpui_kit::MouseUpEvent {
+            position: profile_position,
+            button: MouseButton::Left,
+            modifiers: Default::default(),
+            click_count,
+        });
+        assert!(panel.read_with(&visual, |panel, _| panel
+            .state
+            .operation("primary")
+            .is_none()));
+        visual.run_until_parked();
+    }
+}

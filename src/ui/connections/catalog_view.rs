@@ -47,9 +47,11 @@ impl ConnectionProfilesPanel {
                     .size(ButtonSize::Compact)
                     .loading(self.redis_search_busy)
                     .disabled(self.redis_search_busy)
-                    .on_click(cx.listener(move |panel, event, window, cx| {
-                        panel.search_redis_keys(search_target.clone(), event, window, cx);
-                    })),
+                    .on_click(cx.listener(
+                        move |panel, event: &gpui_kit::ClickEvent, window, cx| {
+                            panel.search_redis_keys(search_target.clone(), event, window, cx);
+                        },
+                    )),
                 )
                 .into_any_element(),
         )
@@ -242,9 +244,17 @@ impl ConnectionProfilesPanel {
                                             );
                                         },
                                     ))
-                                    .on_click(cx.listener(move |panel, _, _, cx| {
-                                        panel.request_object_definition(click_object.clone(), cx);
-                                    }))
+                                    .on_click(cx.listener(
+                                        move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                            if event.click_count() > 1 {
+                                                return;
+                                            }
+                                            panel.request_object_definition(
+                                                click_object.clone(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
                                     .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
                                     .child(
                                         Label::new(label)
@@ -329,16 +339,21 @@ impl ConnectionProfilesPanel {
                 .icon_size(IconSize::XSmall)
                 .disabled(self.object_operation_in_progress)
                 .tooltip(Tooltip::text(create_label))
-                .on_click(cx.listener(move |panel, _, _, cx| {
-                    panel.request_object_mutation(
-                        ObjectMutationFormMode::Create {
-                            target: create_target.clone(),
-                            kind,
-                            schema: schema.clone(),
-                        },
-                        cx,
-                    );
-                })),
+                .on_click(cx.listener(
+                    move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                        if event.click_count() > 1 {
+                            return;
+                        }
+                        panel.request_object_mutation(
+                            ObjectMutationFormMode::Create {
+                                target: create_target.clone(),
+                                kind,
+                                schema: schema.clone(),
+                            },
+                            cx,
+                        );
+                    },
+                )),
             )
             .into_any_element()
     }

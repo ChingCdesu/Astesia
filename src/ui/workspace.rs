@@ -259,6 +259,7 @@ impl Render for AstesiaRoot {
 pub(super) struct AstesiaWorkspace {
     application: Arc<Application>,
     connection_profiles: Entity<ConnectionProfilesPanel>,
+    sidebar_resize: Entity<gpui_kit::component::ResizableState>,
     tabs: WorkspaceTabsModel,
     focus_handle: FocusHandle,
     tab_scroll_handle: gpui_kit::ScrollHandle,
@@ -337,6 +338,7 @@ impl AstesiaWorkspace {
         Self {
             application,
             connection_profiles,
+            sidebar_resize: cx.new(|_| gpui_kit::component::ResizableState::default()),
             tabs,
             focus_handle: cx.focus_handle(),
             tab_scroll_handle: gpui_kit::ScrollHandle::new(),
@@ -905,7 +907,7 @@ impl AstesiaWorkspace {
             WorkspaceCommand::ToggleSidebar => self.toggle_sidebar(cx),
             WorkspaceCommand::RefreshConnections => {
                 self.connection_profiles
-                    .update(cx, |panel, cx| panel.refresh_profiles(cx));
+                    .update(cx, |panel, cx| panel.refresh_sidebar(cx));
             }
             WorkspaceCommand::ConnectProfile => self
                 .connection_profiles
@@ -1026,7 +1028,7 @@ impl AstesiaWorkspace {
                 .is_some_and(|item| item.refresh_active_surface(cx))
         {
             self.connection_profiles
-                .update(cx, |panel, cx| panel.refresh_profiles(cx));
+                .update(cx, |panel, cx| panel.refresh_sidebar(cx));
         }
     }
 

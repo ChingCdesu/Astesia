@@ -1,7 +1,7 @@
 use crate::ui::components::{prelude::*, Tooltip};
 use gpui_kit::FontWeight;
 
-use super::{ConnectionProfilesPanel, NoticeTone, OpenProfileMenu, PanelNotice, SIDEBAR_WIDTH};
+use super::{ConnectionProfilesPanel, NoticeTone, OpenProfileMenu, PanelNotice};
 use crate::application::connection_workspace::{
     ConnectionWorkspaceError, DatabaseListState, ProfileOperationKind,
 };
@@ -90,6 +90,12 @@ impl ConnectionProfilesPanel {
         let profile_id = profile.id.clone();
         let selected = self.selected_profile_id.as_deref() == Some(profile.id.as_str());
         let operation = self.state.operation(&profile.id);
+        let loading = matches!(operation, Some(ProfileOperationKind::Connecting))
+            || (snapshot.session.is_connected()
+                && matches!(
+                    self.state.databases(&profile.id),
+                    None | Some(DatabaseListState::Loading { .. })
+                ));
         let session_label = match operation {
             Some(ProfileOperationKind::Connecting) => text(language, "连接中", "Connecting"),
             Some(ProfileOperationKind::Disconnecting) => text(language, "断开中", "Disconnecting"),
@@ -134,7 +140,12 @@ impl ConnectionProfilesPanel {
                 format!("\n{}", profile.tags.join(", "))
             }
         );
-        let status_color = if operation.is_some() {
+        if loading {
+            aria_label.push_str(&format!(", {}", text(language, "正在加载…", "Loading…")));
+        }
+        let status_color = if loading {
+            Color::Muted
+        } else if operation.is_some() {
             Color::Warning
         } else if snapshot.session.is_connected() {
             Color::Success
@@ -148,18 +159,31 @@ impl ConnectionProfilesPanel {
         let row_bounds = std::rc::Rc::new(std::cell::Cell::new(None::<gpui_kit::Bounds<Pixels>>));
         let painted_bounds = row_bounds.clone();
         let row = crate::ui::components::ListItem::new(format!("connection-profile-{profile_id}"))
+            .w_full()
             .inset(false)
+            .text_size(px(12.0))
             .spacing(crate::ui::components::ListItemSpacing::Dense)
-            .toggle_state(selected)
+            .toggle_state(
+                self.selected_sidebar_row
+                    .as_ref()
+                    .map_or(selected && self.selected_query_target.is_none(), |key| {
+                        key == &format!("profile-{profile_id}")
+                    }),
+            )
             .aria_role(gpui_kit::Role::Button)
             .aria_label(aria_label)
             .tooltip(Tooltip::text(tooltip))
             .start_slot(crate::ui::components::Indicator::dot().color(status_color))
             .child(
-                h_flex()
-                    .h_6()
-                    .flex_1()
-                    .child(Label::new(profile.name.clone()).truncate()),
+                h_flex().h_6().flex_1().min_w_0().child(
+                    Label::new(if loading {
+                        text(language, "正在加载…", "Loading…").to_string()
+                    } else {
+                        profile.name.clone()
+                    })
+                    .truncate()
+                    .when(loading, |label| label.color(Color::Muted)),
+                ),
             )
             .end_slot(
                 h_flex()
@@ -173,7 +197,8 @@ impl ConnectionProfilesPanel {
                     })
                     .child(
                         Label::new(engine_label(profile.db_type))
-                            .size(LabelSize::XSmall)
+                            .text_size(px(10.0))
+                            .flex_shrink_0()
                             .color(Color::Muted),
                     ),
             )
@@ -386,7 +411,8 @@ impl Render for ConnectionProfilesPanel {
         };
 
         v_flex()
-            .w(SIDEBAR_WIDTH)
+            .w_full()
+            .min_w_0()
             .h_full()
             .flex_none()
             .min_h_0()

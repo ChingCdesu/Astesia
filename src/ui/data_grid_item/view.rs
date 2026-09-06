@@ -21,14 +21,7 @@ impl Render for DataGridItem {
         let selected_rows = self.state.selected_row_count();
         let navigation_locked = self.has_local_changes() || saving;
         let query = self.state.query();
-        let filter_text = self.filter_editor.read(cx).text(cx);
-        let normalized_filter = filter_text.trim();
-        let sort_text = self.sort_editor.read(cx).text(cx);
-        let sort_changed = GridSort::parse_list(&sort_text).as_ref() != Ok(&query.sort);
-        let filter_changed =
-            query.filter.as_deref().unwrap_or_default() != normalized_filter || sort_changed;
         let filter_active = query.filter.is_some();
-        let filter_blocked = loading || unavailable || navigation_locked;
         let selection_available = self.state.has_selection();
         let export_in_progress = self.export_in_progress;
         let can_previous =
@@ -37,8 +30,6 @@ impl Render for DataGridItem {
             && !loading
             && !unavailable
             && !navigation_locked;
-        let summary =
-            page.map(|page| page_summary(language, query.page, page.rows.len(), page.total_rows));
         let editing_error = self
             .editing
             .as_ref()
@@ -272,77 +263,7 @@ impl Render for DataGridItem {
                     ),
             )
             .when(show_filter_bar, |element| {
-                element.child(
-                    h_flex()
-                        .h(px(34.0))
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .border_b_1()
-                        .border_color(colors.border)
-                        .bg(colors.surface_background)
-                        .child(Icon::new(IconName::Filter).size(IconSize::XSmall).color(
-                            if filter_active {
-                                Color::Accent
-                            } else {
-                                Color::Muted
-                            },
-                        ))
-                        .child(
-                            Label::new("WHERE")
-                                .size(LabelSize::XSmall)
-                                .weight(FontWeight::SEMIBOLD)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            div()
-                                .key_context("DataGridFilter")
-                                .h(px(24.0))
-                                .min_w(px(160.0))
-                                .max_w(px(520.0))
-                                .flex_1()
-                                .px_1()
-                                .border_1()
-                                .border_color(colors.border)
-                                .bg(colors.editor_background)
-                                .child(self.filter_editor.clone()),
-                        )
-                        .child(
-                            Label::new("ORDER BY")
-                                .size(LabelSize::XSmall)
-                                .buffer_font(cx)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            div()
-                                .key_context("DataGridFilter")
-                                .h(px(24.0))
-                                .flex_1()
-                                .min_w(px(100.0))
-                                .bg(colors.editor_background)
-                                .child(self.sort_editor.clone()),
-                        )
-                        .child(
-                            Button::new("apply-data-grid-filter", text(language, "应用", "Apply"))
-                                .size(ButtonSize::Compact)
-                                .style(ButtonStyle::Filled)
-                                .disabled(filter_blocked || !filter_changed)
-                                .key_binding(crate::ui::components::KeyBinding::for_action(
-                                    &ApplyGridFilter,
-                                    cx,
-                                ))
-                                .on_click(cx.listener(Self::apply_filter_click)),
-                        )
-                        .child(
-                            Button::new("clear-data-grid-filter", text(language, "清除", "Clear"))
-                                .size(ButtonSize::Compact)
-                                .disabled(
-                                    filter_blocked || (!filter_active && filter_text.is_empty()),
-                                )
-                                .on_click(cx.listener(Self::clear_filter_click)),
-                        ),
-                )
+                element.child(grid_filter_bar(&self.filter_editor, &self.sort_editor, cx))
             })
             .children(notice.map(|(color, icon, message)| {
                 h_flex()
@@ -619,32 +540,40 @@ impl Render for DataGridItem {
                     .border_t_1()
                     .border_color(colors.border)
                     .bg(colors.surface_background)
-                    .children(summary.map(|summary| Label::new(summary).size(LabelSize::XSmall)))
-                    .child(div().flex_1())
                     .child(
                         Label::new(format!(
-                            "{} {} / {} · {} {}",
+                            "{} {} / {}",
                             query.page_size,
                             text(language, "行", "rows"),
-                            text(language, "页", "page"),
-                            text(language, "第", "Page"),
-                            query.page
+                            text(language, "页", "page")
                         ))
-                        .size(LabelSize::XSmall)
+                        .text_size(px(12.0))
+                        .color(Color::Muted),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        IconButton::new("previous-data-grid-page", IconName::ChevronLeft)
+                            .icon_size(IconSize::XSmall)
+                            .size(ButtonSize::Compact)
+                            .aria_label(text(language, "上一页", "Previous page"))
+                            .tooltip(Tooltip::text(text(language, "上一页", "Previous page")))
+                            .disabled(!can_previous)
+                            .on_click(cx.listener(Self::previous_page)),
+                    )
+                    .child(
+                        Label::new(match language {
+                            crate::platform::UiLanguage::Chinese => format!("第 {} 页", query.page),
+                            _ => format!("Page {}", query.page),
+                        })
+                        .text_size(px(12.0))
                         .color(Color::Muted),
                     )
                     .child(
-                        Button::new(
-                            "previous-data-grid-page",
-                            text(language, "上一页", "Previous"),
-                        )
-                        .size(ButtonSize::Compact)
-                        .disabled(!can_previous)
-                        .on_click(cx.listener(Self::previous_page)),
-                    )
-                    .child(
-                        Button::new("next-data-grid-page", text(language, "下一页", "Next"))
+                        IconButton::new("next-data-grid-page", IconName::ChevronRight)
+                            .icon_size(IconSize::XSmall)
                             .size(ButtonSize::Compact)
+                            .aria_label(text(language, "下一页", "Next page"))
+                            .tooltip(Tooltip::text(text(language, "下一页", "Next page")))
                             .disabled(!can_next)
                             .on_click(cx.listener(Self::next_page)),
                     ),
@@ -658,4 +587,111 @@ fn grid_toolbar_action(id: &'static str, icon: IconName, label: &'static str) ->
         .size(ButtonSize::Compact)
         .aria_label(label)
         .tooltip(Tooltip::text(label))
+}
+
+fn grid_filter_bar(filter: &Entity<Editor>, sort: &Entity<Editor>, cx: &App) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .h(px(34.0))
+        .flex_none()
+        .border_b_1()
+        .border_color(colors.border)
+        .bg(colors.surface_background)
+        .child(grid_filter_control(
+            "WHERE",
+            "icons/astesia/data-filter.svg",
+            filter,
+            cx,
+        ))
+        .child(grid_filter_control(
+            "ORDER BY",
+            "icons/astesia/data-sort.svg",
+            sort,
+            cx,
+        ))
+}
+
+fn grid_filter_control(
+    label: &'static str,
+    icon: &'static str,
+    editor: &Entity<Editor>,
+    cx: &App,
+) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .debug_selector(move || label.into())
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .rounded(px(3.0))
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .h_full()
+                .flex_none()
+                .px_2()
+                .gap(px(6.0))
+                .child(
+                    Icon::from_path(icon)
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .flex_shrink_0(),
+                )
+                .child(Label::new(label).text_size(px(11.0))),
+        )
+        .child(
+            h_flex()
+                .key_context("DataGridFilter")
+                .h_full()
+                .flex_1()
+                .min_w_0()
+                .px_2()
+                .bg(colors.editor_background)
+                .child(editor.clone()),
+        )
+}
+
+#[cfg(test)]
+mod filter_layout_tests {
+    use super::*;
+
+    struct FilterBarTest {
+        filter: Entity<Editor>,
+        sort: Entity<Editor>,
+        width: Pixels,
+    }
+
+    impl Render for FilterBarTest {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(self.width)
+                .child(grid_filter_bar(&self.filter, &self.sort, cx))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn filter_controls_share_width_without_outer_spacing(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            crate::ui::initialize_editor_runtime(crate::platform::ThemePreference::Light, cx)
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| FilterBarTest {
+            filter: cx.new(|cx| Editor::inline_single_line("WHERE", window, cx)),
+            sort: cx.new(|cx| Editor::inline_single_line("ORDER BY", window, cx)),
+            width: px(1024.0),
+        });
+        for width in [1024.0, 400.0] {
+            view.update(cx, |view, cx| {
+                view.width = px(width);
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let filter = cx.debug_bounds("WHERE").unwrap();
+            let sort = cx.debug_bounds("ORDER BY").unwrap();
+            assert_eq!(filter.size.width, px(width / 2.0));
+            assert_eq!(sort.size.width, filter.size.width);
+            assert_eq!(filter.right(), sort.left());
+            assert_eq!(filter.top(), sort.top());
+            assert_eq!(filter.size.height, sort.size.height);
+        }
+    }
 }

@@ -11,6 +11,7 @@ mod er_diagram;
 mod export_service;
 mod grid_service;
 mod grid_transaction;
+mod schema_cache;
 pub(crate) use grid_transaction::GridTransaction;
 mod grid_session;
 mod grid_value;
