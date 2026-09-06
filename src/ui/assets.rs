@@ -6,6 +6,18 @@ pub(super) struct UiAssets;
 
 const ICONS: &[(&str, &[u8])] = &[
     (
+        "icons/astesia/play-filled.svg",
+        include_bytes!("../../icons/play-filled.svg"),
+    ),
+    (
+        "icons/astesia/data-filter.svg",
+        include_bytes!("../../icons/data-filter.svg"),
+    ),
+    (
+        "icons/astesia/data-sort.svg",
+        include_bytes!("../../icons/data-sort.svg"),
+    ),
+    (
         "icons/astesia/download.svg",
         include_bytes!("../../icons/download.svg"),
     ),

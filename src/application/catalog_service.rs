@@ -18,13 +18,28 @@ impl CatalogService {
         Self { manager }
     }
 
-    pub async fn databases(&self, connection_id: &str) -> Result<Vec<String>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_databases()
+    pub(crate) async fn refresh_schema(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+    ) -> Result<(), String> {
+        self.manager
+            .schema_cache
+            .invalidate(connection_id, database)
             .await
-            .map_err(|error| format!("获取数据库列表失败: {error}"))
+    }
+
+    pub async fn databases(&self, connection_id: &str) -> Result<Vec<String>, String> {
+        self.manager
+            .cached_schema(connection_id, "", "databases".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_databases()
+                    .await
+                    .map_err(|error| format!("获取数据库列表失败: {error}"))
+            })
+            .await
     }
 
     pub async fn tables(
@@ -32,12 +47,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<TableInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_tables(database)
+        self.manager
+            .cached_schema(connection_id, database, "tables".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_tables(database)
+                    .await
+                    .map_err(|error| format!("获取表列表失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取表列表失败: {error}"))
     }
 
     pub(crate) async fn catalog_section(
@@ -46,63 +65,28 @@ impl CatalogService {
         database: &str,
         kind: CatalogKind,
     ) -> CatalogEntry {
-        let handle = match self.manager.driver(connection_id).await {
-            Ok(handle) => handle,
-            Err(error) => return CatalogEntry::failed(kind, error),
-        };
-        let driver = match handle.lock_active().await {
-            Ok(driver) => driver,
-            Err(error) => return CatalogEntry::failed(kind, error),
-        };
-        if !kind.supported(driver.db_type()) {
-            return CatalogEntry::failed(
-                kind,
-                format!("{kind:?} is not supported for {:?}", driver.db_type()),
-            );
-        }
         match kind {
             CatalogKind::Schemas => CatalogEntry::Schemas(CatalogSection::from_result(
-                driver
-                    .get_schemas(database)
-                    .await
-                    .map_err(|error| format!("获取Schema列表失败: {error}")),
+                self.schemas(connection_id, database).await,
             )),
             CatalogKind::Tables => CatalogEntry::Tables(CatalogSection::from_result(
-                driver
-                    .get_tables(database)
-                    .await
-                    .map_err(|error| format!("获取表列表失败: {error}")),
+                self.tables(connection_id, database).await,
             )),
             CatalogKind::Views => CatalogEntry::Views(CatalogSection::from_result(
-                driver
-                    .get_views(database)
-                    .await
-                    .map_err(|error| format!("获取视图失败: {error}")),
+                self.views(connection_id, database).await,
             )),
             CatalogKind::Functions => CatalogEntry::Functions(CatalogSection::from_result(
-                driver
-                    .get_functions(database)
-                    .await
-                    .map_err(|error| format!("获取函数失败: {error}")),
+                self.functions(connection_id, database).await,
             )),
             CatalogKind::Procedures => CatalogEntry::Procedures(CatalogSection::from_result(
-                driver
-                    .get_procedures(database)
-                    .await
-                    .map_err(|error| format!("获取存储过程失败: {error}")),
+                self.procedures(connection_id, database).await,
             )),
             CatalogKind::Triggers => CatalogEntry::Triggers(CatalogSection::from_result(
-                driver
-                    .get_triggers(database)
-                    .await
-                    .map_err(|error| format!("获取触发器失败: {error}")),
+                self.triggers(connection_id, database).await,
             )),
-            CatalogKind::Users => CatalogEntry::Users(CatalogSection::from_result(
-                driver
-                    .get_users()
-                    .await
-                    .map_err(|error| format!("获取用户列表失败: {error}")),
-            )),
+            CatalogKind::Users => {
+                CatalogEntry::Users(CatalogSection::from_result(self.users(connection_id).await))
+            }
         }
     }
 
@@ -112,12 +96,44 @@ impl CatalogService {
         database: &str,
         table: &TableRef,
     ) -> Result<Vec<ColumnInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_columns(database, table)
+        self.manager
+            .cached_schema(
+                connection_id,
+                database,
+                serde_json::to_string(&("columns", table)).expect("metadata cache key"),
+                async {
+                    let handle = self.manager.driver(connection_id).await?;
+                    let driver = handle.lock_active().await?;
+                    driver
+                        .get_columns(database, table)
+                        .await
+                        .map_err(|error| format!("获取列信息失败: {error}"))
+                },
+            )
             .await
-            .map_err(|error| format!("获取列信息失败: {error}"))
+    }
+
+    pub async fn constraints(
+        &self,
+        connection_id: &str,
+        database: &str,
+        table: &TableRef,
+    ) -> Result<Vec<crate::db::ConstraintInfo>, String> {
+        self.manager
+            .cached_schema(
+                connection_id,
+                database,
+                serde_json::to_string(&("constraints", table)).expect("metadata cache key"),
+                async {
+                    let handle = self.manager.driver(connection_id).await?;
+                    let driver = handle.lock_active().await?;
+                    driver
+                        .get_constraints(database, table)
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await
     }
 
     pub async fn indexes(
@@ -126,12 +142,21 @@ impl CatalogService {
         database: &str,
         table: &TableRef,
     ) -> Result<Vec<IndexInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_indexes(database, table)
+        self.manager
+            .cached_schema(
+                connection_id,
+                database,
+                serde_json::to_string(&("indexes", table)).expect("metadata cache key"),
+                async {
+                    let handle = self.manager.driver(connection_id).await?;
+                    let driver = handle.lock_active().await?;
+                    driver
+                        .get_indexes(database, table)
+                        .await
+                        .map_err(|error| format!("获取索引信息失败: {error}"))
+                },
+            )
             .await
-            .map_err(|error| format!("获取索引信息失败: {error}"))
     }
 
     pub(crate) async fn table_structure(
@@ -156,30 +181,29 @@ impl CatalogService {
                 UnsupportedFeature::new(db_type, "SQL table structure browsing").to_string(),
             ));
         }
-        let columns = driver
-            .get_columns(database, table)
+        drop(driver);
+        let columns = self
+            .columns(connection_id, database, table)
             .await
-            .map_err(|error| TableStructureLoadError::Columns(error.to_string()))?;
-        let indexes = driver
-            .get_indexes(database, table)
+            .map_err(TableStructureLoadError::Columns)?;
+        let indexes = self
+            .indexes(connection_id, database, table)
             .await
-            .map_err(|error| TableStructureLoadError::Indexes(error.to_string()))?;
+            .map_err(TableStructureLoadError::Indexes)?;
         let constraints = if capabilities.constraints {
             Some(
-                driver
-                    .get_constraints(database, table)
+                self.constraints(connection_id, database, table)
                     .await
-                    .map_err(|error| TableStructureLoadError::Constraints(error.to_string()))?,
+                    .map_err(TableStructureLoadError::Constraints)?,
             )
         } else {
             None
         };
         let foreign_keys = if capabilities.foreign_keys {
             Some(
-                driver
-                    .get_foreign_keys(database, table)
+                self.foreign_keys(connection_id, database, table)
                     .await
-                    .map_err(|error| TableStructureLoadError::ForeignKeys(error.to_string()))?,
+                    .map_err(TableStructureLoadError::ForeignKeys)?,
             )
         } else {
             None
@@ -197,12 +221,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<String>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_schemas(database)
+        self.manager
+            .cached_schema(connection_id, database, "schemas".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_schemas(database)
+                    .await
+                    .map_err(|error| format!("获取Schema列表失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取Schema列表失败: {error}"))
     }
 
     pub async fn enum_values(
@@ -211,12 +239,21 @@ impl CatalogService {
         database: &str,
         enum_type: &str,
     ) -> Result<Vec<String>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_enum_values(database, enum_type)
+        self.manager
+            .cached_schema(
+                connection_id,
+                database,
+                serde_json::to_string(&("enum_values", enum_type)).expect("metadata cache key"),
+                async {
+                    let handle = self.manager.driver(connection_id).await?;
+                    let driver = handle.lock_active().await?;
+                    driver
+                        .get_enum_values(database, enum_type)
+                        .await
+                        .map_err(|error| format!("获取枚举值失败: {error}"))
+                },
+            )
             .await
-            .map_err(|error| format!("获取枚举值失败: {error}"))
     }
 
     pub async fn views(
@@ -224,12 +261,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<ViewInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_views(database)
+        self.manager
+            .cached_schema(connection_id, database, "views".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_views(database)
+                    .await
+                    .map_err(|error| format!("获取视图失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取视图失败: {error}"))
     }
 
     pub async fn functions(
@@ -237,12 +278,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<FunctionInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_functions(database)
+        self.manager
+            .cached_schema(connection_id, database, "functions".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_functions(database)
+                    .await
+                    .map_err(|error| format!("获取函数失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取函数失败: {error}"))
     }
 
     pub async fn procedures(
@@ -250,12 +295,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<ProcedureInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_procedures(database)
+        self.manager
+            .cached_schema(connection_id, database, "procedures".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_procedures(database)
+                    .await
+                    .map_err(|error| format!("获取存储过程失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取存储过程失败: {error}"))
     }
 
     pub async fn triggers(
@@ -263,12 +312,16 @@ impl CatalogService {
         connection_id: &str,
         database: &str,
     ) -> Result<Vec<TriggerInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_triggers(database)
+        self.manager
+            .cached_schema(connection_id, database, "triggers".into(), async {
+                let handle = self.manager.driver(connection_id).await?;
+                let driver = handle.lock_active().await?;
+                driver
+                    .get_triggers(database)
+                    .await
+                    .map_err(|error| format!("获取触发器失败: {error}"))
+            })
             .await
-            .map_err(|error| format!("获取触发器失败: {error}"))
     }
 
     pub async fn foreign_keys(
@@ -277,12 +330,47 @@ impl CatalogService {
         database: &str,
         table: &TableRef,
     ) -> Result<Vec<ForeignKeyInfo>, String> {
-        let handle = self.manager.driver(connection_id).await?;
-        let driver = handle.lock_active().await?;
-        driver
-            .get_foreign_keys(database, table)
+        self.manager
+            .cached_schema(
+                connection_id,
+                database,
+                serde_json::to_string(&("foreign_keys", table)).expect("metadata cache key"),
+                async {
+                    let handle = self.manager.driver(connection_id).await?;
+                    let driver = handle.lock_active().await?;
+                    driver
+                        .get_foreign_keys(database, table)
+                        .await
+                        .map_err(|error| format!("获取外键失败: {error}"))
+                        .map(|keys| {
+                            keys.into_iter()
+                                .map(|key| {
+                                    (
+                                        key.name,
+                                        key.from_table,
+                                        key.from_columns,
+                                        key.to_table,
+                                        key.to_columns,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                },
+            )
             .await
-            .map_err(|error| format!("获取外键失败: {error}"))
+            .map(|keys| {
+                keys.into_iter()
+                    .map(
+                        |(name, from_table, from_columns, to_table, to_columns)| ForeignKeyInfo {
+                            name,
+                            from_table,
+                            from_columns,
+                            to_table,
+                            to_columns,
+                        },
+                    )
+                    .collect()
+            })
     }
 
     pub async fn users(&self, connection_id: &str) -> Result<Vec<UserInfo>, String> {

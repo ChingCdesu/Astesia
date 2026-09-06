@@ -40,7 +40,7 @@ use super::object_definition_item::ObjectDefinition;
 use super::object_mutation_form::ObjectMutationFormMode;
 use super::shell::ShellSettings;
 
-pub(super) const SIDEBAR_WIDTH: Pixels = px(272.0);
+pub(in crate::ui) const SIDEBAR_WIDTH: Pixels = px(272.0);
 
 gpui_kit::actions!(astesia, [OpenProfileMenu]);
 
@@ -67,6 +67,7 @@ pub(super) struct ConnectionProfilesPanel {
     sidebar_row_keys: std::cell::RefCell<Vec<String>>,
     state: ConnectionWorkspaceState,
     selected_profile_id: Option<String>,
+    selected_sidebar_row: Option<String>,
     selected_profile_focus: gpui_kit::FocusHandle,
     selected_query_target: Option<QueryTarget>,
     notice: Option<PanelNotice>,
@@ -262,6 +263,7 @@ impl ConnectionProfilesPanel {
             sidebar_row_keys: std::cell::RefCell::new(Vec::new()),
             state: ConnectionWorkspaceState::default(),
             selected_profile_id: None,
+            selected_sidebar_row: None,
             selected_profile_focus: cx.focus_handle().tab_stop(true),
             selected_query_target: None,
             notice: None,

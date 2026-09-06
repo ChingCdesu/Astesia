@@ -749,7 +749,7 @@ impl Render for QueryItem {
                             if busy {
                                 IconName::LoaderCircle
                             } else {
-                                IconName::Play
+                                IconName::PlayFilled
                             },
                             text(language, "执行", "Run"),
                         )
@@ -802,7 +802,7 @@ impl Render for QueryItem {
                         .on_click(cx.listener(Self::clear)),
                     )
                     .child(div().flex_1())
-                    .child(Label::new(target_label).size(LabelSize::XSmall).truncate()),
+                    .child(Label::new(target_label).text_size(px(10.0)).truncate()),
             )
             .children(file_error.map(|error| {
                 h_flex()
@@ -822,6 +822,9 @@ impl Render for QueryItem {
             .child(
                 div()
                     .key_context("QueryEditor")
+                    .pt_2()
+                    .pl_2()
+                    .pr(px(18.0))
                     .h(px(300.0))
                     .min_h(px(120.0))
                     .flex_none()
@@ -935,6 +938,9 @@ fn query_toolbar_action(id: &'static str, icon: IconName, label: &'static str) -
     IconButton::new(id, icon)
         .icon_size(IconSize::Small)
         .size(ButtonSize::Compact)
+        .w(px(24.0))
+        .h(px(24.0))
+        .px_0()
         .aria_label(label)
         .tooltip(Tooltip::text(label))
 }

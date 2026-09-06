@@ -225,7 +225,7 @@ impl DataGridItem {
     ) -> Self {
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let filter_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
+            let mut editor = Editor::inline_single_line("WHERE", window, cx);
             editor.set_placeholder_text("status = 'active'", window, cx);
             editor
         });
@@ -235,7 +235,7 @@ impl DataGridItem {
             }
         });
         let sort_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
+            let mut editor = Editor::inline_single_line("ORDER BY", window, cx);
             editor.set_placeholder_text("id ASC", window, cx);
             editor
         });
@@ -278,15 +278,8 @@ impl DataGridItem {
         item
     }
 
-    pub(super) fn label(&self, cx: &App) -> String {
-        let language = self.settings.read(cx).language();
-        format!(
-            "{} · {} · {}/{}",
-            self.state.table(),
-            text(language, "数据", "Data"),
-            self.state.target().connection_name,
-            self.state.target().database,
-        )
+    pub(super) fn label(&self) -> String {
+        self.state.table().name().to_string()
     }
 
     pub(super) fn has_unsaved_changes(&self) -> bool {

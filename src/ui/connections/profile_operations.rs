@@ -3,6 +3,15 @@ use super::*;
 
 impl ConnectionProfilesPanel {
     pub(super) fn refresh(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_sidebar(cx);
+    }
+
+    pub(in crate::ui) fn refresh_sidebar(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.selected_query_target.clone() {
+            self.refresh_target_objects(target, cx);
+        } else if let Some(connection_id) = self.selected_profile_id.clone() {
+            self.refresh_profile_databases(connection_id, cx);
+        }
         self.refresh_profiles(cx);
     }
 
@@ -45,14 +54,15 @@ impl ConnectionProfilesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.click_count() > 1 {
+            return;
+        }
         self.select_profile_id(profile_id, cx);
         window.focus(&self.selected_profile_focus, cx);
-        if event.click_count() == 2 {
-            self.connect_selected(window, cx);
-        }
     }
 
     pub(super) fn select_profile_id(&mut self, profile_id: String, cx: &mut Context<Self>) {
+        self.selected_sidebar_row = Some(format!("profile-{profile_id}"));
         let changed = self.selected_profile_id.as_deref() != Some(&profile_id);
         self.selected_profile_id = Some(profile_id.clone());
         if changed {
@@ -263,13 +273,7 @@ impl ConnectionProfilesPanel {
         language: crate::platform::UiLanguage,
     ) -> bool {
         match outcome {
-            ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Succeeded)) => {
-                self.set_notice(
-                    NoticeTone::Info,
-                    text(language, "连接成功", "Connected successfully"),
-                );
-                true
-            }
+            ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Succeeded)) => true,
             ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Rejected(message)))
             | ProfileOperationOutcome::Connected(Err(message)) => {
                 self.set_notice(

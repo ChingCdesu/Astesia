@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 impl ConnectionProfilesPanel {
     pub(super) fn append_catalog_rows(&self, target: &QueryTarget, rows: &mut Vec<SidebarRow>) {
         let Some(ObjectListState::Ready { catalog, .. }) = self.state.objects(target) else {
-            Self::append_message(rows, format!("catalog-loading-{target:?}"), 1, None);
             return;
         };
         if target.db_type == crate::db::DbType::Redis {
@@ -81,10 +80,8 @@ impl ConnectionProfilesPanel {
                         );
                         let expanded = !self.collapsed_schemas.contains(&key);
                         let saved = target.clone();
-                        rows.push(SidebarRow::new(
-                            format!("schema-{key:?}"),
-                            depth,
-                            move |_, cx| {
+                        rows.push(
+                            SidebarRow::new(format!("schema-{key:?}"), depth, move |_, cx| {
                                 let click = key.clone();
                                 let keyboard = key.clone();
                                 let menu_target = saved.clone();
@@ -96,9 +93,14 @@ impl ConnectionProfilesPanel {
                                     Some(expanded),
                                     cx,
                                 )
-                                .on_click(cx.listener(move |panel, _, _, cx| {
-                                    panel.toggle_schema_group(click.clone(), cx)
-                                }))
+                                .on_click(cx.listener(
+                                    move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                        if event.click_count() > 1 {
+                                            return;
+                                        }
+                                        panel.toggle_schema_group(click.clone(), cx)
+                                    },
+                                ))
                                 .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
                                     panel.toggle_schema_group(keyboard.clone(), cx)
                                 }))
@@ -121,8 +123,9 @@ impl ConnectionProfilesPanel {
                                     ),
                                 )
                                 .into_any_element()
-                            },
-                        ));
+                            })
+                            .highlight(false),
+                        );
                         if !expanded {
                             continue;
                         }
@@ -132,18 +135,19 @@ impl ConnectionProfilesPanel {
                         let key = CatalogTableKey::new(target, &table.reference);
                         let saved = target.clone();
                         let table = table.clone();
-                        rows.push(SidebarRow::new(
-                            format!("table-{key:?}"),
-                            depth,
-                            move |panel, cx| panel.render_sql_table(&saved, &table, cx),
-                        ));
+                        rows.push(
+                            SidebarRow::new(format!("table-{key:?}"), depth, move |panel, cx| {
+                                panel.render_sql_table(&saved, &table, cx)
+                            })
+                            .highlight(self.selected_catalog_table.as_ref() == Some(&key)),
+                        );
                         if self.expanded_tables.contains(&key) {
-                            self.append_detail_rows(&key, depth + 1, rows);
+                            self.append_detail_rows(&key, target.db_type, depth + 1, rows);
                         }
                     }
                 }
             }
-            CatalogSection::Unsupported => {}
+            CatalogSection::Unsupported | CatalogSection::Loading => {}
             CatalogSection::Ready(tables) => {
                 self.append_heading(
                     rows,
@@ -174,16 +178,19 @@ impl ConnectionProfilesPanel {
                 for (index, table) in tables.iter().enumerate() {
                     let saved = target.clone();
                     let table = table.clone();
-                    rows.push(SidebarRow::new(
-                        format!("object-{target:?}-{:?}", table.reference),
-                        1,
-                        move |panel, cx| {
-                            panel.render_primary_catalog_row(&saved, &table, index, cx)
-                        },
-                    ));
+                    rows.push(
+                        SidebarRow::new(
+                            format!("object-{target:?}-{:?}", table.reference),
+                            1,
+                            move |panel, cx| {
+                                panel.render_primary_catalog_row(&saved, &table, index, cx)
+                            },
+                        )
+                        .highlight(false),
+                    );
                 }
             }
-            CatalogSection::Loading | CatalogSection::Failed(_) => {
+            CatalogSection::Failed(error) => {
                 self.append_heading(
                     rows,
                     target,
@@ -199,10 +206,7 @@ impl ConnectionProfilesPanel {
                     rows,
                     format!("primary-state-{target:?}"),
                     1,
-                    match tables {
-                        CatalogSection::Failed(error) => Some(error.clone()),
-                        _ => None,
-                    },
+                    Some(error.clone()),
                 );
             }
         }
@@ -234,7 +238,6 @@ impl ConnectionProfilesPanel {
                     "Functions" => text(language, "函数", "Functions"),
                     "Procedures" => text(language, "存储过程", "Procedures"),
                     "Triggers" => text(language, "触发器", "Triggers"),
-                    "Users" => text(language, "用户", "Users"),
                     label => label,
                 };
                 panel.catalog_section_heading_with_create(&target, label, count, kind, None, cx)
@@ -271,7 +274,7 @@ impl ConnectionProfilesPanel {
         macro_rules! section {
             ($section:expr, $variant:ident, $label:literal, $kind:ident) => {
                 match $section {
-                    CatalogSection::Unsupported => {}
+                    CatalogSection::Unsupported | CatalogSection::Loading => {}
                     CatalogSection::Ready(items) if items.is_empty() => {}
                     section => {
                         let count = match section {
@@ -305,12 +308,7 @@ impl ConnectionProfilesPanel {
                                 1,
                                 Some(error.clone()),
                             ),
-                            _ => Self::append_message(
-                                rows,
-                                format!("secondary-loading-{target:?}-{}", $label),
-                                1,
-                                None,
-                            ),
+                            CatalogSection::Unsupported | CatalogSection::Loading => {}
                         }
                     }
                 }
@@ -321,7 +319,6 @@ impl ConnectionProfilesPanel {
             CatalogEntry::Functions(s) => section!(s, Functions, "Functions", Function),
             CatalogEntry::Procedures(s) => section!(s, Procedures, "Procedures", Procedure),
             CatalogEntry::Triggers(s) => section!(s, Triggers, "Triggers", Trigger),
-            CatalogEntry::Users(s) => section!(s, Users, "Users", User),
             _ => {}
         }
     }

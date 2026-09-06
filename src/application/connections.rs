@@ -23,14 +23,58 @@ pub enum ConnectionOutcome {
 pub(super) struct ConnectionManager {
     runtime: ConnectionRuntime<()>,
     repository: SharedConnectionRepository,
+    pub(super) schema_cache: super::schema_cache::SchemaCache,
 }
 
 impl ConnectionManager {
     pub(super) fn new(repository: SharedConnectionRepository) -> Self {
         Self {
             runtime: ConnectionRuntime::new(),
+            schema_cache: super::schema_cache::SchemaCache::new(repository.schema_cache_path()),
             repository,
         }
+    }
+
+    pub(super) async fn cached_schema<T, F>(
+        &self,
+        connection: &str,
+        database: &str,
+        part: String,
+        load: F,
+    ) -> Result<T, String>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        F: std::future::Future<Output = Result<T, String>>,
+    {
+        let profile = self
+            .repository
+            .get(connection)
+            .await
+            .map_err(|e| e.to_string())?;
+        let in_memory_sqlite = profile.db_type == crate::db::DbType::SQLite
+            && (profile.host.contains(":memory:") || profile.host.contains("mode=memory"));
+        if !profile.db_type.capabilities().sql || in_memory_sqlite {
+            return load.await;
+        }
+        let ticket = match self
+            .schema_cache
+            .read(connection, profile.revision, database, &part)
+            .await
+        {
+            Ok((_, Some(value))) => return Ok(value),
+            Ok((ticket, None)) => Some(ticket),
+            Err(error) => {
+                log::warn!("Could not read local schema cache: {error}");
+                None
+            }
+        };
+        let value = load.await?;
+        if let Some(ticket) = ticket {
+            if let Err(error) = self.schema_cache.write(ticket, &value).await {
+                log::warn!("Could not persist local schema cache: {error}");
+            }
+        }
+        Ok(value)
     }
 
     pub async fn test_connection(
@@ -146,6 +190,9 @@ impl ConnectionManager {
         self.runtime
             .disconnect_replacing_under_global(lifecycle_guard, connection_id)
             .await;
+        if let Err(error) = self.schema_cache.invalidate(connection_id, None).await {
+            log::warn!("Could not invalidate deleted profile schema cache: {error}");
+        }
         Ok(result)
     }
 
@@ -182,11 +229,15 @@ impl ConnectionManager {
         connection_id: &str,
     ) -> Result<(u64, Vec<String>), String> {
         let (driver_handle, session_generation) = self.driver_session(connection_id).await?;
-        let driver = driver_handle.lock_active().await?;
-        let databases = driver
-            .get_databases()
-            .await
-            .map_err(|error| format!("获取数据库列表失败: {error}"))?;
+        let databases = self
+            .cached_schema(connection_id, "", "databases".into(), async {
+                let driver = driver_handle.lock_active().await?;
+                driver
+                    .get_databases()
+                    .await
+                    .map_err(|error| format!("获取数据库列表失败: {error}"))
+            })
+            .await?;
         Ok((session_generation, databases))
     }
 

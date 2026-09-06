@@ -10,6 +10,13 @@ impl ConnectionProfilesPanel {
         if !self.state.query_target_is_live(&target) {
             return;
         }
+        self.selected_sidebar_row = Some(match table.as_ref() {
+            Some(table) => format!(
+                "table-{:?}",
+                super::catalog_tree::CatalogTableKey::new(&target, table)
+            ),
+            None => format!("database-{target:?}"),
+        });
         self.selected_profile_id = Some(target.connection_id.clone());
         self.selected_query_target = Some(target.clone());
         self.selected_catalog_table = table
@@ -89,6 +96,7 @@ impl ConnectionProfilesPanel {
     }
 
     pub(super) fn toggle_database(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        self.selected_sidebar_row = Some(format!("database-{target:?}"));
         let key = (
             target.connection_id.clone(),
             target.session_generation,
@@ -102,6 +110,7 @@ impl ConnectionProfilesPanel {
     }
 
     pub(super) fn select_database(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
+        self.selected_sidebar_row = Some(format!("database-{target:?}"));
         self.selected_profile_id = Some(target.connection_id.clone());
         self.expanded_databases.insert((
             target.connection_id.clone(),
@@ -138,8 +147,9 @@ impl ConnectionProfilesPanel {
         }
         self.selected_profile_id = Some(target.connection_id.clone());
         self.selected_query_target = Some(target.clone());
-        self.selected_catalog_table =
-            Some(super::catalog_tree::CatalogTableKey::new(&target, &object));
+        let key = super::catalog_tree::CatalogTableKey::new(&target, &object);
+        self.selected_sidebar_row = Some(format!("table-{key:?}"));
+        self.selected_catalog_table = Some(key);
         self.notify_sidebar(cx);
         match target.db_type {
             crate::db::DbType::MongoDB => {

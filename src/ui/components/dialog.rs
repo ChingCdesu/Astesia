@@ -39,7 +39,7 @@ impl RenderOnce for Modal {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         kit::dialog::DialogContent::new()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(cx.theme().popover)
             .children(self.header)
             .child(
                 kit::v_flex()

@@ -84,13 +84,18 @@ impl ConnectionProfilesPanel {
                                 cx,
                             );
                         }))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.request_primary_data(
-                                target_for_click.clone(),
-                                table_for_click.clone(),
-                                cx,
-                            );
-                        }))
+                        .on_click(
+                            cx.listener(move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                panel.request_primary_data(
+                                    target_for_click.clone(),
+                                    table_for_click.clone(),
+                                    cx,
+                                );
+                            }),
+                        )
                         .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
                         .child(
                             Label::new(data_name)
@@ -126,13 +131,18 @@ impl ConnectionProfilesPanel {
                     IconButton::new(format!("view-table-structure-{index}"), IconName::ListTree)
                         .icon_size(IconSize::XSmall)
                         .tooltip(Tooltip::text(structure_label))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.request_table_structure(
-                                structure_target.clone(),
-                                structure_table.clone(),
-                                cx,
-                            );
-                        })),
+                        .on_click(cx.listener(
+                            move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                panel.request_table_structure(
+                                    structure_target.clone(),
+                                    structure_table.clone(),
+                                    cx,
+                                );
+                            },
+                        )),
                 )
             })
             .when(
@@ -142,9 +152,14 @@ impl ConnectionProfilesPanel {
                         IconButton::new(format!("copy-table-{index}"), IconName::Copy)
                             .icon_size(IconSize::XSmall)
                             .tooltip(Tooltip::text(text(language, "复制表", "Copy table")))
-                            .on_click(cx.listener(move |panel, _, _, cx| {
-                                panel.copy_table(copy_target.clone(), copy_table.clone(), cx);
-                            })),
+                            .on_click(cx.listener(
+                                move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                    if event.click_count() > 1 {
+                                        return;
+                                    }
+                                    panel.copy_table(copy_target.clone(), copy_table.clone(), cx);
+                                },
+                            )),
                     )
                 },
             )
@@ -157,13 +172,18 @@ impl ConnectionProfilesPanel {
                             "备份此表",
                             "Back up this table",
                         )))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.request_backup(
-                                backup_target.clone(),
-                                Some(vec![backup_table.clone()]),
-                                cx,
-                            );
-                        })),
+                        .on_click(cx.listener(
+                            move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                panel.request_backup(
+                                    backup_target.clone(),
+                                    Some(vec![backup_table.clone()]),
+                                    cx,
+                                );
+                            },
+                        )),
                 )
             })
             .when(
@@ -174,14 +194,19 @@ impl ConnectionProfilesPanel {
                             .icon_size(IconSize::XSmall)
                             .disabled(self.object_operation_in_progress)
                             .tooltip(Tooltip::text(text(language, "重命名表", "Rename table")))
-                            .on_click(cx.listener(move |panel, _, _, cx| {
-                                panel.request_rename_object(
-                                    rename_target.clone(),
-                                    DatabaseObjectKind::Table,
-                                    rename_name.clone(),
-                                    cx,
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                    if event.click_count() > 1 {
+                                        return;
+                                    }
+                                    panel.request_rename_object(
+                                        rename_target.clone(),
+                                        DatabaseObjectKind::Table,
+                                        rename_name.clone(),
+                                        cx,
+                                    );
+                                },
+                            )),
                     )
                 },
             )
@@ -193,16 +218,21 @@ impl ConnectionProfilesPanel {
                             .icon_size(IconSize::XSmall)
                             .disabled(self.object_operation_in_progress)
                             .tooltip(Tooltip::text(text(language, "删除表", "Drop table")))
-                            .on_click(cx.listener(move |panel, _, window, cx| {
-                                panel.confirm_drop_object(
-                                    drop_target.clone(),
-                                    ObjectMutation::Drop(DropObjectTarget::Table(
-                                        drop_name.clone(),
-                                    )),
-                                    window,
-                                    cx,
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                move |panel, event: &gpui_kit::ClickEvent, window, cx| {
+                                    if event.click_count() > 1 {
+                                        return;
+                                    }
+                                    panel.confirm_drop_object(
+                                        drop_target.clone(),
+                                        ObjectMutation::Drop(DropObjectTarget::Table(
+                                            drop_name.clone(),
+                                        )),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
                     )
                 },
             )

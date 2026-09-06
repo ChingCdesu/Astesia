@@ -32,6 +32,34 @@ impl ConnectionProfilesPanel {
                 .update(cx, |panel, cx| {
                     if panel.state.finish_database_load(&request, result) {
                         panel.reconcile_query_target(cx);
+                        if let Some(profile) = panel
+                            .state
+                            .snapshot()
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .profiles
+                                    .iter()
+                                    .find(|profile| profile.profile.id == connection_id)
+                            })
+                            .cloned()
+                        {
+                            let targets = panel
+                                .expanded_databases
+                                .iter()
+                                .filter(|(id, _, _)| id == &connection_id)
+                                .map(|(id, generation, database)| QueryTarget {
+                                    connection_id: id.clone(),
+                                    connection_name: profile.profile.name.clone(),
+                                    database: database.clone(),
+                                    db_type: profile.profile.db_type,
+                                    session_generation: *generation,
+                                })
+                                .collect::<Vec<_>>();
+                            for target in targets {
+                                panel.refresh_table_details(&target, cx);
+                                panel.load_objects(target, cx);
+                            }
+                        }
                         panel.notify_sidebar(cx);
                     }
                 })
@@ -47,8 +75,44 @@ impl ConnectionProfilesPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.clear_database_state(&connection_id);
-        self.load_databases(connection_id, cx);
+        self.refresh_profile_databases(connection_id, cx);
+    }
+
+    pub(super) fn refresh_profile_databases(
+        &mut self,
+        connection_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let application = self.application.clone();
+        let id = connection_id.clone();
+        let refresh = crate::ui::runtime::spawn(cx, async move {
+            application.catalog().refresh_schema(&id, None).await
+        });
+        cx.spawn(async move |panel, cx| {
+            let result = refresh.await.unwrap_or_else(|error| Err(error.to_string()));
+            panel
+                .update(cx, |panel, cx| {
+                    if let Err(error) = result {
+                        panel.notice = Some(PanelNotice {
+                            tone: NoticeTone::Error,
+                            message: error,
+                        });
+                        panel.notify_sidebar(cx);
+                        return;
+                    }
+                    panel
+                        .application
+                        .query_completions()
+                        .invalidate_connection(&connection_id);
+                    panel.state.clear_database_state(&connection_id);
+                    panel
+                        .table_details
+                        .retain(|key, _| !key.belongs_to_connection(&connection_id));
+                    panel.load_databases(connection_id, cx);
+                })
+                .ok();
+        })
+        .detach();
     }
 
     pub(super) fn load_objects(&mut self, target: QueryTarget, cx: &mut Context<Self>) {
@@ -103,7 +167,6 @@ impl ConnectionProfilesPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.clear_object_state(&target);
-        self.load_objects(target, cx);
+        self.refresh_target_objects(target, cx);
     }
 }

@@ -395,22 +395,6 @@ pub(super) fn can_advance(page: &GridPage, page_number: u32, page_size: u32) -> 
     }
 }
 
-pub(super) fn page_summary(
-    language: crate::platform::UiLanguage,
-    page: u32,
-    rows: usize,
-    total_rows: Option<u64>,
-) -> String {
-    match (language, total_rows) {
-        (crate::platform::UiLanguage::Chinese, Some(total)) => {
-            format!("第 {page} 页 · {rows}/{total} 行")
-        }
-        (crate::platform::UiLanguage::Chinese, None) => format!("第 {page} 页 · {rows} 行"),
-        (_, Some(total)) => format!("Page {page} · {rows}/{total} rows"),
-        (_, None) => format!("Page {page} · {rows} rows"),
-    }
-}
-
 pub(super) fn centered_grid_state(
     status: GridSessionStatus<'_>,
     language: crate::platform::UiLanguage,

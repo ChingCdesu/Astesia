@@ -10,6 +10,7 @@ type RowRenderer =
 pub(super) struct SidebarRow {
     key: String,
     depth: usize,
+    highlight: Option<bool>,
     render: Box<RowRenderer>,
 }
 
@@ -23,8 +24,14 @@ impl SidebarRow {
         Self {
             key,
             depth,
+            highlight: None,
             render: Box::new(render),
         }
+    }
+
+    fn highlight(mut self, selected: bool) -> Self {
+        self.highlight = Some(selected);
+        self
     }
 }
 
@@ -93,10 +100,45 @@ impl ConnectionProfilesPanel {
                     #[cfg(test)]
                     panel.sidebar_rendered_rows.borrow_mut().push(index);
                     let row = &rows[index];
+                    let clicked_key = row.key.clone();
+                    let selected = panel
+                        .selected_sidebar_row
+                        .as_ref()
+                        .map(|key| key == &row.key);
+                    let outlined = row
+                        .highlight
+                        .is_some_and(|fallback| selected.unwrap_or(fallback));
                     div()
                         .id(row.key.clone())
+                        .relative()
+                        .w_full()
+                        .when_some(row.highlight, |element, contextual_selection| {
+                            let selected = selected.unwrap_or(contextual_selection);
+                            let colors = cx.theme().colors();
+                            if selected {
+                                element.bg(colors.ghost_element_selected)
+                            } else {
+                                element.hover(|element| element.bg(colors.ghost_element_hover))
+                            }
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |panel, _, _, cx| {
+                                panel.selected_sidebar_row = Some(clicked_key.clone());
+                                cx.notify();
+                            }),
+                        )
                         .pl(px(row.depth as f32 * 20.0))
                         .child((row.render)(panel, cx))
+                        .when(outlined, |element| {
+                            element.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border_focused),
+                            )
+                        })
                         .into_any_element()
                 })
                 .unwrap_or_else(|_| div().into_any_element())
@@ -124,6 +166,9 @@ impl ConnectionProfilesPanel {
                         .unwrap_or_else(|| text(language, "未分组", "Ungrouped").to_string());
                     let action_key = key.clone();
                     crate::ui::components::ListItem::new("profile-group")
+                        .w_full()
+                        .inset(false)
+                        .text_size(px(12.0))
                         .spacing(crate::ui::components::ListItemSpacing::Dense)
                         .start_slot(
                             Icon::new(if collapsed {
@@ -131,16 +176,19 @@ impl ConnectionProfilesPanel {
                             } else {
                                 IconName::ChevronDown
                             })
+                            .size(IconSize::XSmall)
                             .color(Color::Muted),
                         )
                         .child(
-                            h_flex()
-                                .h_6()
-                                .child(Label::new(name.clone()).color(Color::Muted)),
+                            h_flex().h_6().child(
+                                Label::new(name.clone())
+                                    .text_size(px(10.0))
+                                    .color(Color::Muted),
+                            ),
                         )
                         .end_slot(
                             Label::new(count.to_string())
-                                .size(LabelSize::XSmall)
+                                .text_size(px(10.0))
                                 .color(Color::Muted),
                         )
                         .aria_role(gpui_kit::Role::Button)
@@ -152,12 +200,17 @@ impl ConnectionProfilesPanel {
                                 text(language, "已展开", "expanded")
                             }
                         ))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            if !panel.collapsed_groups.remove(&action_key) {
-                                panel.collapsed_groups.insert(action_key.clone());
-                            }
-                            panel.notify_sidebar(cx);
-                        }))
+                        .on_click(
+                            cx.listener(move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                                if event.click_count() > 1 {
+                                    return;
+                                }
+                                if !panel.collapsed_groups.remove(&action_key) {
+                                    panel.collapsed_groups.insert(action_key.clone());
+                                }
+                                panel.notify_sidebar(cx);
+                            }),
+                        )
                         .into_any_element()
                 },
             ));
@@ -166,17 +219,29 @@ impl ConnectionProfilesPanel {
             }
             for profile in group.profiles {
                 let saved = profile.clone();
-                rows.push(SidebarRow::new(
-                    format!("profile-{}", profile.profile.id),
-                    0,
-                    move |panel, cx| panel.render_profile(&saved, cx),
-                ));
+                rows.push(
+                    SidebarRow::new(
+                        format!("profile-{}", profile.profile.id),
+                        0,
+                        move |panel, cx| panel.render_profile(&saved, cx),
+                    )
+                    .highlight(
+                        self.selected_profile_id.as_deref() == Some(profile.profile.id.as_str())
+                            && self.selected_query_target.is_none(),
+                    ),
+                );
                 if !profile.session.is_connected() {
                     continue;
                 }
                 let Some(DatabaseListState::Ready { databases, .. }) =
                     self.state.databases(&profile.profile.id)
                 else {
+                    if matches!(
+                        self.state.databases(&profile.profile.id),
+                        None | Some(DatabaseListState::Loading { .. })
+                    ) {
+                        continue;
+                    }
                     let saved = profile.clone();
                     rows.push(SidebarRow::new(
                         format!(
@@ -226,13 +291,15 @@ impl ConnectionProfilesPanel {
                             control
                         });
                     let saved = target.clone();
-                    rows.push(SidebarRow::new(
-                        format!("database-{target:?}"),
-                        0,
-                        move |panel, cx| {
+                    rows.push(
+                        SidebarRow::new(format!("database-{target:?}"), 0, move |panel, cx| {
                             panel.render_database_row(&saved, control.clone(), expanded, cx)
-                        },
-                    ));
+                        })
+                        .highlight(
+                            self.selected_query_target.as_ref() == Some(&target)
+                                && self.selected_catalog_table.is_none(),
+                        ),
+                    );
                     if expanded {
                         self.append_catalog_rows(&target, &mut rows);
                     }
@@ -253,19 +320,26 @@ impl ConnectionProfilesPanel {
         let keyboard = target.clone();
         let menu_target = target.clone();
         let drop_target = target.clone();
-        tree_row(
+        super::catalog_tree::tree_row_loading(
             format!("database-{target:?}"),
             target.database.clone(),
             "database",
             Some(expanded),
+            self.state
+                .objects(target)
+                .is_some_and(|state| state.is_loading())
+                .then(|| text(self.settings.read(cx).language(), "正在加载…", "Loading…")),
             cx,
         )
         .key_context("QueryTargetRow")
         .aria_selected(self.selected_query_target.as_ref() == Some(target))
-        .when(self.selected_query_target.as_ref() == Some(target), |row| {
-            row.bg(cx.theme().colors().ghost_element_selected)
-        })
-        .on_click(cx.listener(move |panel, _, _, cx| panel.toggle_database(clicked.clone(), cx)))
+        .on_click(
+            cx.listener(move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                if event.click_count() <= 1 {
+                    panel.toggle_database(clicked.clone(), cx);
+                }
+            }),
+        )
         .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
             panel.toggle_database(keyboard.clone(), cx)
         }))

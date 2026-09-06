@@ -17,63 +17,65 @@ impl DataGridItem {
                     | GridSessionStatus::Unavailable { .. }
             );
         let owner = cx.entity().downgrade();
-        Button::new(
-            "grid-transaction-mode",
-            if manual { "Tx: Manual" } else { "Tx: Auto" },
-        )
-        .size(ButtonSize::Compact)
-        .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
-        .disabled(self.transaction_busy)
-        .popup_menu(move |menu, _, _| {
-            let mut menu = menu.header(text(language, "事务模式", "Transaction Mode"));
-            for mode in [false, true] {
-                let owner = owner.clone();
-                menu = menu.item(
-                    ContextMenuEntry::new(if mode { "Manual" } else { "Auto" })
-                        .toggleable(IconPosition::Start, manual == mode)
-                        .disabled(locked)
-                        .handler(move |_, cx| {
-                            owner
-                                .update(cx, |item, cx| {
-                                    item.change_transaction_configuration(mode, isolation, cx)
-                                })
-                                .ok();
-                        }),
-                );
-            }
-            menu = menu
-                .separator()
-                .header(text(language, "事务隔离级别", "Transaction Isolation"));
-            for level in engine.transaction_isolations() {
-                let level = *level;
-                let owner = owner.clone();
-                menu = menu.item(
-                    ContextMenuEntry::new(isolation_label(level))
-                        .toggleable(IconPosition::Start, isolation == level)
-                        .disabled(locked)
-                        .handler(move |_, cx| {
-                            owner
-                                .update(cx, |item, cx| {
-                                    item.change_transaction_configuration(manual, level, cx)
-                                })
-                                .ok();
-                        }),
-                );
-            }
-            menu.separator().label(if manual {
-                text(
+        let label = if manual { "Tx: Manual" } else { "Tx: Auto" };
+        Button::new("grid-transaction-mode", "")
+            .size(ButtonSize::Compact)
+            .aria_label(label)
+            .child(Label::new(label).size(LabelSize::XSmall))
+            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
+            .disabled(self.transaction_busy)
+            .popup_menu(move |menu, _, _| {
+                let mut menu = menu.header(text(language, "事务模式", "Transaction Mode"));
+                for mode in [false, true] {
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        ContextMenuEntry::new(if mode { "Manual" } else { "Auto" })
+                            .toggleable(IconPosition::Start, manual == mode)
+                            .disabled(locked)
+                            .handler(move |_, cx| {
+                                owner
+                                    .update(cx, |item, cx| {
+                                        item.change_transaction_configuration(mode, isolation, cx)
+                                    })
+                                    .ok();
+                            }),
+                    );
+                }
+                menu = menu.separator().header(text(
                     language,
-                    "保存写入事务；提交后才持久化",
-                    "Save applies changes; Commit makes them durable",
-                )
-            } else {
-                text(
-                    language,
-                    "保存的更改自动提交",
-                    "Saved changes are automatically committed",
-                )
+                    "事务隔离级别",
+                    "Transaction Isolation",
+                ));
+                for level in engine.transaction_isolations() {
+                    let level = *level;
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        ContextMenuEntry::new(isolation_label(level))
+                            .toggleable(IconPosition::Start, isolation == level)
+                            .disabled(locked)
+                            .handler(move |_, cx| {
+                                owner
+                                    .update(cx, |item, cx| {
+                                        item.change_transaction_configuration(manual, level, cx)
+                                    })
+                                    .ok();
+                            }),
+                    );
+                }
+                menu.separator().label(if manual {
+                    text(
+                        language,
+                        "保存写入事务；提交后才持久化",
+                        "Save applies changes; Commit makes them durable",
+                    )
+                } else {
+                    text(
+                        language,
+                        "保存的更改自动提交",
+                        "Saved changes are automatically committed",
+                    )
+                })
             })
-        })
     }
 
     fn change_transaction_configuration(

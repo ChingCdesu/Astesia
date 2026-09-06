@@ -28,6 +28,9 @@ use crate::{
 };
 
 impl SharedConnectionRepository {
+    pub(crate) fn schema_cache_path(&self) -> PathBuf {
+        self.database_path.with_extension("schema-cache.sqlite3")
+    }
     pub fn new(database_path: PathBuf, vault: CredentialVaultHandle) -> Self {
         let usage_locks = ConnectionUsageLocks::for_repository(&database_path);
         Self {

@@ -201,15 +201,6 @@ impl DataGridItem {
         self.apply_filter(window, cx);
     }
 
-    pub(super) fn apply_filter_click(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_filter(window, cx);
-    }
-
     pub(super) fn apply_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.commit_cell_edit(window, cx) || self.state.has_changes() {
             return;
@@ -236,36 +227,6 @@ impl DataGridItem {
                 self.load(cx);
             }
             Ok(false) => {}
-            Err(error) => {
-                let language = self.settings.read(cx).language();
-                self.operation_notice =
-                    Some(GridNotice::Error(grid_error_message(error, language)));
-                cx.notify();
-            }
-        }
-    }
-
-    pub(super) fn clear_filter_click(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.commit_cell_edit(window, cx) || self.state.has_changes() {
-            return;
-        }
-        match self.state.set_filter(None) {
-            Ok(changed) => {
-                self.filter_editor.update(cx, |editor, cx| {
-                    editor.set_text("", window, cx);
-                });
-                self.operation_notice = None;
-                if changed {
-                    self.load(cx);
-                } else {
-                    cx.notify();
-                }
-            }
             Err(error) => {
                 let language = self.settings.read(cx).language();
                 self.operation_notice =

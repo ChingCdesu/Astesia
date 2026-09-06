@@ -28,6 +28,7 @@ mod table_structure_item;
 mod tabs;
 mod task_center_item;
 mod text_editor;
+mod theme;
 mod workspace;
 
 use std::sync::Arc;
@@ -69,6 +70,7 @@ pub fn run() {
 fn initialize_editor_runtime(theme: crate::platform::ThemePreference, cx: &mut App) {
     runtime::init(cx);
     gpui_kit::init(cx);
+    theme::install(cx);
     apply_theme(theme, cx);
     cx.bind_keys([KeyBinding::new(
         "escape",

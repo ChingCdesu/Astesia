@@ -197,3 +197,77 @@ async fn test_connection_rejects_reusing_a_password_for_a_changed_endpoint() {
 
     assert!(error.contains("不能复用旧密码"));
 }
+
+#[tokio::test]
+async fn schema_snapshot_survives_reopen_until_explicit_refresh() {
+    let (directory, manager) = manager();
+    let path = directory.path().join("source.sqlite3");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let source = sqlx::SqlitePool::connect_with(options).await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+        .execute(&source)
+        .await
+        .unwrap();
+    let mut config = sqlite_config("cached");
+    config.host = path.to_string_lossy().into_owned();
+    manager.repository.create(config, false).await.unwrap();
+    assert_eq!(
+        manager.connect("cached").await.unwrap(),
+        ConnectionOutcome::Succeeded
+    );
+    let catalog = crate::application::CatalogService::new(manager.clone());
+    let table = crate::db::TableRef::unqualified("users");
+    assert_eq!(catalog.tables("cached", "main").await.unwrap().len(), 1);
+    assert_eq!(
+        catalog
+            .columns("cached", "main", &table)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    catalog
+        .table_structure("cached", "main", &table)
+        .await
+        .unwrap();
+    manager.disconnect_local("cached").await;
+    sqlx::query("ALTER TABLE users ADD COLUMN email TEXT")
+        .execute(&source)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE orders (id INTEGER)")
+        .execute(&source)
+        .await
+        .unwrap();
+    let reopened = ConnectionManager::new(manager.repository.clone());
+    let catalog = crate::application::CatalogService::new(reopened.clone());
+    assert_eq!(catalog.tables("cached", "main").await.unwrap().len(), 1);
+    assert_eq!(
+        catalog
+            .columns("cached", "main", &table)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    catalog
+        .refresh_schema("cached", Some("main"))
+        .await
+        .unwrap();
+    assert!(catalog.tables("cached", "main").await.is_err());
+    assert_eq!(
+        reopened.connect("cached").await.unwrap(),
+        ConnectionOutcome::Succeeded
+    );
+    assert_eq!(catalog.tables("cached", "main").await.unwrap().len(), 2);
+    assert_eq!(
+        catalog
+            .columns("cached", "main", &table)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}

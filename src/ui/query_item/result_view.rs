@@ -240,6 +240,9 @@ impl QueryItem {
                 .into_any_element();
         }
         if result.columns.is_empty() {
+            if result.affected_rows == 0 {
+                return centered_message(text(language, "无结果", "no result"), cx);
+            }
             return centered_message(
                 &format!(
                     "{} {}",

@@ -39,7 +39,7 @@ pub struct WorkspaceStatus {
 impl WorkspaceTheme for Theme {
     fn colors(&self) -> WorkspaceColors {
         WorkspaceColors {
-            background: self.background,
+            background: self.title_bar,
             border: self.border,
             border_focused: self.ring,
             editor_background: self.background,
@@ -48,8 +48,8 @@ impl WorkspaceTheme for Theme {
             ghost_element_hover: self.list_hover,
             ghost_element_selected: self.list_active,
             panel_background: self.sidebar,
-            status_bar_background: self.background,
-            surface_background: self.background,
+            status_bar_background: self.title_bar,
+            surface_background: self.sidebar,
             text: self.foreground,
             text_accent: self.primary,
             text_muted: self.muted_foreground,
