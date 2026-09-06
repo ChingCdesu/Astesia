@@ -78,10 +78,27 @@ pub(crate) enum ProfileDraftField {
     Color,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct ProfileValidationError {
-    pub(crate) field: ProfileDraftField,
-    pub(crate) message: String,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProfileValidationError {
+    NameRequired,
+    FilePathRequired,
+    HostRequired,
+    InvalidPort,
+    InvalidColor,
+    InvalidTag,
+    TooManyTags,
+}
+
+impl ProfileValidationError {
+    pub(crate) fn field(self) -> ProfileDraftField {
+        match self {
+            Self::NameRequired => ProfileDraftField::Name,
+            Self::FilePathRequired | Self::HostRequired => ProfileDraftField::Endpoint,
+            Self::InvalidPort => ProfileDraftField::Port,
+            Self::InvalidColor => ProfileDraftField::Color,
+            Self::InvalidTag | Self::TooManyTags => ProfileDraftField::Tags,
+        }
+    }
 }
 
 pub(crate) struct ProfileDraft {
@@ -132,19 +149,12 @@ impl ProfileDraft {
         let mut errors = Vec::new();
 
         if name.is_empty() {
-            errors.push(ProfileValidationError {
-                field: ProfileDraftField::Name,
-                message: "连接名称不能为空".to_string(),
-            });
+            errors.push(ProfileValidationError::NameRequired);
         }
         if endpoint.is_empty() {
-            errors.push(ProfileValidationError {
-                field: ProfileDraftField::Endpoint,
-                message: match spec {
-                    EngineProfileSpec::File { .. } => "SQLite 文件路径不能为空",
-                    EngineProfileSpec::Network { .. } => "主机地址不能为空",
-                }
-                .to_string(),
+            errors.push(match spec {
+                EngineProfileSpec::File { .. } => ProfileValidationError::FilePathRequired,
+                EngineProfileSpec::Network { .. } => ProfileValidationError::HostRequired,
             });
         }
 
@@ -158,10 +168,7 @@ impl ProfileDraft {
                     match port_text.parse::<u16>() {
                         Ok(port) if port > 0 => port,
                         _ => {
-                            errors.push(ProfileValidationError {
-                                field: ProfileDraftField::Port,
-                                message: "端口必须是 1–65535 的整数".to_string(),
-                            });
+                            errors.push(ProfileValidationError::InvalidPort);
                             0
                         }
                     }
@@ -177,21 +184,15 @@ impl ProfileDraft {
 
         let tags = match normalize_tags(&self.tags) {
             Ok(tags) => tags,
-            Err(message) => {
-                errors.push(ProfileValidationError {
-                    field: ProfileDraftField::Tags,
-                    message,
-                });
+            Err(error) => {
+                errors.push(error);
                 Vec::new()
             }
         };
         let color = match normalize_color(&self.color) {
             Ok(color) => color,
-            Err(message) => {
-                errors.push(ProfileValidationError {
-                    field: ProfileDraftField::Color,
-                    message: message.to_string(),
-                });
+            Err(error) => {
+                errors.push(error);
                 None
             }
         };
@@ -227,19 +228,19 @@ fn optional_text(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn normalize_color(value: &str) -> Result<Option<String>, &'static str> {
+fn normalize_color(value: &str) -> Result<Option<String>, ProfileValidationError> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
     }
     let hex = value.strip_prefix('#').unwrap_or(value);
     if hex.len() != 6 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err("颜色必须使用 #RRGGBB 格式");
+        return Err(ProfileValidationError::InvalidColor);
     }
     Ok(Some(format!("#{}", hex.to_ascii_uppercase())))
 }
 
-fn normalize_tags(value: &str) -> Result<Vec<String>, String> {
+fn normalize_tags(value: &str) -> Result<Vec<String>, ProfileValidationError> {
     let mut tags = Vec::new();
     let mut seen = HashSet::new();
     for tag in value
@@ -248,12 +249,12 @@ fn normalize_tags(value: &str) -> Result<Vec<String>, String> {
         .filter(|tag| !tag.is_empty())
     {
         if tag.chars().count() > 64 || tag.chars().any(char::is_control) {
-            return Err("每个标签最多 64 个字符，且不能包含控制字符".to_string());
+            return Err(ProfileValidationError::InvalidTag);
         }
         if seen.insert(tag.to_lowercase()) {
             tags.push(tag.to_string());
             if tags.len() > 20 {
-                return Err("每个连接最多可设置 20 个标签".to_string());
+                return Err(ProfileValidationError::TooManyTags);
             }
         }
     }

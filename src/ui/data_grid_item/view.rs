@@ -2,22 +2,31 @@ use super::*;
 
 impl Render for DataGridItem {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let status = self.state.status();
         let page = self.state.page();
         let loading = matches!(status, GridSessionStatus::Loading);
         let active_loading = loading || (self.showing_chart && self.chart_loading);
-        let saving = matches!(status, GridSessionStatus::Saving);
-        let unavailable = matches!(status, GridSessionStatus::Unavailable { .. });
+        let saving = matches!(status, GridSessionStatus::Saving) || self.transaction_busy;
+        let transaction_closed = self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.is_closed());
+        let unavailable = matches!(status, GridSessionStatus::Unavailable { .. })
+            || transaction_closed
+            || self.save_recovery_sql.is_some();
         let has_changes = self.state.has_changes();
         let has_unsaved_changes = self.has_unsaved_changes();
         let selected_rows = self.state.selected_row_count();
-        let navigation_locked = has_unsaved_changes || saving;
+        let navigation_locked = self.has_local_changes() || saving;
         let query = self.state.query();
         let filter_text = self.filter_editor.read(cx).text(cx);
         let normalized_filter = filter_text.trim();
-        let filter_changed = query.filter.as_deref().unwrap_or_default() != normalized_filter;
+        let sort_text = self.sort_editor.read(cx).text(cx);
+        let sort_changed = GridSort::parse_list(&sort_text).as_ref() != Ok(&query.sort);
+        let filter_changed =
+            query.filter.as_deref().unwrap_or_default() != normalized_filter || sort_changed;
         let filter_active = query.filter.is_some();
         let filter_blocked = loading || unavailable || navigation_locked;
         let selection_available = self.state.has_selection();
@@ -56,20 +65,20 @@ impl Render for DataGridItem {
             });
         let notice = match status {
             GridSessionStatus::Failed { error } => {
-                Some((Color::Error, IconName::Warning, error.to_string()))
+                Some((Color::Error, IconName::TriangleAlert, error.to_string()))
             }
             GridSessionStatus::Unavailable { reason } => {
-                Some((Color::Warning, IconName::Warning, reason.to_string()))
+                Some((Color::Warning, IconName::TriangleAlert, reason.to_string()))
             }
             GridSessionStatus::SaveFailed { error } => {
-                Some((Color::Error, IconName::Warning, error.to_string()))
+                Some((Color::Error, IconName::TriangleAlert, error.to_string()))
             }
             _ => editing_error
-                .map(|error| (Color::Error, IconName::Warning, error))
+                .map(|error| (Color::Error, IconName::TriangleAlert, error))
                 .or_else(|| {
                     self.chart_error
                         .clone()
-                        .map(|error| (Color::Error, IconName::Warning, error))
+                        .map(|error| (Color::Error, IconName::TriangleAlert, error))
                 })
                 .or_else(|| self.operation_notice.clone().map(GridNotice::presentation)),
         };
@@ -92,6 +101,8 @@ impl Render for DataGridItem {
             has_changes.then(|| change_summary_message(self.state.change_summary(), language));
         let show_edit_controls = editable || has_unsaved_changes;
         let show_change_bar = page.is_some() && !self.showing_chart;
+        let show_edit_bar = show_change_bar && (has_unsaved_changes || !editable);
+        let show_selection_bar = show_change_bar && selection_available;
         let show_filter_bar = page.is_some() || filter_active;
         let grid_focused = self.focus_handle.is_focused(window);
         let content = if self.showing_chart {
@@ -139,82 +150,125 @@ impl Render for DataGridItem {
             .on_action(cx.listener(Self::paste_grid_selection))
             .size_full()
             .overflow_hidden()
-            .bg(colors.background)
+            .bg(colors.editor_background)
             .child(
                 h_flex()
-                    .h(px(40.0))
+                    .h(DynamicSpacing::Base32.rems(cx))
                     .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
+                    .gap(DynamicSpacing::Base04.rems(cx))
+                    .px(DynamicSpacing::Base08.rems(cx))
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
-                        h_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .gap_2()
-                            .child(
-                                div().max_w(px(220.0)).child(
-                                    Label::new(self.state.table().to_string())
-                                        .size(LabelSize::Small)
-                                        .weight(FontWeight::SEMIBOLD)
-                                        .truncate(),
-                                ),
-                            )
-                            .child(
-                                Label::new(format!(
-                                    "{} / {}",
-                                    self.state.target().connection_name,
-                                    self.state.target().database
-                                ))
-                                .flex_1()
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .truncate(),
-                            ),
-                    )
-                    .children(summary.map(|summary| {
-                        Label::new(summary)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                    }))
-                    .child(
-                        Button::new(
-                            "toggle-data-grid-chart",
-                            if self.showing_chart {
-                                text(language, "表格", "Table")
+                        grid_toolbar_action(
+                            "refresh-data-grid",
+                            if active_loading {
+                                IconName::LoaderCircle
                             } else {
-                                text(language, "图表", "Chart")
+                                IconName::RotateCw
                             },
+                            text(language, "刷新", "Refresh"),
                         )
-                        .size(ButtonSize::Compact)
-                        .toggle_state(self.showing_chart)
-                        .disabled(!can_chart)
-                        .on_click(cx.listener(Self::toggle_chart)),
+                        .disabled(active_loading || unavailable || navigation_locked)
+                        .on_click(cx.listener(Self::refresh)),
                     )
-                    .child(
-                        Button::new(
-                            "previous-data-grid-page",
-                            text(language, "上一页", "Previous"),
+                    .when(editable, |bar| {
+                        bar.child(
+                            grid_toolbar_action(
+                                "add-data-grid-row",
+                                IconName::Plus,
+                                text(language, "新增行", "Add Row"),
+                            )
+                            .disabled(saving || unavailable)
+                            .on_click(cx.listener(Self::add_row_click)),
                         )
-                        .size(ButtonSize::Compact)
-                        .disabled(!can_previous)
-                        .on_click(cx.listener(Self::previous_page)),
+                    })
+                    .child(
+                        grid_toolbar_action(
+                            "export-grid-data",
+                            if export_in_progress {
+                                IconName::LoaderCircle
+                            } else {
+                                IconName::Download
+                            },
+                            text(language, "导出", "Export"),
+                        )
+                        .disabled(export_in_progress || page.is_none())
+                        .on_click(cx.listener(Self::export_data)),
                     )
                     .child(
-                        Button::new("next-data-grid-page", text(language, "下一页", "Next"))
+                        crate::ui::components::ButtonLike::new("toggle-data-grid-chart", "")
                             .size(ButtonSize::Compact)
-                            .disabled(!can_next)
-                            .on_click(cx.listener(Self::next_page)),
+                            .aria_label(text(language, "图表", "Chart"))
+                            .tooltip(Tooltip::text(text(language, "图表", "Chart")))
+                            .child(Icon::from_path("icons/astesia/chart.svg").size(IconSize::Small))
+                            .toggle_state(self.showing_chart)
+                            .disabled(!can_chart)
+                            .on_click(cx.listener(Self::toggle_chart)),
                     )
-                    .child(
-                        Button::new("refresh-data-grid", text(language, "刷新", "Refresh"))
+                    .when(
+                        !self
+                            .state
+                            .target()
+                            .db_type
+                            .transaction_isolations()
+                            .is_empty(),
+                        |bar| bar.child(self.transaction_menu(cx)),
+                    )
+                    .when(self.manual_transaction, |bar| {
+                        bar.child(
+                            Button::new(
+                                "commit-grid-transaction",
+                                text(language, "提交", "Commit"),
+                            )
                             .size(ButtonSize::Compact)
-                            .loading(active_loading)
-                            .disabled(active_loading || unavailable || navigation_locked)
-                            .on_click(cx.listener(Self::refresh)),
+                            .disabled(
+                                saving
+                                    || loading
+                                    || unavailable
+                                    || has_changes
+                                    || self
+                                        .editing
+                                        .as_ref()
+                                        .is_some_and(|editing| editing.modified),
+                            )
+                            .on_click(cx.listener(Self::commit_transaction)),
+                        )
+                        .child(
+                            Button::new(
+                                "rollback-grid-transaction",
+                                text(language, "回滚", "Roll Back"),
+                            )
+                            .size(ButtonSize::Compact)
+                            .disabled(saving || loading || unavailable)
+                            .on_click(cx.listener(Self::rollback_transaction)),
+                        )
+                    })
+                    .when(
+                        (transaction_closed && has_unsaved_changes)
+                            || self.save_recovery_sql.is_some(),
+                        |bar| {
+                            bar.child(
+                                Button::new(
+                                    "copy-grid-transaction-recovery",
+                                    text(language, "复制恢复 SQL", "Copy Recovery SQL"),
+                                )
+                                .size(ButtonSize::Compact)
+                                .on_click(cx.listener(Self::copy_transaction_recovery)),
+                            )
+                        },
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(format!(
+                            "{} / {} / {}",
+                            self.state.target().connection_name,
+                            self.state.target().database,
+                            self.state.table()
+                        ))
+                        .size(LabelSize::XSmall)
+                        .truncate(),
                     ),
             )
             .when(show_filter_bar, |element| {
@@ -227,7 +281,7 @@ impl Render for DataGridItem {
                         .px_3()
                         .border_b_1()
                         .border_color(colors.border)
-                        .bg(colors.panel_background)
+                        .bg(colors.surface_background)
                         .child(Icon::new(IconName::Filter).size(IconSize::XSmall).color(
                             if filter_active {
                                 Color::Accent
@@ -255,11 +309,29 @@ impl Render for DataGridItem {
                                 .child(self.filter_editor.clone()),
                         )
                         .child(
+                            Label::new("ORDER BY")
+                                .size(LabelSize::XSmall)
+                                .buffer_font(cx)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            div()
+                                .key_context("DataGridFilter")
+                                .h(px(24.0))
+                                .flex_1()
+                                .min_w(px(100.0))
+                                .bg(colors.editor_background)
+                                .child(self.sort_editor.clone()),
+                        )
+                        .child(
                             Button::new("apply-data-grid-filter", text(language, "应用", "Apply"))
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Filled)
                                 .disabled(filter_blocked || !filter_changed)
-                                .key_binding(zed_ui::KeyBinding::for_action(&ApplyGridFilter, cx))
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &ApplyGridFilter,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(Self::apply_filter_click)),
                         )
                         .child(
@@ -281,7 +353,7 @@ impl Render for DataGridItem {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(Icon::new(icon).size(IconSize::XSmall).color(color))
                     .child(
                         Label::new(message)
@@ -290,7 +362,7 @@ impl Render for DataGridItem {
                             .line_clamp(2),
                     )
             }))
-            .when(show_change_bar, |element| {
+            .when(show_edit_bar, |element| {
                 element.child(
                     h_flex()
                         .h(px(32.0))
@@ -300,7 +372,7 @@ impl Render for DataGridItem {
                         .px_3()
                         .border_b_1()
                         .border_color(colors.border)
-                        .bg(colors.panel_background)
+                        .bg(colors.surface_background)
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -350,7 +422,10 @@ impl Render for DataGridItem {
                                 )
                                 .size(ButtonSize::Compact)
                                 .disabled(!self.state.can_undo() || saving)
-                                .key_binding(zed_ui::KeyBinding::for_action(&UndoGridChanges, cx))
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &UndoGridChanges,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(Self::undo_changes_click)),
                             )
                             .child(
@@ -359,7 +434,7 @@ impl Render for DataGridItem {
                                     text(language, "放弃", "Discard"),
                                 )
                                 .size(ButtonSize::Compact)
-                                .disabled(!has_unsaved_changes || saving)
+                                .disabled(!has_unsaved_changes || saving || transaction_closed)
                                 .on_click(cx.listener(Self::discard_changes_click)),
                             )
                             .child(
@@ -370,14 +445,17 @@ impl Render for DataGridItem {
                                 .size(ButtonSize::Compact)
                                 .style(ButtonStyle::Filled)
                                 .loading(saving)
-                                .disabled(!has_unsaved_changes || saving || unavailable)
-                                .key_binding(zed_ui::KeyBinding::for_action(&SaveGridChanges, cx))
+                                .disabled(!self.has_local_changes() || saving || unavailable)
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &SaveGridChanges,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(Self::save_changes_click)),
                             )
                         }),
                 )
             })
-            .when(show_change_bar, |element| {
+            .when(show_selection_bar, |element| {
                 element.child(
                     h_flex()
                         .h(px(32.0))
@@ -387,7 +465,7 @@ impl Render for DataGridItem {
                         .px_3()
                         .border_b_1()
                         .border_color(colors.border)
-                        .bg(colors.panel_background)
+                        .bg(colors.surface_background)
                         .child(
                             Label::new(text(language, "选择与行", "Selection & Rows"))
                                 .size(LabelSize::XSmall)
@@ -398,7 +476,10 @@ impl Render for DataGridItem {
                             Button::new("copy-data-grid-selection", text(language, "复制", "Copy"))
                                 .size(ButtonSize::Compact)
                                 .disabled(!selection_available)
-                                .key_binding(zed_ui::KeyBinding::for_action(&CopyGridSelection, cx))
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
+                                    &CopyGridSelection,
+                                    cx,
+                                ))
                                 .on_click(cx.listener(Self::copy_selection_click)),
                         )
                         .child(
@@ -410,13 +491,6 @@ impl Render for DataGridItem {
                             .disabled(!selection_available)
                             .on_click(cx.listener(Self::copy_selection_with_headers_click)),
                         )
-                        .child(
-                            Button::new("export-grid-data", text(language, "导出", "Export"))
-                                .size(ButtonSize::Compact)
-                                .loading(export_in_progress)
-                                .disabled(export_in_progress || page.is_none())
-                                .on_click(cx.listener(Self::export_data)),
-                        )
                         .when(editable, |bar| {
                             bar.child(
                                 Button::new(
@@ -425,20 +499,11 @@ impl Render for DataGridItem {
                                 )
                                 .size(ButtonSize::Compact)
                                 .disabled(saving || unavailable)
-                                .key_binding(zed_ui::KeyBinding::for_action(
+                                .key_binding(crate::ui::components::KeyBinding::for_action(
                                     &PasteGridSelection,
                                     cx,
                                 ))
                                 .on_click(cx.listener(Self::paste_selection_click)),
-                            )
-                            .child(
-                                Button::new(
-                                    "add-data-grid-row",
-                                    text(language, "新增行", "Add Row"),
-                                )
-                                .size(ButtonSize::Compact)
-                                .disabled(saving || unavailable)
-                                .on_click(cx.listener(Self::add_row_click)),
                             )
                             .child(
                                 Button::new(
@@ -522,7 +587,7 @@ impl Render for DataGridItem {
             .child(
                 div()
                     .id("data-grid-focus-surface")
-                    .role(gpui::Role::Grid)
+                    .role(gpui_kit::Role::Grid)
                     .aria_label(grid_label)
                     .tab_index(0)
                     .track_focus(&self.focus_handle)
@@ -545,5 +610,52 @@ impl Render for DataGridItem {
                     .min_h_0()
                     .child(content),
             )
+            .child(
+                h_flex()
+                    .h(DynamicSpacing::Base32.rems(cx))
+                    .flex_none()
+                    .px(DynamicSpacing::Base12.rems(cx))
+                    .gap(DynamicSpacing::Base08.rems(cx))
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface_background)
+                    .children(summary.map(|summary| Label::new(summary).size(LabelSize::XSmall)))
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(format!(
+                            "{} {} / {} · {} {}",
+                            query.page_size,
+                            text(language, "行", "rows"),
+                            text(language, "页", "page"),
+                            text(language, "第", "Page"),
+                            query.page
+                        ))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Button::new(
+                            "previous-data-grid-page",
+                            text(language, "上一页", "Previous"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .disabled(!can_previous)
+                        .on_click(cx.listener(Self::previous_page)),
+                    )
+                    .child(
+                        Button::new("next-data-grid-page", text(language, "下一页", "Next"))
+                            .size(ButtonSize::Compact)
+                            .disabled(!can_next)
+                            .on_click(cx.listener(Self::next_page)),
+                    ),
+            )
     }
+}
+
+fn grid_toolbar_action(id: &'static str, icon: IconName, label: &'static str) -> IconButton {
+    IconButton::new(id, icon)
+        .icon_size(IconSize::Small)
+        .size(ButtonSize::Compact)
+        .aria_label(label)
+        .tooltip(Tooltip::text(label))
 }

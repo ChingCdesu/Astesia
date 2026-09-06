@@ -309,13 +309,24 @@ impl AstesiaMcp {
         database: &str,
         sql: &str,
     ) -> Result<QueryResult, String> {
+        self.execute_sql_limited(connection_id, database, sql, DEFAULT_RESULT_ROWS)
+            .await
+    }
+
+    pub(super) async fn execute_sql_limited(
+        &self,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+        row_limit: usize,
+    ) -> Result<QueryResult, String> {
         let profile = self.catalog.profile(connection_id).await?;
         Self::validate_database_selector(&profile.config.db_type, database)?;
         let driver = self.catalog.driver(connection_id).await?;
         let result = tokio::time::timeout(DATABASE_OPERATION_TIMEOUT, async {
             let driver = driver.lock_active().await?;
             driver
-                .execute_query(database, sql)
+                .execute_query_limited(database, sql, row_limit)
                 .await
                 .map_err(|error| error.to_string())
         })

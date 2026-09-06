@@ -55,7 +55,7 @@ impl ConnectionManager {
 
         match create_driver(&config).test_connection().await {
             Ok(_) => Ok(ConnectionOutcome::Succeeded),
-            Err(error) => Ok(ConnectionOutcome::Rejected(format!("连接失败: {error}"))),
+            Err(error) => Ok(ConnectionOutcome::Rejected(error.to_string())),
         }
     }
 
@@ -88,7 +88,7 @@ impl ConnectionManager {
         {
             Ok(()) => Ok(ConnectionOutcome::Succeeded),
             Err(ReplacingConnectError::Connect(error)) => {
-                Ok(ConnectionOutcome::Rejected(format!("连接失败: {error}")))
+                Ok(ConnectionOutcome::Rejected(error.to_string()))
             }
             Err(ReplacingConnectError::RevisionChanged) => Ok(ConnectionOutcome::Rejected(
                 "连接配置在建立连接期间已被修改，请刷新后重试".to_string(),

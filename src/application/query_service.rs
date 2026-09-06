@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::db::{QueryResult, StatementResult, TableRef};
+use crate::db::{QueryResult, QueryRowSink, StatementResult, TableRef};
 
 use super::{connections::ConnectionManager, QueryTarget};
 
@@ -28,10 +28,26 @@ impl QueryService {
             .map_err(|error| format!("查询失败: {error}"))
     }
 
+    pub(crate) async fn stream_export(
+        &self,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+        sink: &mut dyn QueryRowSink,
+    ) -> Result<QueryResult, String> {
+        let handle = self.manager.driver(connection_id).await?;
+        let driver = handle.lock_active().await?;
+        driver
+            .execute_query_stream(database, sql, sink)
+            .await
+            .map_err(|error| format!("Export query failed: {error}"))
+    }
+
     pub(crate) async fn execute_export_query(
         &self,
         target: &QueryTarget,
         sql: &str,
+        sink: &mut dyn QueryRowSink,
     ) -> Result<QueryResult, String> {
         let (handle, generation) = self.manager.driver_session(&target.connection_id).await?;
         if generation != target.session_generation {
@@ -45,7 +61,7 @@ impl QueryService {
             return Err("Database Session engine changed before export".to_string());
         }
         driver
-            .execute_query(&target.database, sql)
+            .execute_query_stream(&target.database, sql, sink)
             .await
             .map_err(|error| format!("Export query failed: {error}"))
     }

@@ -1,18 +1,24 @@
 mod catalog_loading;
 mod catalog_primary;
+mod catalog_tree;
 mod catalog_view;
+mod database_menu;
 mod engine_workflows;
 mod object_actions;
 mod presentation;
+mod profile_menu;
 mod profile_operations;
 mod selection;
 mod view;
+mod virtual_rows;
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
-use gpui::{App, ClickEvent, Entity, EventEmitter, PromptButton, PromptLevel, Subscription, Task};
-use ui_input::InputField;
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use crate::ui::input_field::InputField;
+use gpui_kit::{
+    App, ClickEvent, Entity, EventEmitter, PromptButton, PromptLevel, Subscription, Task,
+};
 
 use crate::application::connection_workspace::{
     ConnectionWorkspaceError, ConnectionWorkspaceState, OperationApply, ProfileOperationKind,
@@ -29,7 +35,6 @@ use crate::platform::UiEvent;
 use self::engine_workflows::DraggedTableCopy;
 #[cfg(test)]
 use self::selection::{derive_status, reconcile_selected_profile};
-use super::engine_presentation::engine_label;
 use super::localization::text;
 use super::object_definition_item::ObjectDefinition;
 use super::object_mutation_form::ObjectMutationFormMode;
@@ -37,23 +42,50 @@ use super::shell::ShellSettings;
 
 pub(super) const SIDEBAR_WIDTH: Pixels = px(272.0);
 
+gpui_kit::actions!(astesia, [OpenProfileMenu]);
+
 pub(super) fn bind_connection_profiles_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("ConnectionProfileRow")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileRow")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("QueryTargetRow")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("QueryTargetRow")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("SchemaObjectRow")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("SchemaObjectRow")),
+        gpui_kit::KeyBinding::new("shift-f10", OpenProfileMenu, Some("ConnectionProfileRow")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("ConnectionProfileRow")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("ConnectionProfileRow")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("QueryTargetRow")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("QueryTargetRow")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("SchemaObjectRow")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("SchemaObjectRow")),
     ]);
 }
 
 pub(super) struct ConnectionProfilesPanel {
     application: Arc<Application>,
+    sidebar_list: gpui_kit::ListState,
+    sidebar_rows_cache: std::cell::RefCell<Option<std::rc::Rc<Vec<virtual_rows::SidebarRow>>>>,
+    #[cfg(test)]
+    sidebar_rendered_rows: std::cell::RefCell<Vec<usize>>,
+    #[cfg(test)]
+    sidebar_model_builds: std::cell::Cell<usize>,
+    sidebar_row_keys: std::cell::RefCell<Vec<String>>,
     state: ConnectionWorkspaceState,
     selected_profile_id: Option<String>,
+    selected_profile_focus: gpui_kit::FocusHandle,
     selected_query_target: Option<QueryTarget>,
     notice: Option<PanelNotice>,
+    failed_profiles: HashSet<String>,
+    collapsed_groups: HashSet<Option<String>>,
+    collapsed_schemas: HashSet<(String, u64, String, String)>,
+    expanded_databases: HashSet<(String, u64, String)>,
+    expanded_tables: HashSet<catalog_tree::CatalogTableKey>,
+    collapsed_details: HashSet<(catalog_tree::CatalogTableKey, u8)>,
+    table_details:
+        std::collections::HashMap<catalog_tree::CatalogTableKey, catalog_tree::CatalogDetail>,
+    detail_generation: u64,
+    selected_catalog_table: Option<catalog_tree::CatalogTableKey>,
+    context_menu: Option<(
+        Entity<crate::ui::components::ContextMenu>,
+        gpui_kit::Point<Pixels>,
+        Subscription,
+    )>,
+    profile_menu_state: Option<profile_menu::ProfileMenuState>,
     object_operation_in_progress: bool,
     redis_search: Entity<InputField>,
     redis_search_result: Option<(QueryTarget, Result<Vec<TableInfo>, String>)>,
@@ -64,6 +96,14 @@ pub(super) struct ConnectionProfilesPanel {
     _redis_search_observation: Subscription,
     _settings_observation: Subscription,
     _application_events: Task<()>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProfileActions {
+    pub(super) connect: bool,
+    pub(super) disconnect: bool,
+    pub(super) edit: bool,
+    pub(super) delete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -160,7 +200,24 @@ struct PanelNotice {
 impl EventEmitter<ConnectionProfilesEvent> for ConnectionProfilesPanel {}
 
 impl ConnectionProfilesPanel {
+    fn notify_sidebar(&self, cx: &mut Context<Self>) {
+        // ListState also notifies on scroll, so row invalidation belongs to state changes.
+        self.sidebar_rows_cache.borrow_mut().take();
+        cx.notify();
+    }
+
     pub(super) fn new(
+        application: Arc<Application>,
+        settings: Entity<ShellSettings>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut panel = Self::new_unloaded(application, settings, window, cx);
+        panel.refresh_profiles(cx);
+        panel
+    }
+
+    fn new_unloaded(
         application: Arc<Application>,
         settings: Entity<ShellSettings>,
         window: &mut Window,
@@ -176,7 +233,10 @@ impl ConnectionProfilesPanel {
             .label(text(language, "Redis 键搜索", "Redis key search"))
         });
         let redis_search_observation = cx.observe(&redis_search, |_, _, cx| cx.notify());
-        let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
+        let settings_observation = cx.observe(&settings, |panel, _, cx| {
+            panel.sidebar_list.remeasure();
+            panel.notify_sidebar(cx);
+        });
         let mut application_events = application.subscribe_events();
         let application_event_task = cx.spawn(async move |panel, cx| loop {
             let refresh = match application_events.recv().await {
@@ -191,12 +251,31 @@ impl ConnectionProfilesPanel {
                     .ok();
             }
         });
-        let mut panel = Self {
+        Self {
             application,
+            #[cfg(test)]
+            sidebar_rendered_rows: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            sidebar_model_builds: std::cell::Cell::new(0),
+            sidebar_rows_cache: std::cell::RefCell::new(None),
+            sidebar_list: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, px(100.0)),
+            sidebar_row_keys: std::cell::RefCell::new(Vec::new()),
             state: ConnectionWorkspaceState::default(),
             selected_profile_id: None,
+            selected_profile_focus: cx.focus_handle().tab_stop(true),
             selected_query_target: None,
             notice: None,
+            failed_profiles: HashSet::new(),
+            collapsed_groups: HashSet::new(),
+            collapsed_schemas: HashSet::new(),
+            expanded_databases: HashSet::new(),
+            expanded_tables: HashSet::new(),
+            collapsed_details: HashSet::new(),
+            table_details: std::collections::HashMap::new(),
+            detail_generation: 0,
+            selected_catalog_table: None,
+            context_menu: None,
+            profile_menu_state: None,
             object_operation_in_progress: false,
             redis_search,
             redis_search_result: None,
@@ -207,9 +286,7 @@ impl ConnectionProfilesPanel {
             _redis_search_observation: redis_search_observation,
             _settings_observation: settings_observation,
             _application_events: application_event_task,
-        };
-        panel.refresh_profiles(cx);
-        panel
+        }
     }
 }
 #[cfg(test)]

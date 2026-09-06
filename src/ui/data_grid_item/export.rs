@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{ClickEvent, Context, PromptButton, PromptLevel, Window};
+use gpui_kit::{ClickEvent, Context, PromptButton, PromptLevel, Window};
 
 use crate::application::{
     CsvOptions, ExportFormat, ExportSource, GridSession, GridSortDirection, JsonLayout,
@@ -169,13 +169,26 @@ impl DataGridItem {
         cx.notify();
         let application = self.application.clone();
         let target = self.state.target().clone();
+        let transaction = all_rows.then(|| self.transaction.clone()).flatten();
         let path_label = path.display().to_string();
-        let export = gpui_tokio::Tokio::spawn(cx, async move {
-            application
-                .exports()
-                .start_export(target, source, export_format, path_label.clone())
-                .await
-                .map(|task_id| (task_id, path_label))
+        let export = crate::ui::runtime::spawn(cx, async move {
+            let result = if let Some(transaction) = transaction {
+                application
+                    .exports()
+                    .start_transaction_export(
+                        transaction,
+                        source,
+                        export_format,
+                        path_label.clone(),
+                    )
+                    .await
+            } else {
+                application
+                    .exports()
+                    .start_export(target, source, export_format, path_label.clone())
+                    .await
+            };
+            result.map(|task_id| (task_id, path_label))
         });
         cx.spawn(async move |item, cx| {
             let result = match export.await {

@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use editor::Editor;
-use gpui::{
-    actions, rgb, App, ClickEvent, Entity, Focusable as _, PromptButton, PromptLevel, Subscription,
+use crate::ui::components::{prelude::*, Indicator, Tooltip};
+use crate::ui::modal::ModalLayer;
+use gpui_kit::{
+    actions, App, ClickEvent, Entity, FocusHandle, PromptButton, PromptLevel, Subscription,
 };
-use workspace::ModalLayer;
-use zed_ui::{prelude::*, Indicator, Tooltip};
 
 use crate::application::connection_workspace::ConnectionWorkspaceError;
 use crate::application::{Application, ConnectionWorkspaceSnapshot, QueryTarget};
@@ -50,50 +49,53 @@ actions!(
 
 pub(super) fn bind_workspace_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "cmd-shift-p",
             ToggleCommandPalette,
             Some("AstesiaWorkspace"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "ctrl-shift-p",
             ToggleCommandPalette,
             Some("AstesiaWorkspace"),
         ),
-        gpui::KeyBinding::new("cmd-n", NewQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("ctrl-n", NewQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("cmd-w", CloseActiveQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("ctrl-w", CloseActiveQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("ctrl-tab", NextQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("ctrl-shift-tab", PreviousQueryTab, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("cmd-b", ToggleConnectionsSidebar, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("ctrl-b", ToggleConnectionsSidebar, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new("cmd-r", RefreshConnectionProfiles, Some("AstesiaWorkspace")),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new("cmd-n", NewQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("ctrl-n", NewQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("cmd-w", CloseActiveQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("ctrl-w", CloseActiveQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("ctrl-tab", NextQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("ctrl-shift-tab", PreviousQueryTab, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("cmd-b", ToggleConnectionsSidebar, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("ctrl-b", ToggleConnectionsSidebar, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new("cmd-r", RefreshConnectionProfiles, Some("AstesiaWorkspace")),
+        gpui_kit::KeyBinding::new(
             "ctrl-r",
             RefreshConnectionProfiles,
             Some("AstesiaWorkspace"),
         ),
-        gpui::KeyBinding::new("up", menu::SelectPrevious, Some("CommandPalette > Editor")),
-        gpui::KeyBinding::new("down", menu::SelectNext, Some("CommandPalette > Editor")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("CommandPalette > Editor")),
-        gpui::KeyBinding::new("escape", menu::Cancel, Some("CommandPalette")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("CommandPaletteEntry")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("CommandPaletteEntry")),
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("WorkspaceTabRow")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("WorkspaceTabRow")),
+        gpui_kit::KeyBinding::new("up", menu::SelectPrevious, Some("CommandPalette > Input")),
+        gpui_kit::KeyBinding::new("down", menu::SelectNext, Some("CommandPalette > Input")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("CommandPalette > Input")),
+        gpui_kit::KeyBinding::new("escape", menu::Cancel, Some("CommandPalette")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("CommandPaletteEntry")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("CommandPaletteEntry")),
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("WorkspaceTabRow")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("WorkspaceTabRow")),
     ]);
 }
 
 mod item;
 mod operations;
+mod settings_menu;
+mod tab_bar;
+mod title_bar;
 mod view;
 
 use item::{WorkspaceItem, WorkspaceItemKey};
 
 pub(super) struct AstesiaRoot {
+    title_bar: Entity<title_bar::AstesiaTitleBar>,
     phase: AppPhase,
-    editor: Entity<Editor>,
     preferences: DesktopPreferences,
     preferences_store: Option<NativePreferencesStore>,
     preferences_warning: Option<String>,
@@ -108,27 +110,24 @@ enum AppPhase {
 
 impl AstesiaRoot {
     pub(super) fn new(
-        editor: Entity<Editor>,
         preferences: DesktopPreferences,
         preferences_store: Option<NativePreferencesStore>,
         preferences_warning: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance_subscription = cx.observe_window_appearance(window, |root, window, cx| {
+        let appearance_subscription = cx.observe_window_appearance(window, |root, _, cx| {
             let theme_preference = match &root.phase {
                 AppPhase::Ready(workspace) => workspace.read(cx).settings.read(cx).theme(),
                 AppPhase::Loading | AppPhase::Failed(_) => root.preferences.theme,
             };
-            *theme::SystemAppearance::global_mut(cx) =
-                theme::SystemAppearance(window.appearance().into());
             if theme_preference == ThemePreference::System {
                 refresh_active_theme(theme_preference, cx);
             }
         });
         let mut root = Self {
+            title_bar: cx.new(|_| title_bar::AstesiaTitleBar),
             phase: AppPhase::Loading,
-            editor,
             preferences,
             preferences_store,
             preferences_warning,
@@ -146,7 +145,7 @@ impl AstesiaRoot {
         self.phase = AppPhase::Loading;
         cx.notify();
 
-        let load = gpui_tokio::Tokio::spawn(cx, async move {
+        let load = crate::ui::runtime::spawn(cx, async move {
             Application::probe_native_state().await?;
             Application::new().map(Arc::new)
         });
@@ -182,14 +181,13 @@ impl AstesiaRoot {
                             AstesiaWorkspace::new(
                                 application,
                                 connection_profiles,
-                                root.editor.clone(),
                                 settings,
                                 notifications,
                                 window,
                                 cx,
                             )
                         });
-                        window.focus(&root.editor.read(cx).focus_handle(cx), cx);
+                        window.focus(&workspace.read(cx).focus_handle.clone(), cx);
                         AppPhase::Ready(workspace)
                     }
                     Err(error) => AppPhase::Failed(error),
@@ -206,7 +204,7 @@ impl Render for AstesiaRoot {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = self.preferences.language;
-        match &self.phase {
+        let content = match &self.phase {
             AppPhase::Loading => v_flex()
                 .size_full()
                 .justify_center()
@@ -248,7 +246,13 @@ impl Render for AstesiaRoot {
                         .on_click(cx.listener(Self::retry)),
                 )
                 .into_any_element(),
-        }
+        };
+
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .child(self.title_bar.clone())
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 
@@ -256,6 +260,8 @@ pub(super) struct AstesiaWorkspace {
     application: Arc<Application>,
     connection_profiles: Entity<ConnectionProfilesPanel>,
     tabs: WorkspaceTabsModel,
+    focus_handle: FocusHandle,
+    tab_scroll_handle: gpui_kit::ScrollHandle,
     workspace_tabs: Vec<WorkspaceTab>,
     settings: Entity<ShellSettings>,
     notifications: Entity<NotificationCenter>,
@@ -263,7 +269,7 @@ pub(super) struct AstesiaWorkspace {
     _profiles_subscription: Subscription,
     _profiles_observation: Subscription,
     _settings_observation: Subscription,
-    _application_events: gpui::Task<()>,
+    _application_events: gpui_kit::Task<()>,
     profile_form_subscription: Option<Subscription>,
     object_mutation_form_subscription: Option<Subscription>,
     copy_table_form_subscription: Option<Subscription>,
@@ -281,7 +287,6 @@ impl AstesiaWorkspace {
     pub(super) fn new(
         application: Arc<Application>,
         connection_profiles: Entity<ConnectionProfilesPanel>,
-        editor: Entity<Editor>,
         settings: Entity<ShellSettings>,
         notifications: Entity<NotificationCenter>,
         window: &mut Window,
@@ -289,19 +294,7 @@ impl AstesiaWorkspace {
     ) -> Self {
         let modal_layer = cx.new(|_| ModalLayer::new());
         let tabs = WorkspaceTabsModel::new();
-        let query_item =
-            cx.new(|cx| QueryItem::new(application.clone(), editor, settings.clone(), window, cx));
-        let query_item_subscription = cx
-            .subscribe(&query_item, |_, _, _: &QueryDocumentStateChanged, cx| {
-                cx.notify()
-            });
-        let initial_tab_id = tabs.active();
-        let workspace_tabs = vec![WorkspaceTab {
-            id: initial_tab_id,
-            key: WorkspaceItemKey::Query(initial_tab_id),
-            item: WorkspaceItem::new(query_item),
-            _subscriptions: vec![query_item_subscription],
-        }];
+        let workspace_tabs = Vec::new();
         let profiles_subscription = cx.subscribe_in(
             &connection_profiles,
             window,
@@ -312,17 +305,12 @@ impl AstesiaWorkspace {
         let profiles_observation = cx.observe(&connection_profiles, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         let mut application_events = application.subscribe_events();
-        let task_manager = application.tasks().clone();
         let task_events = cx.spawn(async move |workspace, cx| loop {
             match application_events.recv().await {
-                Ok(crate::platform::UiEvent::TaskCompleted { id }) => {
-                    let task = task_manager.get_task(&id).await;
+                Ok(crate::platform::UiEvent::TaskCompleted { task }) => {
                     workspace
                         .update(cx, |workspace, cx| {
-                            let Some(task) = task else {
-                                return;
-                            };
-                            let tone = match task.status {
+                            let tone = match &task.status {
                                 crate::tasks::TaskStatus::Completed => NotificationTone::Info,
                                 crate::tasks::TaskStatus::Partial
                                 | crate::tasks::TaskStatus::Cancelled => NotificationTone::Warning,
@@ -350,6 +338,8 @@ impl AstesiaWorkspace {
             application,
             connection_profiles,
             tabs,
+            focus_handle: cx.focus_handle(),
+            tab_scroll_handle: gpui_kit::ScrollHandle::new(),
             workspace_tabs,
             settings,
             notifications,
@@ -439,6 +429,9 @@ impl AstesiaWorkspace {
                 return;
             }
             ConnectionProfilesEvent::QueryTargetInvalidated(target) => {
+                self.application
+                    .query_completions()
+                    .invalidate_session(&target.connection_id, target.session_generation);
                 for tab in &self.workspace_tabs {
                     tab.item.invalidate_target(target, cx);
                 }
@@ -448,6 +441,9 @@ impl AstesiaWorkspace {
                 connection_id,
                 session_generation,
             } => {
+                self.application
+                    .query_completions()
+                    .invalidate_session(connection_id, *session_generation);
                 for tab in &self.workspace_tabs {
                     tab.item
                         .invalidate_session(connection_id, *session_generation, cx);
@@ -455,6 +451,9 @@ impl AstesiaWorkspace {
                 return;
             }
             ConnectionProfilesEvent::QuerySessionsChanged(snapshot) => {
+                self.application
+                    .query_completions()
+                    .retain_sessions(snapshot);
                 for tab in &self.workspace_tabs {
                     tab.item.reconcile_sessions(snapshot, cx);
                 }
@@ -558,18 +557,20 @@ impl AstesiaWorkspace {
         ));
     }
 
-    fn active_item(&self) -> &WorkspaceItem {
-        let active = self.tabs.active();
-        &self
-            .workspace_tabs
-            .iter()
-            .find(|tab| tab.id == active)
-            .expect("active workspace tab must have a view")
-            .item
+    fn active_item(&self) -> Option<&WorkspaceItem> {
+        let active = self.tabs.active()?;
+        Some(
+            &self
+                .workspace_tabs
+                .iter()
+                .find(|tab| tab.id == active)
+                .expect("active workspace tab must have a view")
+                .item,
+        )
     }
 
     fn active_query_item(&self) -> Option<&Entity<QueryItem>> {
-        self.active_item().query()
+        self.active_item()?.query()
     }
 
     fn open_or_activate(
@@ -605,7 +606,42 @@ impl AstesiaWorkspace {
     }
 
     fn focus_active_item(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_item().focus(window, cx);
+        let target = self
+            .active_query_item()
+            .and_then(|item| item.read(cx).query_target().cloned())
+            .or_else(|| {
+                self.workspace_tabs
+                    .iter()
+                    .find(|tab| Some(tab.id) == self.tabs.active())
+                    .and_then(|tab| tab.key.target().cloned())
+            });
+        if let Some(target) = target {
+            let table = self
+                .workspace_tabs
+                .iter()
+                .find(|tab| Some(tab.id) == self.tabs.active())
+                .and_then(|tab| match &tab.key {
+                    WorkspaceItemKey::TableStructure(_, table)
+                    | WorkspaceItemKey::DataGrid(_, table)
+                    | WorkspaceItemKey::Document(_, table) => Some(table.clone()),
+                    _ => None,
+                });
+            self.connection_profiles
+                .update(cx, |panel, cx| panel.synchronize_context(target, table, cx));
+        }
+        if let Some(item) = self.active_item() {
+            if let Some(index) = self
+                .tabs
+                .tabs()
+                .iter()
+                .position(|id| Some(*id) == self.tabs.active())
+            {
+                self.tab_scroll_handle.scroll_to_item(index);
+            }
+            item.focus(window, cx);
+        } else {
+            window.focus(&self.focus_handle, cx);
+        }
         cx.notify();
     }
 
@@ -639,7 +675,7 @@ impl AstesiaWorkspace {
             item: WorkspaceItem::new(item),
             _subscriptions: vec![document_subscription],
         });
-        cx.notify();
+        self.focus_active_item(window, cx);
     }
 
     fn open_table_structure(
@@ -714,9 +750,6 @@ impl AstesiaWorkspace {
     }
 
     fn close_tab(&mut self, id: WorkspaceTabId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.tabs().len() == 1 {
-            return;
-        }
         let Some(tab) = self.workspace_tabs.iter().find(|tab| tab.id == id) else {
             return;
         };
@@ -866,7 +899,7 @@ impl AstesiaWorkspace {
     ) {
         match command {
             WorkspaceCommand::NewQuery => self.new_query_tab(window, cx),
-            WorkspaceCommand::CloseActiveTab => self.close_tab(self.tabs.active(), window, cx),
+            WorkspaceCommand::CloseActiveTab => self.close_active_tab(window, cx),
             WorkspaceCommand::NextTab => self.next_tab(window, cx),
             WorkspaceCommand::PreviousTab => self.previous_tab(window, cx),
             WorkspaceCommand::ToggleSidebar => self.toggle_sidebar(cx),
@@ -874,6 +907,18 @@ impl AstesiaWorkspace {
                 self.connection_profiles
                     .update(cx, |panel, cx| panel.refresh_profiles(cx));
             }
+            WorkspaceCommand::ConnectProfile => self
+                .connection_profiles
+                .update(cx, |panel, cx| panel.connect_selected(window, cx)),
+            WorkspaceCommand::DisconnectProfile => self
+                .connection_profiles
+                .update(cx, |panel, cx| panel.disconnect_selected(window, cx)),
+            WorkspaceCommand::EditProfile => self
+                .connection_profiles
+                .update(cx, |panel, cx| panel.edit_selected(window, cx)),
+            WorkspaceCommand::DeleteProfile => self
+                .connection_profiles
+                .update(cx, |panel, cx| panel.confirm_delete_selected(window, cx)),
             WorkspaceCommand::RestartApplication => self.restart_application(window, cx),
             WorkspaceCommand::SetTheme(theme) => self.set_theme(theme, cx),
             WorkspaceCommand::SetLanguage(language) => self.set_language(language, cx),
@@ -896,9 +941,10 @@ impl AstesiaWorkspace {
             return;
         }
         let language = self.settings.read(cx).language();
+        let profile_actions = self.connection_profiles.read(cx).profile_actions();
         self.modal_layer.update(cx, |layer, cx| {
             layer.toggle_modal(window, cx, move |window, cx| {
-                CommandPalette::new(language, window, cx)
+                CommandPalette::new(language, profile_actions, window, cx)
             });
         });
         let Some(palette) = self.modal_layer.read(cx).active_modal::<CommandPalette>() else {
@@ -923,6 +969,12 @@ impl AstesiaWorkspace {
         }
     }
 
+    fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.active() {
+            self.close_tab(id, window, cx);
+        }
+    }
+
     fn close_active_tab_action(
         &mut self,
         _: &CloseActiveQueryTab,
@@ -930,7 +982,7 @@ impl AstesiaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if !self.has_active_modal(cx) {
-            self.close_tab(self.tabs.active(), window, cx);
+            self.close_active_tab(window, cx);
         }
     }
 
@@ -968,7 +1020,11 @@ impl AstesiaWorkspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_active_modal(cx) && !self.active_item().refresh_active_surface(cx) {
+        if !self.has_active_modal(cx)
+            && !self
+                .active_item()
+                .is_some_and(|item| item.refresh_active_surface(cx))
+        {
             self.connection_profiles
                 .update(cx, |panel, cx| panel.refresh_profiles(cx));
         }
@@ -976,15 +1032,5 @@ impl AstesiaWorkspace {
 
     fn open_palette_click(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_command_palette(&ToggleCommandPalette, window, cx);
-    }
-
-    fn cycle_theme(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let theme = self.settings.read(cx).theme().next();
-        self.set_theme(theme, cx);
-    }
-
-    fn cycle_language(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let language = self.settings.read(cx).language().next();
-        self.set_language(language, cx);
     }
 }

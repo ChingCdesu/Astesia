@@ -5,12 +5,12 @@ impl ConnectionProfilesPanel {
         let Some(request) = self.state.begin_database_load(&connection_id) else {
             return;
         };
-        cx.notify();
+        self.notify_sidebar(cx);
 
         let application = self.application.clone();
         let language = self.settings.read(cx).language();
         let connection_id_for_task = connection_id.clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move {
+        let load = crate::ui::runtime::spawn(cx, async move {
             application
                 .connections()
                 .load_databases(&connection_id_for_task)
@@ -32,7 +32,7 @@ impl ConnectionProfilesPanel {
                 .update(cx, |panel, cx| {
                     if panel.state.finish_database_load(&request, result) {
                         panel.reconcile_query_target(cx);
-                        cx.notify();
+                        panel.notify_sidebar(cx);
                     }
                 })
                 .ok();
@@ -55,7 +55,7 @@ impl ConnectionProfilesPanel {
         let Some(requests) = self.state.begin_object_load(&target) else {
             return;
         };
-        cx.notify();
+        self.notify_sidebar(cx);
 
         let language = self.settings.read(cx).language();
         for request in requests {
@@ -63,7 +63,7 @@ impl ConnectionProfilesPanel {
             let kind = request.kind();
             let connection_id = request.connection_id().to_string();
             let database = request.database().to_string();
-            let load = gpui_tokio::Tokio::spawn(cx, async move {
+            let load = crate::ui::runtime::spawn(cx, async move {
                 application
                     .catalog()
                     .catalog_section(&connection_id, &database, kind)
@@ -87,7 +87,7 @@ impl ConnectionProfilesPanel {
                 panel
                     .update(cx, |panel, cx| {
                         if panel.state.finish_object_load(&request, result) {
-                            cx.notify();
+                            panel.notify_sidebar(cx);
                         }
                     })
                     .ok();

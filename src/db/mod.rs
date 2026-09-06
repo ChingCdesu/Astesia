@@ -5,16 +5,21 @@ mod engine_smoke_tests;
 pub mod mongo;
 pub mod mysql;
 pub mod postgres;
+mod query_stream;
 pub mod redis_db;
 mod sql_render;
 mod sql_script;
 pub mod sqlite;
 pub mod sqlserver;
+mod transaction;
+pub use transaction::{DatabaseTransaction, TransactionIsolation};
 
 pub use engine::{
     EngineCapabilities, EngineProfileSpec, EnumMode, ExplainMode, IndexMode, PerformanceMode,
     RowMutationMode, TableCopyMode,
 };
+pub(crate) use query_stream::QueryRowCollector;
+pub use query_stream::QueryRowSink;
 pub use sql_render::TableRef;
 pub(crate) use sql_render::{SqlDialect, SqlRenderError, SqlRenderResult};
 pub(crate) use sql_script::SqlScript;
@@ -249,10 +254,33 @@ pub(crate) enum RedisValue {
     SortedSet(Vec<(String, f64)>),
 }
 
+impl RedisValue {
+    pub(crate) fn entry_count(&self) -> usize {
+        match self {
+            Self::Missing => 0,
+            Self::String(_) => 1,
+            Self::Hash(values) => values.len(),
+            Self::List(values) | Self::Set(values) => values.len(),
+            Self::SortedSet(values) => values.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedisPageCursor {
+    Hash(u64),
+    List(u64),
+    Set(u64),
+    SortedSet(u64),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RedisKeySnapshot {
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) value: RedisValue,
+    pub(crate) total_entries: u64,
+    pub(crate) offset: u64,
+    pub(crate) next_page: Option<RedisPageCursor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,6 +371,35 @@ pub trait DatabaseDriver: Send + Sync {
         Err(UnsupportedFeature::new(self.db_type(), "constraints").into())
     }
     async fn execute_query(&self, database: &str, sql: &str) -> anyhow::Result<QueryResult>;
+    async fn execute_query_stream(
+        &self,
+        database: &str,
+        sql: &str,
+        sink: &mut dyn QueryRowSink,
+    ) -> anyhow::Result<QueryResult> {
+        let mut result = self.execute_query(database, sql).await?;
+        sink.columns(&result.columns).await;
+        for row in std::mem::take(&mut result.rows) {
+            if sink.wants_rows() {
+                sink.row(row).await;
+            }
+        }
+        Ok(result)
+    }
+
+    async fn execute_query_limited(
+        &self,
+        database: &str,
+        sql: &str,
+        row_limit: usize,
+    ) -> anyhow::Result<QueryResult> {
+        let mut collector = QueryRowCollector::new(Some(row_limit.saturating_add(1)));
+        let result = self
+            .execute_query_stream(database, sql, &mut collector)
+            .await?;
+        Ok(collector.finish(result))
+    }
+
     /// Transactional drivers override this to keep the batch on one connection.
     async fn execute_statements(
         &self,
@@ -369,6 +426,13 @@ pub trait DatabaseDriver: Send + Sync {
         _statements: Vec<String>,
     ) -> anyhow::Result<Vec<StatementResult>> {
         Err(UnsupportedFeature::new(self.db_type(), "transactional mutation batches").into())
+    }
+    async fn begin_transaction(
+        &self,
+        _database: &str,
+        _isolation: TransactionIsolation,
+    ) -> anyhow::Result<Box<dyn DatabaseTransaction>> {
+        Err(UnsupportedFeature::new(self.db_type(), "manual transactions").into())
     }
     async fn explain(&self, database: &str, statement: &str) -> anyhow::Result<QueryResult> {
         let sql = SqlDialect::new(self.db_type()).build_explain_statement(statement)?;
@@ -416,7 +480,15 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> anyhow::Result<Vec<String>> {
         Err(UnsupportedFeature::new(self.db_type(), "Redis key scanning").into())
     }
-    async fn get_redis_key(&self, _database: &str, _key: &str) -> anyhow::Result<RedisKeySnapshot> {
+    async fn get_redis_key(&self, database: &str, key: &str) -> anyhow::Result<RedisKeySnapshot> {
+        self.get_redis_key_page(database, key, None).await
+    }
+    async fn get_redis_key_page(
+        &self,
+        _database: &str,
+        _key: &str,
+        _cursor: Option<RedisPageCursor>,
+    ) -> anyhow::Result<RedisKeySnapshot> {
         Err(UnsupportedFeature::new(self.db_type(), "Redis key inspection").into())
     }
     async fn mutate_redis_key(

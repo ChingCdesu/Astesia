@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window};
-use ui_input::InputField;
-use workspace::{DismissDecision, ModalView};
-use zed_ui::{prelude::*, ElevationIndex, Modal, ModalFooter, ModalHeader, Section};
+use crate::ui::components::{prelude::*, Modal, ModalFooter, ModalHeader};
+use crate::ui::input_field::InputField;
+use crate::ui::modal::{DismissDecision, ModalView};
+use gpui_kit::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window};
 
 use crate::{
     application::{Application, CopyContent, CopyOptions, QueryTarget},
@@ -126,7 +126,7 @@ impl CopyTableForm {
         let source = self.source.clone();
         let source_table = self.table.clone();
         let content = self.content;
-        let start = gpui_tokio::Tokio::spawn(cx, async move {
+        let start = crate::ui::runtime::spawn(cx, async move {
             let snapshot = application
                 .connections()
                 .snapshot()
@@ -186,7 +186,7 @@ impl CopyTableForm {
         .detach();
     }
 
-    fn cancel(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, _: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.operation == CopyFormOperation::Idle {
             cx.emit(DismissEvent);
         }
@@ -213,7 +213,11 @@ impl Render for CopyTableForm {
         div()
             .tab_group()
             .track_focus(&self.focus_handle(cx))
-            .elevation_3(cx)
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius_lg)
+            .shadow_lg()
             .occlude()
             .w(rems(42.0))
             .child(
@@ -228,7 +232,7 @@ impl Render for CopyTableForm {
                             .show_dismiss_button(!busy),
                     )
                     .section(
-                        Section::new().child(
+                        v_flex().p_3().gap_3().child(
                             v_flex()
                                 .gap_3()
                                 .child(self.target_connection.clone())
@@ -288,7 +292,6 @@ impl Render for CopyTableForm {
                                         text(self.language, "开始复制", "Start Copy"),
                                     )
                                     .style(ButtonStyle::Filled)
-                                    .layer(ElevationIndex::ModalSurface)
                                     .loading(busy)
                                     .disabled(busy)
                                     .on_click(

@@ -1,8 +1,8 @@
 use std::{net::TcpListener, sync::Arc};
 
-use gpui::{ClickEvent, ClipboardItem, FocusHandle, Subscription};
+use crate::ui::components::prelude::*;
+use gpui_kit::{ClickEvent, ClipboardItem, FocusHandle, Subscription};
 use ring::rand::{SecureRandom, SystemRandom};
-use zed_ui::prelude::*;
 
 use crate::{
     application::Application,
@@ -25,14 +25,14 @@ pub(super) struct McpServiceItem {
     notice: Option<Result<String, String>>,
     request_generation: u64,
     focus_handle: FocusHandle,
-    settings: gpui::Entity<ShellSettings>,
+    settings: gpui_kit::Entity<ShellSettings>,
     _settings_observation: Subscription,
 }
 
 impl McpServiceItem {
     pub(super) fn new(
         application: Arc<Application>,
-        settings: gpui::Entity<ShellSettings>,
+        settings: gpui_kit::Entity<ShellSettings>,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
@@ -71,7 +71,7 @@ impl McpServiceItem {
         };
         self.request_generation = self.request_generation.saturating_add(1);
         let generation = self.request_generation;
-        let status = gpui_tokio::Tokio::spawn(cx, async move { runtime.status().await });
+        let status = crate::ui::runtime::spawn(cx, async move { runtime.status().await });
         cx.spawn(async move |item, cx| {
             let result = status.await.map_err(|error| error.to_string());
             item.update(cx, |item, cx| {
@@ -132,7 +132,7 @@ impl McpServiceItem {
         self.notice = None;
         cx.notify();
         let next_credentials = operation.credentials().cloned();
-        let operation = gpui_tokio::Tokio::spawn(cx, async move {
+        let operation = crate::ui::runtime::spawn(cx, async move {
             match operation {
                 McpOperation::Start(credentials) => {
                     runtime
@@ -226,7 +226,7 @@ impl McpOperation {
 
 impl Render for McpServiceItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let status = self.status.clone();
         let running = status
@@ -256,7 +256,7 @@ impl Render for McpServiceItem {
                     .child(
                         Label::new("MCP Server")
                             .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::MEDIUM),
+                            .weight(gpui_kit::FontWeight::MEDIUM),
                     )
                     .child(Label::new(phase).size(LabelSize::XSmall).color(if running {
                         Color::Success

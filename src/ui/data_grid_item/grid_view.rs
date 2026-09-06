@@ -7,25 +7,26 @@ impl DataGridItem {
         grid_focused: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
-        let query_locked = self.has_unsaved_changes();
+        let query_locked =
+            self.has_local_changes() || self.transaction_busy || self.save_recovery_sql.is_some();
         let grid_width = px(ROW_NUMBER_WIDTH
             + (0..page.columns.len())
                 .map(|column| self.column_width(column))
                 .sum::<f32>());
         let header = h_flex()
             .id("data-grid-header")
-            .role(gpui::Role::Row)
+            .role(gpui_kit::Role::Row)
             .w_full()
             .flex_none()
             .border_b_1()
             .border_color(colors.border)
-            .bg(colors.panel_background)
+            .bg(colors.surface_background)
             .child(
                 div()
                     .id("data-grid-row-number-header")
-                    .role(gpui::Role::ColumnHeader)
+                    .role(gpui_kit::Role::ColumnHeader)
                     .aria_label(text(language, "行号", "Row number"))
                     .w(px(ROW_NUMBER_WIDTH))
                     .flex_none()
@@ -35,6 +36,7 @@ impl DataGridItem {
                     .border_color(colors.border)
                     .child(
                         Label::new("#")
+                            .buffer_font(cx)
                             .size(LabelSize::XSmall)
                             .weight(FontWeight::SEMIBOLD),
                     ),
@@ -80,7 +82,7 @@ impl DataGridItem {
                         };
                         h_flex()
                             .id(format!("data-grid-column-{column_index}"))
-                            .role(gpui::Role::ColumnHeader)
+                            .role(gpui_kit::Role::ColumnHeader)
                             .tab_index(0)
                             .key_context("DataGridColumnHeader")
                             .aria_label(aria_label)
@@ -104,12 +106,14 @@ impl DataGridItem {
                                     .flex_1()
                                     .child(
                                         Label::new(column_name)
+                                            .buffer_font(cx)
                                             .size(LabelSize::XSmall)
                                             .weight(FontWeight::SEMIBOLD)
                                             .truncate(),
                                     )
                                     .child(
                                         Label::new(column_type)
+                                            .buffer_font(cx)
                                             .size(LabelSize::XSmall)
                                             .color(Color::Muted)
                                             .truncate(),
@@ -144,18 +148,18 @@ impl DataGridItem {
                                         GridColumnResize {
                                             column: column_index,
                                         },
-                                        |_, _, _, cx| cx.new(|_| gpui::Empty),
+                                        |_, _, _, cx| cx.new(|_| gpui_kit::Empty),
                                     ),
                             )
                             .when(!query_locked, |element| {
                                 element
                                     .on_action(cx.listener(
-                                        move |item, _: &menu::Confirm, _, cx| {
-                                            item.sort_column(action_index, cx);
+                                        move |item, _: &menu::Confirm, window, cx| {
+                                            item.sort_column(action_index, window, cx);
                                         },
                                     ))
-                                    .on_click(cx.listener(move |item, _, _, cx| {
-                                        item.sort_column(click_index, cx);
+                                    .on_click(cx.listener(move |item, _, window, cx| {
+                                        item.sort_column(click_index, window, cx);
                                     }))
                             })
                     }),
@@ -182,7 +186,7 @@ impl DataGridItem {
                 )
                 .into_any_element()
         } else {
-            gpui::uniform_list(
+            gpui_kit::uniform_list(
                 "data-grid-rows",
                 page.rows.len() + self.state.drafts().len(),
                 cx.processor(move |item, visible_range: std::ops::Range<usize>, _, cx| {
@@ -207,7 +211,7 @@ impl DataGridItem {
                                 return Some(
                                     h_flex()
                                         .id(format!("data-grid-draft-row-{draft_id}"))
-                                        .role(gpui::Role::Row)
+                                        .role(gpui_kit::Role::Row)
                                         .aria_label(format!(
                                             "{} {}",
                                             text(language, "未保存的新行", "Unsaved new row"),
@@ -223,7 +227,7 @@ impl DataGridItem {
                                                 .id(format!(
                                                     "data-grid-draft-row-header-{draft_id}"
                                                 ))
-                                                .role(gpui::Role::RowHeader)
+                                                .role(gpui_kit::Role::RowHeader)
                                                 .aria_label(format!(
                                                     "{} {}",
                                                     text(language, "新行", "New row"),
@@ -326,7 +330,7 @@ impl DataGridItem {
                                                                     editing.null_requested,
                                                                     |element| {
                                                                         element.child(
-                                                                            Label::new("NULL")
+                                                                            Label::new("NULL").buffer_font(cx)
                                                                                 .size(
                                                                                     LabelSize::XSmall,
                                                                                 )
@@ -357,7 +361,7 @@ impl DataGridItem {
                                                             .px_2()
                                                             .py_1()
                                                             .child(
-                                                                Label::new(displayed)
+                                                                Label::new(displayed).buffer_font(cx)
                                                                     .size(LabelSize::XSmall)
                                                                     .truncate(),
                                                             )
@@ -367,7 +371,7 @@ impl DataGridItem {
                                                     .id(format!(
                                                         "data-grid-draft-cell-{draft_id}-{column_index}"
                                                     ))
-                                                    .role(gpui::Role::GridCell)
+                                                    .role(gpui_kit::Role::GridCell)
                                                     .aria_label(aria_label)
                                                     .w(px(item.column_width(column_index)))
                                                     .flex_none()
@@ -396,15 +400,12 @@ impl DataGridItem {
                             Some(
                                 h_flex()
                                     .id(format!("data-grid-row-{row_index}"))
-                                    .role(gpui::Role::Row)
+                                    .role(gpui_kit::Role::Row)
                                     .aria_selected(row_selected)
                                     .w_full()
                                     .flex_none()
                                     .border_b_1()
                                     .border_color(colors.border)
-                                    .when(row_index % 2 == 1, |element| {
-                                        element.bg(colors.element_background)
-                                    })
                                     .when(row_selected, |element| {
                                         element.bg(colors.ghost_element_selected)
                                     })
@@ -419,7 +420,7 @@ impl DataGridItem {
                                     .child(
                                         div()
                                             .id(format!("data-grid-row-header-{row_index}"))
-                                            .role(gpui::Role::RowHeader)
+                                            .role(gpui_kit::Role::RowHeader)
                                             .aria_label(format!(
                                                 "{} {displayed_row}{}",
                                                 text(language, "行", "Row"),
@@ -447,7 +448,7 @@ impl DataGridItem {
                                                     .color(Color::Warning)
                                                     .into_any_element()
                                             } else {
-                                                Label::new(displayed_row.to_string())
+                                                Label::new(displayed_row.to_string()).buffer_font(cx)
                                                     .size(LabelSize::XSmall)
                                                     .into_any_element()
                                             })
@@ -549,7 +550,7 @@ impl DataGridItem {
                                                                 editing.null_requested,
                                                                 |element| {
                                                                     element.child(
-                                                                        Label::new("NULL")
+                                                                        Label::new("NULL").buffer_font(cx)
                                                                             .size(
                                                                                 LabelSize::XSmall,
                                                                             )
@@ -580,7 +581,7 @@ impl DataGridItem {
                                                         .px_2()
                                                         .py_1()
                                                         .child(
-                                                            Label::new(displayed)
+                                                            Label::new(displayed).buffer_font(cx)
                                                                 .size(LabelSize::XSmall)
                                                                 .truncate(),
                                                         )
@@ -591,7 +592,7 @@ impl DataGridItem {
                                                     "data-grid-cell-{row_index}-{column_index}"
                                                 ))
                                                 .relative()
-                                                .role(gpui::Role::GridCell)
+                                                .role(gpui_kit::Role::GridCell)
                                                 .aria_label(aria_label)
                                                 .aria_selected(selected)
                                                 .when(active, |element| {

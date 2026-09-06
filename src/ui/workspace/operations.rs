@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{AppContext as _, Context, PathPromptOptions, PromptButton, PromptLevel, Window};
+use gpui_kit::{AppContext as _, Context, PathPromptOptions, PromptButton, PromptLevel, Window};
 
 use crate::application::{BackupContent, BackupOptions, DropTableMode, QueryTarget};
 use crate::db::TableRef;
@@ -334,9 +334,13 @@ impl AstesiaWorkspace {
             let Some(transfer) = transfer else {
                 return;
             };
-            let start = gpui_tokio::Tokio::spawn(cx, async move {
-                transfer.start_backup(target, options).await
-            });
+            let Ok(start) = cx.update(|_, cx| {
+                crate::ui::runtime::spawn(cx, async move {
+                    transfer.start_backup(target, options).await
+                })
+            }) else {
+                return;
+            };
             let result = match start.await {
                 Ok(result) => result,
                 Err(error) => Err(error.to_string()),
@@ -393,11 +397,15 @@ impl AstesiaWorkspace {
             let Some(transfer) = transfer else {
                 return;
             };
-            let start = gpui_tokio::Tokio::spawn(cx, async move {
-                transfer
-                    .start_restore(target, path.to_string_lossy().into_owned())
-                    .await
-            });
+            let Ok(start) = cx.update(|_, cx| {
+                crate::ui::runtime::spawn(cx, async move {
+                    transfer
+                        .start_restore(target, path.to_string_lossy().into_owned())
+                        .await
+                })
+            }) else {
+                return;
+            };
             let result = match start.await {
                 Ok(result) => result,
                 Err(error) => Err(error.to_string()),

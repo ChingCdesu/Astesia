@@ -14,6 +14,7 @@ mod changes;
 mod formatting;
 mod lifecycle;
 mod selection;
+mod sort;
 
 use changes::GridChangeSet;
 use formatting::{format_grid_tsv, format_grid_value};
@@ -145,6 +146,7 @@ pub(crate) struct GridSaveFailure {
     pub(crate) completed_statements: usize,
     pub(crate) total_statements: usize,
     pub(crate) message: String,
+    pub(crate) recovery_sql: Option<String>,
 }
 
 impl GridSaveFailure {
@@ -153,6 +155,7 @@ impl GridSaveFailure {
             completed_statements: 0,
             total_statements,
             message: message.into(),
+            recovery_sql: None,
         }
     }
 
@@ -165,6 +168,7 @@ impl GridSaveFailure {
             completed_statements,
             total_statements,
             message: message.into(),
+            recovery_sql: None,
         }
     }
 }
@@ -176,7 +180,7 @@ impl fmt::Display for GridSaveFailure {
         } else {
             write!(
                 formatter,
-                "{} (statement {} of {} failed; transaction rolled back)",
+                "{} (statement {} of {} failed; batch rolled back)",
                 self.message,
                 self.completed_statements + 1,
                 self.total_statements

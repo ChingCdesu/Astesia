@@ -1,10 +1,8 @@
-use gpui::rgb;
-use zed_ui::{prelude::*, Tooltip};
+use crate::ui::components::{prelude::*, Tooltip};
+use gpui_kit::rgb;
 
-use super::catalog_view::{catalog_empty_row, catalog_error_row};
 use super::engine_workflows::{DraggedTableCopy, DraggedTableCopyPreview};
 use super::ConnectionProfilesPanel;
-use crate::application::connection_workspace::{CatalogSection, DatabaseCatalogSnapshot};
 use crate::application::{
     object_kind_can_drop, object_kind_can_rename, DatabaseObjectKind, DropObjectTarget,
     ObjectMutation, QueryTarget,
@@ -12,80 +10,7 @@ use crate::application::{
 use crate::ui::localization::text;
 
 impl ConnectionProfilesPanel {
-    pub(super) fn render_primary_catalog(
-        &self,
-        target: &QueryTarget,
-        catalog: &DatabaseCatalogSnapshot,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let language = self.settings.read(cx).language();
-        let (primary_label, primary_empty_label) = match target.db_type {
-            crate::db::DbType::MongoDB => (
-                text(language, "集合", "Collections"),
-                text(language, "未发现集合", "No collections found"),
-            ),
-            crate::db::DbType::Redis => (
-                text(language, "键", "Keys"),
-                text(language, "未发现键", "No keys found"),
-            ),
-            _ => (
-                text(language, "表", "Tables"),
-                text(language, "未发现表", "No tables found"),
-            ),
-        };
-        let primary_section = self
-            .redis_search_result
-            .as_ref()
-            .filter(|(search_target, _)| search_target == target)
-            .map(|(_, result)| CatalogSection::from_result(result.clone()))
-            .unwrap_or_else(|| catalog.tables().clone());
-        match &primary_section {
-            CatalogSection::Unsupported => Vec::new(),
-            CatalogSection::Loading => vec![
-                self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    0,
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                ),
-                catalog_empty_row(text(language, "正在加载…", "Loading…")),
-            ],
-            CatalogSection::Failed(error) => vec![
-                self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    0,
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                ),
-                catalog_error_row(error),
-            ],
-            CatalogSection::Ready(tables) => {
-                let mut rows = vec![self.catalog_section_heading_with_create(
-                    target,
-                    primary_label,
-                    tables.len(),
-                    DatabaseObjectKind::Table,
-                    None,
-                    cx,
-                )];
-                if tables.is_empty() {
-                    rows.push(catalog_empty_row(primary_empty_label));
-                    rows
-                } else {
-                    rows.extend(tables.iter().enumerate().map(|(index, object)| {
-                        self.render_primary_catalog_row(target, object, index, cx)
-                    }));
-                    rows
-                }
-            }
-        }
-    }
-
-    fn render_primary_catalog_row(
+    pub(super) fn render_primary_catalog_row(
         &self,
         target: &QueryTarget,
         object: &crate::db::TableInfo,
@@ -132,7 +57,7 @@ impl ConnectionProfilesPanel {
                 element.child(
                     h_flex()
                         .id(format!("browse-table-data-{index}"))
-                        .role(gpui::Role::Button)
+                        .role(gpui_kit::Role::Button)
                         .tab_index(0)
                         .key_context("SchemaObjectRow")
                         .aria_label(format!(

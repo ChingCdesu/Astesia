@@ -1,9 +1,9 @@
 use std::{collections::HashSet, sync::Arc};
 
-use gpui::{ClickEvent, Entity, FocusHandle, Subscription};
+use crate::ui::components::prelude::*;
+use crate::ui::input_field::InputField;
+use gpui_kit::{ClickEvent, Entity, FocusHandle, Subscription};
 use serde_json::Value;
-use ui_input::InputField;
-use zed_ui::prelude::*;
 
 use crate::application::{Application, DocumentSession, DocumentSessionStatus, QueryTarget};
 use crate::db::{DocumentPage, TableRef};
@@ -107,7 +107,7 @@ impl DocumentItem {
         cx.notify();
         let application = self.application.clone();
         let failed_request = request.clone();
-        let load = gpui_tokio::Tokio::spawn(cx, async move {
+        let load = crate::ui::runtime::spawn(cx, async move {
             let result = application.documents().load(&request).await;
             (request, result)
         });
@@ -204,7 +204,7 @@ impl DocumentItem {
                 )
                 .into_any_element();
         }
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         v_flex()
             .id("document-page")
             .flex_1()
@@ -225,7 +225,7 @@ impl DocumentItem {
                     .child(
                         h_flex()
                             .id(("toggle-document", index))
-                            .role(gpui::Role::Button)
+                            .role(gpui_kit::Role::Button)
                             .cursor_pointer()
                             .px_3()
                             .py_2()
@@ -248,7 +248,7 @@ impl DocumentItem {
                                     index + 1
                                 ))
                                 .size(LabelSize::Small)
-                                .weight(gpui::FontWeight::MEDIUM),
+                                .weight(gpui_kit::FontWeight::MEDIUM),
                             )
                             .child(div().flex_1())
                             .child(
@@ -274,7 +274,7 @@ impl DocumentItem {
 
 impl Render for DocumentItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
+        let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
         let status = self.session.status();
         let loading = matches!(status, DocumentSessionStatus::Loading);
@@ -323,7 +323,7 @@ impl Render for DocumentItem {
                     .child(
                         Label::new(self.label())
                             .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::MEDIUM)
+                            .weight(gpui_kit::FontWeight::MEDIUM)
                             .truncate()
                             .flex_1(),
                     )
@@ -443,7 +443,7 @@ fn json_row(name: impl Into<SharedString>, value: &Value) -> AnyElement {
                 .child(
                     Label::new(name)
                         .size(LabelSize::XSmall)
-                        .weight(gpui::FontWeight::MEDIUM),
+                        .weight(gpui_kit::FontWeight::MEDIUM),
                 )
                 .child(
                     Label::new(json_type_name(value))

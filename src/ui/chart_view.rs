@@ -1,11 +1,14 @@
-use gpui::prelude::*;
-use gpui::{
+use std::sync::Arc;
+
+use crate::ui::components::prelude::*;
+use gpui_kit::prelude::*;
+use gpui_kit::{
     canvas, fill, point, px, Bounds, ClickEvent, Entity, FocusHandle, Focusable, Hsla, PathBuilder,
     Pixels,
 };
-use zed_ui::prelude::*;
 
 use crate::application::{ChartDataError, ChartModel, ChartSeries, ChartType};
+use crate::db::StatementResult;
 use crate::platform::UiLanguage;
 
 use super::localization::text;
@@ -35,10 +38,24 @@ impl ChartView {
     pub(super) fn replace_data(
         &mut self,
         columns: Vec<String>,
-        rows: &[Vec<serde_json::Value>],
+        rows: Vec<Vec<serde_json::Value>>,
         cx: &mut Context<Self>,
     ) {
         self.model.replace_data(columns, rows);
+        cx.notify();
+    }
+
+    pub(super) fn replace_statement(
+        &mut self,
+        result: Arc<StatementResult>,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.replace_statement(result);
+        cx.notify();
+    }
+
+    pub(super) fn release_data(&mut self, cx: &mut Context<Self>) {
+        self.model.release_data();
         cx.notify();
     }
 
@@ -148,7 +165,7 @@ impl Render for ChartView {
                     .child(
                         Label::new("X")
                             .size(LabelSize::XSmall)
-                            .weight(gpui::FontWeight::SEMIBOLD)
+                            .weight(gpui_kit::FontWeight::SEMIBOLD)
                             .color(Color::Muted),
                     )
                     .children(columns.iter().enumerate().map(|(column, name)| {
@@ -163,7 +180,7 @@ impl Render for ChartView {
                         Label::new("Y")
                             .ml_2()
                             .size(LabelSize::XSmall)
-                            .weight(gpui::FontWeight::SEMIBOLD)
+                            .weight(gpui_kit::FontWeight::SEMIBOLD)
                             .color(Color::Muted),
                     )
                     .children(
@@ -333,7 +350,7 @@ fn legend_item(index: usize, label: String) -> AnyElement {
             div()
                 .size(px(7.0))
                 .rounded_full()
-                .bg(gpui::rgb(SERIES_COLORS[index % SERIES_COLORS.len()])),
+                .bg(gpui_kit::rgb(SERIES_COLORS[index % SERIES_COLORS.len()])),
         )
         .child(Label::new(label).size(LabelSize::XSmall))
         .into_any_element()
@@ -429,7 +446,7 @@ fn paint_chart(
         window.paint_quad(fill(
             Bounds::new(
                 point(plot.origin.x, y),
-                gpui::size(plot.size.width, px(1.0)),
+                gpui_kit::size(plot.size.width, px(1.0)),
             ),
             grid,
         ));
@@ -454,7 +471,7 @@ fn paint_bars(bounds: Bounds<Pixels>, series: &[ChartSeries], window: &mut Windo
     let bar_width = (group_width * 0.72 / series.len().max(1) as f32).max(px(2.0));
     let baseline = y_position(0.0, minimum, maximum, bounds);
     for (series_index, series) in series.iter().enumerate() {
-        let color = gpui::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
+        let color = gpui_kit::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
         for (point_index, data) in series.points.iter().enumerate() {
             let y = y_position(data.y, minimum, maximum, bounds);
             let x = bounds.origin.x
@@ -464,7 +481,7 @@ fn paint_bars(bounds: Bounds<Pixels>, series: &[ChartSeries], window: &mut Windo
             window.paint_quad(fill(
                 Bounds::new(
                     point(x, y.min(baseline)),
-                    gpui::size(bar_width, (baseline - y).abs().max(px(1.0))),
+                    gpui_kit::size(bar_width, (baseline - y).abs().max(px(1.0))),
                 ),
                 color,
             ));
@@ -494,7 +511,7 @@ fn paint_lines(
         if points.is_empty() {
             continue;
         }
-        let color = gpui::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
+        let color = gpui_kit::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
         if fill_area {
             let mut area = PathBuilder::fill();
             area.move_to(point(points[0].x, bounds.origin.y + bounds.size.height));
@@ -525,22 +542,22 @@ fn paint_scatter(bounds: Bounds<Pixels>, series: &[ChartSeries], window: &mut Wi
     let (minimum_y, maximum_y) = y_range(series);
     let (minimum_x, maximum_x) = x_range(series);
     for (series_index, series) in series.iter().enumerate() {
-        let color = gpui::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
+        let color = gpui_kit::rgb(SERIES_COLORS[series_index % SERIES_COLORS.len()]);
         for data in &series.points {
             let center = point(
                 x_position(data.x, minimum_x, maximum_x, bounds),
                 y_position(data.y, minimum_y, maximum_y, bounds),
             );
-            window.paint_quad(gpui::quad(
+            window.paint_quad(gpui_kit::quad(
                 Bounds::new(
                     point(center.x - px(3.0), center.y - px(3.0)),
-                    gpui::size(px(6.0), px(6.0)),
+                    gpui_kit::size(px(6.0), px(6.0)),
                 ),
                 px(3.0),
                 color,
                 px(0.0),
-                gpui::transparent_black(),
-                gpui::BorderStyle::Solid,
+                gpui_kit::transparent_black(),
+                gpui_kit::BorderStyle::Solid,
             ));
         }
     }
@@ -597,7 +614,10 @@ fn paint_pie(bounds: Bounds<Pixels>, series: &[ChartSeries], window: &mut Window
         }
         sector.close();
         if let Ok(path) = sector.build() {
-            window.paint_path(path, gpui::rgb(SERIES_COLORS[index % SERIES_COLORS.len()]));
+            window.paint_path(
+                path,
+                gpui_kit::rgb(SERIES_COLORS[index % SERIES_COLORS.len()]),
+            );
         }
         angle = end_angle;
     }
@@ -612,7 +632,7 @@ fn inset_bounds(
 ) -> Bounds<Pixels> {
     Bounds::new(
         point(bounds.origin.x + px(left), bounds.origin.y + px(top)),
-        gpui::size(
+        gpui_kit::size(
             (bounds.size.width - px(left + right)).max(px(1.0)),
             (bounds.size.height - px(top + bottom)).max(px(1.0)),
         ),

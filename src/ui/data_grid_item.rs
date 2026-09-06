@@ -1,14 +1,15 @@
-use std::sync::Arc;
-
-use editor::{Editor, EditorEvent};
-use gpui::{
-    actions, point, App, ClickEvent, ClipboardItem, DragMoveEvent, Entity, FocusHandle,
-    Focusable as _, FontWeight, PromptButton, PromptLevel, ScrollHandle, ScrollStrategy,
-    Subscription, UniformListScrollHandle,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
-use language::Buffer;
+
+use crate::ui::components::{prelude::*, Indicator, Tooltip};
+use crate::ui::text_editor::{Editor, EditorEvent};
+use gpui_kit::{
+    actions, point, App, ClickEvent, ClipboardItem, DragMoveEvent, Entity, FocusHandle, FontWeight,
+    PromptButton, PromptLevel, ScrollHandle, ScrollStrategy, Subscription, UniformListScrollHandle,
+};
 use serde_json::Value;
-use zed_ui::{prelude::*, Indicator, Tooltip};
 
 use crate::application::{
     Application, ChartModel, GridCell, GridCellInputError, GridCellSelection, GridColumn,
@@ -64,54 +65,54 @@ actions!(
 
 pub(super) fn bind_data_grid_item_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("enter", menu::Confirm, Some("DataGridColumnHeader")),
-        gpui::KeyBinding::new("space", menu::Confirm, Some("DataGridColumnHeader")),
-        gpui::KeyBinding::new("up", MoveGridUp, Some("DataGrid")),
-        gpui::KeyBinding::new("down", MoveGridDown, Some("DataGrid")),
-        gpui::KeyBinding::new("left", MoveGridLeft, Some("DataGrid")),
-        gpui::KeyBinding::new("right", MoveGridRight, Some("DataGrid")),
-        gpui::KeyBinding::new("shift-up", ExtendGridUp, Some("DataGrid")),
-        gpui::KeyBinding::new("shift-down", ExtendGridDown, Some("DataGrid")),
-        gpui::KeyBinding::new("shift-left", ExtendGridLeft, Some("DataGrid")),
-        gpui::KeyBinding::new("shift-right", ExtendGridRight, Some("DataGrid")),
-        gpui::KeyBinding::new("enter", BeginActiveGridCellEdit, Some("DataGrid")),
-        gpui::KeyBinding::new("space", SelectActiveGridCell, Some("DataGrid")),
-        gpui::KeyBinding::new("shift-space", SelectActiveGridRow, Some("DataGrid")),
-        gpui::KeyBinding::new("escape", ClearGridSelection, Some("DataGrid")),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new("enter", menu::Confirm, Some("DataGridColumnHeader")),
+        gpui_kit::KeyBinding::new("space", menu::Confirm, Some("DataGridColumnHeader")),
+        gpui_kit::KeyBinding::new("up", MoveGridUp, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("down", MoveGridDown, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("left", MoveGridLeft, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("right", MoveGridRight, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("shift-up", ExtendGridUp, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("shift-down", ExtendGridDown, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("shift-left", ExtendGridLeft, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("shift-right", ExtendGridRight, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("enter", BeginActiveGridCellEdit, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("space", SelectActiveGridCell, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("shift-space", SelectActiveGridRow, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("escape", ClearGridSelection, Some("DataGrid")),
+        gpui_kit::KeyBinding::new(
             "enter",
             CommitGridCellEdit,
-            Some("DataGridCellEditor > Editor"),
+            Some("DataGridCellEditor > Input"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "escape",
             CancelGridCellEdit,
-            Some("DataGridCellEditor > Editor"),
+            Some("DataGridCellEditor > Input"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "cmd-enter",
             CommitGridCellEdit,
-            Some("DataGridLongEditor > Editor"),
+            Some("DataGridLongEditor > Input"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "ctrl-enter",
             CommitGridCellEdit,
-            Some("DataGridLongEditor > Editor"),
+            Some("DataGridLongEditor > Input"),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "escape",
             CancelGridCellEdit,
-            Some("DataGridLongEditor > Editor"),
+            Some("DataGridLongEditor > Input"),
         ),
-        gpui::KeyBinding::new("cmd-s", SaveGridChanges, Some("DataGridItem")),
-        gpui::KeyBinding::new("ctrl-s", SaveGridChanges, Some("DataGridItem")),
-        gpui::KeyBinding::new("cmd-z", UndoGridChanges, Some("DataGrid")),
-        gpui::KeyBinding::new("ctrl-z", UndoGridChanges, Some("DataGrid")),
-        gpui::KeyBinding::new("cmd-c", CopyGridSelection, Some("DataGrid")),
-        gpui::KeyBinding::new("ctrl-c", CopyGridSelection, Some("DataGrid")),
-        gpui::KeyBinding::new("cmd-v", PasteGridSelection, Some("DataGrid")),
-        gpui::KeyBinding::new("ctrl-v", PasteGridSelection, Some("DataGrid")),
-        gpui::KeyBinding::new("enter", ApplyGridFilter, Some("DataGridFilter > Editor")),
+        gpui_kit::KeyBinding::new("cmd-s", SaveGridChanges, Some("DataGridItem")),
+        gpui_kit::KeyBinding::new("ctrl-s", SaveGridChanges, Some("DataGridItem")),
+        gpui_kit::KeyBinding::new("cmd-z", UndoGridChanges, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("ctrl-z", UndoGridChanges, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("cmd-c", CopyGridSelection, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("ctrl-c", CopyGridSelection, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("cmd-v", PasteGridSelection, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("ctrl-v", PasteGridSelection, Some("DataGrid")),
+        gpui_kit::KeyBinding::new("enter", ApplyGridFilter, Some("DataGridFilter > Input")),
     ]);
 }
 
@@ -159,8 +160,8 @@ impl GridNotice {
     fn presentation(self) -> (Color, IconName, String) {
         match self {
             Self::Success(message) => (Color::Success, IconName::Check, message),
-            Self::Warning(message) => (Color::Warning, IconName::Warning, message),
-            Self::Error(message) => (Color::Error, IconName::Warning, message),
+            Self::Warning(message) => (Color::Warning, IconName::TriangleAlert, message),
+            Self::Error(message) => (Color::Error, IconName::TriangleAlert, message),
         }
     }
 }
@@ -172,6 +173,17 @@ enum GridExportFormat {
     Xlsx,
 }
 
+#[derive(Default)]
+struct ChartLoadCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for ChartLoadCancellation {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
 pub(super) struct DataGridItem {
     application: Arc<Application>,
     state: GridSession,
@@ -180,17 +192,25 @@ pub(super) struct DataGridItem {
     editing: Option<ActiveCellEditor>,
     operation_notice: Option<GridNotice>,
     export_in_progress: bool,
+    transaction: Option<crate::application::GridTransaction>,
+    manual_transaction: bool,
+    transaction_busy: bool,
+    save_recovery_sql: Option<String>,
+    transaction_isolation: crate::db::TransactionIsolation,
     filter_editor: Entity<Editor>,
+    sort_editor: Entity<Editor>,
     column_widths: Vec<f32>,
     rows_scroll_handle: UniformListScrollHandle,
     horizontal_scroll_handle: ScrollHandle,
     chart: Option<Entity<ChartView>>,
     showing_chart: bool,
     chart_generation: u64,
+    chart_load: Option<ChartLoadCancellation>,
     chart_loading: bool,
     chart_error: Option<String>,
     settings: Entity<ShellSettings>,
     _filter_observation: Subscription,
+    _sort_observation: Subscription,
     _settings_observation: Subscription,
 }
 
@@ -210,7 +230,17 @@ impl DataGridItem {
             editor
         });
         let filter_observation = cx.subscribe(&filter_editor, |_, _, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::BufferEdited) {
+            if matches!(event, EditorEvent::Change) {
+                cx.notify();
+            }
+        });
+        let sort_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("id ASC", window, cx);
+            editor
+        });
+        let sort_observation = cx.subscribe(&sort_editor, |_, _, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Change) {
                 cx.notify();
             }
         });
@@ -223,17 +253,25 @@ impl DataGridItem {
             editing: None,
             operation_notice: None,
             export_in_progress: false,
+            transaction: None,
+            manual_transaction: false,
+            transaction_busy: false,
+            save_recovery_sql: None,
+            transaction_isolation: crate::db::TransactionIsolation::DatabaseDefault,
             filter_editor,
+            sort_editor,
             column_widths: Vec::new(),
             rows_scroll_handle: UniformListScrollHandle::new(),
             horizontal_scroll_handle: ScrollHandle::new(),
             chart: None,
             showing_chart: false,
             chart_generation: 0,
+            chart_load: None,
             chart_loading: false,
             chart_error: None,
             settings,
             _filter_observation: filter_observation,
+            _sort_observation: sort_observation,
             _settings_observation: settings_observation,
         };
         item.load(cx);
@@ -252,6 +290,15 @@ impl DataGridItem {
     }
 
     pub(super) fn has_unsaved_changes(&self) -> bool {
+        self.save_recovery_sql.is_some()
+            || self
+                .transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.has_pending_changes())
+            || self.has_local_changes()
+    }
+
+    pub(super) fn has_local_changes(&self) -> bool {
         self.state.has_changes()
             || self
                 .editing
@@ -282,9 +329,9 @@ impl DataGridItem {
             .collect::<Vec<_>>();
         let rows = page.rows.clone();
         if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, cx| chart.replace_data(columns, &rows, cx));
+            chart.update(cx, |chart, cx| chart.replace_data(columns, rows, cx));
         } else {
-            let model = ChartModel::from_names(columns, &rows);
+            let model = ChartModel::from_names(columns, rows);
             self.chart = Some(cx.new(|cx| ChartView::new(model, self.settings.clone(), cx)));
         }
     }
@@ -295,6 +342,7 @@ mod export;
 mod grid_view;
 mod interactions;
 mod presentation;
+mod transaction;
 mod view;
 
 use presentation::*;

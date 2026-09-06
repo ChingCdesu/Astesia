@@ -1,18 +1,12 @@
 use std::{path::PathBuf, sync::Arc};
 
-use editor::{Editor, EditorEvent};
-use gpui::{
+use crate::ui::components::{prelude::*, Tooltip};
+use crate::ui::text_editor::{Editor, EditorEvent};
+use gpui_kit::{
     actions, App, ClickEvent, ClipboardItem, Entity, FocusHandle, Focusable, FontWeight,
     PathPromptOptions, PromptButton, PromptLevel, Subscription,
 };
-use multi_buffer::MultiBufferOffset;
-use search::{
-    buffer_search::{Deploy, DeployReplace, Dismiss, DivRegistrar, FocusEditor},
-    BufferSearchBar, ReplaceAll, ReplaceNext, SelectNextMatch, SelectPreviousMatch, ToggleReplace,
-};
 use serde_json::Value;
-use workspace::ToolbarItemView as _;
-use zed_ui::prelude::*;
 
 use crate::application::{
     Application, ChartModel, ConnectionWorkspaceSnapshot, QueryDocument, QueryExecutionRequest,
@@ -42,67 +36,37 @@ actions!(
 
 pub(super) struct QueryDocumentStateChanged;
 
-const QUERY_EDITOR_CONTEXT: &str = "QueryItem > QueryEditor > Editor";
+const QUERY_EDITOR_CONTEXT: &str = "QueryItem > QueryEditor > Input";
 
 pub(super) fn bind_query_item_keys(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("ctrl-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new("cmd-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new("ctrl-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new(
             "cmd-shift-enter",
             ExecuteCurrentQuery,
             Some(QUERY_EDITOR_CONTEXT),
         ),
-        gpui::KeyBinding::new(
+        gpui_kit::KeyBinding::new(
             "ctrl-shift-enter",
             ExecuteCurrentQuery,
             Some(QUERY_EDITOR_CONTEXT),
         ),
-        gpui::KeyBinding::new("cmd-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("ctrl-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("cmd-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("ctrl-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("cmd-f", Deploy::find(), Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("ctrl-f", Deploy::find(), Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("cmd-alt-f", DeployReplace, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("ctrl-h", DeployReplace, Some(QUERY_EDITOR_CONTEXT)),
-        gpui::KeyBinding::new("cmd-g", SelectNextMatch, Some("QueryItem")),
-        gpui::KeyBinding::new("ctrl-g", SelectNextMatch, Some("QueryItem")),
-        gpui::KeyBinding::new("cmd-shift-g", SelectPreviousMatch, Some("QueryItem")),
-        gpui::KeyBinding::new("ctrl-shift-g", SelectPreviousMatch, Some("QueryItem")),
-        gpui::KeyBinding::new("cmd-c", CopyQueryResults, Some("QueryResultGrid")),
-        gpui::KeyBinding::new("ctrl-c", CopyQueryResults, Some("QueryResultGrid")),
-        gpui::KeyBinding::new("cmd-a", SelectAllQueryResults, Some("QueryResultGrid")),
-        gpui::KeyBinding::new("ctrl-a", SelectAllQueryResults, Some("QueryResultGrid")),
-        gpui::KeyBinding::new("escape", ClearQueryResultSelection, Some("QueryResultGrid")),
-        gpui::KeyBinding::new("escape", Dismiss, Some("BufferSearchBar")),
-        gpui::KeyBinding::new("tab", FocusEditor, Some("BufferSearchBar")),
-        gpui::KeyBinding::new("enter", SelectNextMatch, Some("BufferSearchBar")),
-        gpui::KeyBinding::new("shift-enter", SelectPreviousMatch, Some("BufferSearchBar")),
-        gpui::KeyBinding::new("cmd-shift-h", ToggleReplace, Some("BufferSearchBar")),
-        gpui::KeyBinding::new("ctrl-h", ToggleReplace, Some("BufferSearchBar")),
-        gpui::KeyBinding::new(
-            "enter",
-            ReplaceNext,
-            Some("BufferSearchBar && in_replace > Editor"),
-        ),
-        gpui::KeyBinding::new(
-            "cmd-enter",
-            ReplaceAll,
-            Some("BufferSearchBar && in_replace > Editor"),
-        ),
-        gpui::KeyBinding::new(
-            "ctrl-enter",
-            ReplaceAll,
-            Some("BufferSearchBar && in_replace > Editor"),
-        ),
+        gpui_kit::KeyBinding::new("cmd-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new("ctrl-o", OpenQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new("cmd-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new("ctrl-s", SaveQueryFile, Some(QUERY_EDITOR_CONTEXT)),
+        gpui_kit::KeyBinding::new("cmd-c", CopyQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("ctrl-c", CopyQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("cmd-a", SelectAllQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("ctrl-a", SelectAllQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("escape", ClearQueryResultSelection, Some("QueryResultGrid")),
     ]);
 }
 
 pub(super) struct QueryItem {
     application: Arc<Application>,
     editor: Entity<Editor>,
-    search: Entity<BufferSearchBar>,
     result_focus: FocusHandle,
     completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
@@ -111,7 +75,6 @@ pub(super) struct QueryItem {
     file_prompt_active: bool,
     settings: Entity<ShellSettings>,
     _editor_subscription: Subscription,
-    _search_observation: Subscription,
     _settings_observation: Subscription,
 }
 
@@ -122,19 +85,14 @@ impl QueryItem {
         application: Arc<Application>,
         editor: Entity<Editor>,
         settings: Entity<ShellSettings>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_text = editor.read(cx).text(cx);
-        let search = cx.new(|cx| {
-            let mut search = BufferSearchBar::new(None, window, cx);
-            search.set_active_pane_item(Some(&editor), window, cx);
-            search
-        });
         let completion =
             sql_completion::install(application.query_completions().clone(), &editor, cx);
         let editor_subscription = cx.subscribe(&editor, |item, editor, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::Edited { .. }) {
+            if matches!(event, EditorEvent::Change) {
                 let was_dirty = item.state.is_file_dirty();
                 let text = editor.read(cx).text(cx);
                 if item.state.update_document_text(text) {
@@ -145,12 +103,10 @@ impl QueryItem {
                 }
             }
         });
-        let search_observation = cx.observe(&search, |_, _, cx| cx.notify());
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
         Self {
             application,
             editor,
-            search,
             result_focus: cx.focus_handle(),
             completion,
             state: QueryWorkspaceState::new(initial_text),
@@ -159,7 +115,6 @@ impl QueryItem {
             file_prompt_active: false,
             settings,
             _editor_subscription: editor_subscription,
-            _search_observation: search_observation,
             _settings_observation: settings_observation,
         }
     }
@@ -188,27 +143,36 @@ impl QueryItem {
     }
 
     fn sync_chart(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = self.state.active_result().filter(|result| result.success) else {
+        let Some(result) = self
+            .state
+            .shared_active_result()
+            .filter(|result| result.success)
+        else {
             self.chart = None;
             self.showing_chart = false;
             return;
         };
-        let columns = result.columns.clone();
-        let names = columns.iter().map(|column| column.name.clone()).collect();
-        let rows = result.rows.clone();
+        if !self.showing_chart {
+            self.release_chart_data(cx);
+            return;
+        }
         if let Some(chart) = &self.chart {
-            chart.update(cx, |chart, cx| chart.replace_data(names, &rows, cx));
+            chart.update(cx, |chart, cx| chart.replace_statement(result, cx));
         } else {
-            let model = ChartModel::new(&columns, &rows);
+            let model = ChartModel::from_statement(result);
             self.chart = Some(cx.new(|cx| ChartView::new(model, self.settings.clone(), cx)));
         }
     }
 
-    fn toggle_chart(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chart.is_none() {
-            self.sync_chart(cx);
+    fn release_chart_data(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, cx| chart.release_data(cx));
         }
-        self.showing_chart = self.chart.is_some() && !self.showing_chart;
+    }
+
+    fn toggle_chart(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.showing_chart = !self.showing_chart;
+        self.sync_chart(cx);
         if self.showing_chart {
             if let Some(chart) = &self.chart {
                 window.focus(&chart.read(cx).focus_handle(cx), cx);
@@ -237,6 +201,10 @@ impl QueryItem {
 
     pub(super) fn has_unsaved_changes(&self) -> bool {
         self.state.is_file_dirty()
+    }
+
+    pub(super) fn query_target(&self) -> Option<&QueryTarget> {
+        self.state.target()
     }
 
     pub(super) fn document_label(&self, fallback: &str) -> String {
@@ -417,9 +385,8 @@ impl QueryItem {
     }
 
     fn show_find_click(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.search.update(cx, |search, cx| {
-            search.deploy(&Deploy::find(), None, window, cx);
-        });
+        self.editor
+            .update(cx, |editor, cx| editor.open_search(false, window, cx));
     }
 
     fn save_query_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,7 +457,7 @@ impl QueryItem {
     ) {
         cx.notify();
         let execution_request = request.clone();
-        let task = gpui_tokio::Tokio::spawn(cx, async move { execution_request.execute().await });
+        let task = crate::ui::runtime::spawn(cx, async move { execution_request.execute().await });
         cx.spawn_in(window, async move |item, cx| {
             let result = match task.await {
                 Ok(result) => result,
@@ -533,12 +500,21 @@ impl QueryItem {
         self.file_prompt_active || self.state.is_file_busy()
     }
 
-    fn execute_all(&mut self, _: &ExecuteQuery, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute(QueryExecutionScope::All, cx);
+    fn execute_all(&mut self, _: &ExecuteQuery, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.focus_handle(cx).is_focused(window) {
+            self.execute(QueryExecutionScope::All, cx);
+        }
     }
 
-    fn execute_current(&mut self, _: &ExecuteCurrentQuery, _: &mut Window, cx: &mut Context<Self>) {
-        self.execute(QueryExecutionScope::Current, cx);
+    fn execute_current(
+        &mut self,
+        _: &ExecuteCurrentQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.focus_handle(cx).is_focused(window) {
+            self.execute(QueryExecutionScope::Current, cx);
+        }
     }
 
     fn explain(&mut self, _: &ExplainQuery, _: &mut Window, cx: &mut Context<Self>) {
@@ -591,25 +567,19 @@ impl QueryItem {
 
     fn query_document(&self, cx: &mut Context<Self>) -> QueryDocument {
         self.editor.update(cx, |editor, cx| {
-            let display_snapshot = editor.display_snapshot(cx);
-            let selection = editor
-                .selections
-                .newest::<MultiBufferOffset>(&display_snapshot);
-            let selection = selection.range();
-            let start: usize = selection.start.0;
-            let end: usize = selection.end.0;
-            QueryDocument::new(editor.text(cx), start..end)
+            QueryDocument::new(editor.text(cx), editor.selected_range(cx))
         })
     }
 
     fn run_request(&mut self, request: QueryExecutionRequest, cx: &mut Context<Self>) {
+        self.release_chart_data(cx);
         cx.notify();
 
         let application = self.application.clone();
         let target = request.target.clone();
         let operation = request.operation.clone();
         let language = self.settings.read(cx).language();
-        let execution = gpui_tokio::Tokio::spawn(cx, async move {
+        let execution = crate::ui::runtime::spawn(cx, async move {
             match operation {
                 QueryOperation::Statements(statements) => {
                     application
@@ -661,17 +631,9 @@ impl QueryItem {
         window.focus(&self.editor.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
-
-    fn search_for_actions(
-        &self,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<Entity<BufferSearchBar>> {
-        Some(self.search.clone())
-    }
 }
 
-impl gpui::EventEmitter<QueryDocumentStateChanged> for QueryItem {}
+impl gpui_kit::EventEmitter<QueryDocumentStateChanged> for QueryItem {}
 
 impl Render for QueryItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -679,7 +641,6 @@ impl Render for QueryItem {
         let language = self.settings.read(cx).language();
         let busy = self.state.is_running();
         let file_busy = self.file_operation_busy();
-        let file_label = self.document_label(text(language, "未命名查询", "Untitled Query"));
         let file_error = self.state.file_error().map(|error| {
             format!(
                 "{}: {} ({})",
@@ -720,7 +681,6 @@ impl Render for QueryItem {
             .state
             .active_result()
             .is_some_and(|result| result.success && !result.columns.is_empty());
-        let search_visible = !self.search.read(cx).is_dismissed();
 
         let content = v_flex()
             .key_context("QueryItem")
@@ -733,66 +693,113 @@ impl Render for QueryItem {
             .overflow_hidden()
             .child(
                 h_flex()
-                    .h(px(40.0))
+                    .h(DynamicSpacing::Base32.rems(cx))
                     .flex_none()
                     .items_center()
                     .gap_1()
                     .px_2()
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
-                        Button::new("open-query-file", text(language, "打开", "Open"))
-                            .size(ButtonSize::Compact)
-                            .disabled(file_busy)
-                            .key_binding(zed_ui::KeyBinding::for_action(&OpenQueryFile, cx))
-                            .on_click(cx.listener(Self::open_query_file_click)),
+                        query_toolbar_action(
+                            "open-query-file",
+                            IconName::FolderOpen,
+                            text(language, "打开", "Open"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .disabled(file_busy)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action(text(language, "打开", "Open"), &OpenQueryFile, cx)
+                        })
+                        .on_click(cx.listener(Self::open_query_file_click)),
                     )
                     .child(
-                        Button::new("save-query-file", text(language, "保存", "Save"))
-                            .size(ButtonSize::Compact)
-                            .disabled(file_busy)
-                            .key_binding(zed_ui::KeyBinding::for_action(&SaveQueryFile, cx))
-                            .on_click(cx.listener(Self::save_query_file_click)),
+                        query_toolbar_action(
+                            "save-query-file",
+                            IconName::Download,
+                            text(language, "保存", "Save"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .disabled(file_busy)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action(text(language, "保存", "Save"), &SaveQueryFile, cx)
+                        })
+                        .on_click(cx.listener(Self::save_query_file_click)),
                     )
                     .child(
-                        Button::new("find-query", text(language, "查找", "Find"))
-                            .size(ButtonSize::Compact)
-                            .key_binding(zed_ui::KeyBinding::for_action(&Deploy::find(), cx))
-                            .on_click(cx.listener(Self::show_find_click)),
+                        query_toolbar_action(
+                            "find-query",
+                            IconName::Search,
+                            text(language, "查找", "Find"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action(
+                                text(language, "查找", "Find"),
+                                &gpui_kit::component::input::Search,
+                                cx,
+                            )
+                        })
+                        .on_click(cx.listener(Self::show_find_click)),
                     )
-                    .child(Label::new(file_label).size(LabelSize::XSmall).truncate())
                     .child(
-                        Button::new("execute-query", text(language, "执行", "Run"))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Filled)
-                            .loading(busy)
-                            .disabled(busy || !can_execute)
-                            .key_binding(zed_ui::KeyBinding::for_action(&ExecuteQuery, cx))
-                            .on_click(cx.listener(Self::execute_all_click)),
+                        query_toolbar_action(
+                            "execute-query",
+                            if busy {
+                                IconName::LoaderCircle
+                            } else {
+                                IconName::Play
+                            },
+                            text(language, "执行", "Run"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Filled)
+                        .disabled(busy || !can_execute)
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action(text(language, "执行", "Run"), &ExecuteQuery, cx)
+                        })
+                        .on_click(cx.listener(Self::execute_all_click)),
                     )
                     .child(
-                        Button::new(
+                        query_toolbar_action(
                             "execute-current-query",
+                            IconName::Play,
                             text(language, "执行当前语句", "Run Current Statement"),
                         )
                         .size(ButtonSize::Compact)
                         .disabled(busy || !can_execute)
-                        .key_binding(zed_ui::KeyBinding::for_action(&ExecuteCurrentQuery, cx))
+                        .tooltip(move |_, cx| {
+                            Tooltip::for_action(
+                                text(language, "执行当前语句", "Run Current Statement"),
+                                &ExecuteCurrentQuery,
+                                cx,
+                            )
+                        })
                         .on_click(cx.listener(Self::execute_current_click)),
                     )
-                    .child(
-                        Button::new("explain-query", text(language, "执行计划", "Explain"))
+                    .when(can_explain, |bar| {
+                        bar.child(
+                            query_toolbar_action(
+                                "explain-query",
+                                IconName::ListTree,
+                                text(language, "执行计划", "Explain"),
+                            )
                             .size(ButtonSize::Compact)
-                            .disabled(busy || !can_explain)
-                            .on_click(cx.listener(Self::explain_click)),
-                    )
-                    .child(
-                        Button::new("clear-query", text(language, "清空", "Clear"))
-                            .size(ButtonSize::Compact)
-                            .style(ButtonStyle::Outlined)
                             .disabled(busy)
-                            .on_click(cx.listener(Self::clear)),
+                            .on_click(cx.listener(Self::explain_click)),
+                        )
+                    })
+                    .child(
+                        query_toolbar_action(
+                            "clear-query",
+                            IconName::Eraser,
+                            text(language, "清空", "Clear"),
+                        )
+                        .size(ButtonSize::Compact)
+                        .style(ButtonStyle::Outlined)
+                        .disabled(busy)
+                        .on_click(cx.listener(Self::clear)),
                     )
                     .child(div().flex_1())
                     .child(Label::new(target_label).size(LabelSize::XSmall).truncate()),
@@ -805,28 +812,20 @@ impl Render for QueryItem {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
                         Label::new(error)
                             .size(LabelSize::XSmall)
                             .color(Color::Error),
                     )
             }))
-            .children(search_visible.then(|| {
-                div()
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .bg(colors.panel_background)
-                    .child(self.search.clone())
-            }))
             .child(
                 div()
                     .key_context("QueryEditor")
-                    .h(px(280.0))
+                    .h(px(300.0))
                     .min_h(px(120.0))
                     .flex_none()
-                    .bg(colors.background)
+                    .bg(colors.editor_background)
                     .child(self.editor.clone()),
             )
             .child(
@@ -839,7 +838,7 @@ impl Render for QueryItem {
                     .border_t_1()
                     .border_b_1()
                     .border_color(colors.border)
-                    .bg(colors.panel_background)
+                    .bg(colors.surface_background)
                     .child(
                         Label::new(text(language, "结果", "Results"))
                             .size(LabelSize::XSmall)
@@ -901,9 +900,7 @@ impl Render for QueryItem {
             .children(self.render_result_tabs(cx))
             .child(div().flex_1().min_h_0().child(self.render_results(cx)));
 
-        let mut search_actions = DivRegistrar::new(Self::search_for_actions, cx);
-        BufferSearchBar::register(&mut search_actions);
-        search_actions.into_div().size_full().child(content)
+        content
     }
 }
 
@@ -933,3 +930,11 @@ pub(super) fn display_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests;
+
+fn query_toolbar_action(id: &'static str, icon: IconName, label: &'static str) -> IconButton {
+    IconButton::new(id, icon)
+        .icon_size(IconSize::Small)
+        .size(ButtonSize::Compact)
+        .aria_label(label)
+        .tooltip(Tooltip::text(label))
+}

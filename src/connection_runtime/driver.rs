@@ -17,6 +17,7 @@ pub(crate) struct DriverHandle {
 
 struct DriverHandleInner {
     retired: AtomicBool,
+    retirement: tokio::sync::watch::Sender<bool>,
     disconnect_started: AtomicBool,
     driver: Mutex<Box<dyn DatabaseDriver>>,
 }
@@ -30,6 +31,7 @@ impl DriverHandle {
         Self {
             inner: Arc::new(DriverHandleInner {
                 retired: AtomicBool::new(false),
+                retirement: tokio::sync::watch::channel(false).0,
                 disconnect_started: AtomicBool::new(false),
                 driver: Mutex::new(driver),
             }),
@@ -46,6 +48,11 @@ impl DriverHandle {
 
     pub(super) fn retire(&self) {
         self.inner.retired.store(true, Ordering::Release);
+        self.inner.retirement.send_replace(true);
+    }
+
+    pub(crate) fn retirement(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.retirement.subscribe()
     }
 
     pub(super) fn is_same(&self, other: &Self) -> bool {

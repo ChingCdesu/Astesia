@@ -5,10 +5,11 @@ use std::time::Instant;
 
 use super::{
     ColumnInfo, ConnectionConfig, DatabaseDriver, DbType, QueryResult, RedisKeySnapshot,
-    RedisListSide, RedisMutation, RedisValue, TableInfo, TableRef,
+    RedisListSide, RedisMutation, RedisPageCursor, RedisValue, TableInfo, TableRef,
 };
 
 const SCAN_BATCH_SIZE: usize = 500;
+pub(crate) const VALUE_PAGE_SIZE: u64 = 256;
 
 pub struct RedisDriver {
     config: ConnectionConfig,
@@ -205,7 +206,12 @@ impl DatabaseDriver for RedisDriver {
         scan_keys(&mut conn, pattern).await
     }
 
-    async fn get_redis_key(&self, database: &str, key: &str) -> anyhow::Result<RedisKeySnapshot> {
+    async fn get_redis_key_page(
+        &self,
+        database: &str,
+        key: &str,
+        cursor: Option<RedisPageCursor>,
+    ) -> anyhow::Result<RedisKeySnapshot> {
         let mut connection = self.selected_connection(database).await?;
         let key_type: String = redis::cmd("TYPE")
             .arg(key)
@@ -215,54 +221,116 @@ impl DatabaseDriver for RedisDriver {
             return Ok(RedisKeySnapshot {
                 ttl_seconds: None,
                 value: RedisValue::Missing,
+                total_entries: 0,
+                offset: 0,
+                next_page: None,
             });
         }
+        let position = page_position(&key_type, cursor)?;
         let ttl: i64 = redis::cmd("TTL")
             .arg(key)
             .query_async(&mut connection)
             .await?;
         let ttl_seconds = u64::try_from(ttl).ok();
-        let value = match key_type.as_str() {
-            "string" => RedisValue::String(
-                redis::cmd("GET")
-                    .arg(key)
-                    .query_async(&mut connection)
-                    .await?,
+        let mut offset = 0;
+        let (value, total_entries, next_page) = match key_type.as_str() {
+            "string" => (
+                RedisValue::String(
+                    redis::cmd("GET")
+                        .arg(key)
+                        .query_async(&mut connection)
+                        .await?,
+                ),
+                1,
+                None,
             ),
-            "hash" => RedisValue::Hash(
-                redis::cmd("HGETALL")
-                    .arg(key)
-                    .query_async(&mut connection)
-                    .await?,
-            ),
-            "list" => RedisValue::List(
-                redis::cmd("LRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(-1)
-                    .query_async(&mut connection)
-                    .await?,
-            ),
-            "set" => {
-                let mut values: Vec<String> = redis::cmd("SMEMBERS")
+            "hash" => {
+                let total = redis::cmd("HLEN")
                     .arg(key)
                     .query_async(&mut connection)
                     .await?;
-                values.sort();
-                RedisValue::Set(values)
-            }
-            "zset" => RedisValue::SortedSet(
-                redis::cmd("ZRANGE")
+                // COUNT is a work hint; retaining every returned entry preserves scan coverage.
+                let (next, mut values): (u64, Vec<(String, String)>) = redis::cmd("HSCAN")
                     .arg(key)
-                    .arg(0)
-                    .arg(-1)
+                    .arg(position)
+                    .arg("COUNT")
+                    .arg(VALUE_PAGE_SIZE)
+                    .query_async(&mut connection)
+                    .await?;
+                values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                values.dedup_by(|left, right| left.0 == right.0);
+                (
+                    RedisValue::Hash(values),
+                    total,
+                    (next != 0).then_some(RedisPageCursor::Hash(next)),
+                )
+            }
+            "list" => {
+                offset = position;
+                let total = redis::cmd("LLEN")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?;
+                let values = redis::cmd("LRANGE")
+                    .arg(key)
+                    .arg(position)
+                    .arg(range_end(position)?)
+                    .query_async(&mut connection)
+                    .await?;
+                (
+                    RedisValue::List(values),
+                    total,
+                    next_range_page(position, total).map(RedisPageCursor::List),
+                )
+            }
+            "set" => {
+                let total = redis::cmd("SCARD")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?;
+                let (next, mut values): (u64, Vec<String>) = redis::cmd("SSCAN")
+                    .arg(key)
+                    .arg(position)
+                    .arg("COUNT")
+                    .arg(VALUE_PAGE_SIZE)
+                    .query_async(&mut connection)
+                    .await?;
+                values.sort_unstable();
+                values.dedup();
+                (
+                    RedisValue::Set(values),
+                    total,
+                    (next != 0).then_some(RedisPageCursor::Set(next)),
+                )
+            }
+            "zset" => {
+                offset = position;
+                let total = redis::cmd("ZCARD")
+                    .arg(key)
+                    .query_async(&mut connection)
+                    .await?;
+                let values = redis::cmd("ZRANGE")
+                    .arg(key)
+                    .arg(position)
+                    .arg(range_end(position)?)
                     .arg("WITHSCORES")
                     .query_async(&mut connection)
-                    .await?,
-            ),
+                    .await?;
+                (
+                    RedisValue::SortedSet(values),
+                    total,
+                    next_range_page(position, total).map(RedisPageCursor::SortedSet),
+                )
+            }
             other => anyhow::bail!("Unsupported Redis key type {other}"),
         };
-        Ok(RedisKeySnapshot { ttl_seconds, value })
+        Ok(RedisKeySnapshot {
+            ttl_seconds,
+            value,
+            total_entries,
+            offset,
+            next_page,
+        })
     }
 
     async fn mutate_redis_key(
@@ -464,6 +532,30 @@ impl DatabaseDriver for RedisDriver {
     }
 }
 
+fn page_position(key_type: &str, cursor: Option<RedisPageCursor>) -> anyhow::Result<u64> {
+    match (key_type, cursor) {
+        (_, None) => Ok(0),
+        ("hash", Some(RedisPageCursor::Hash(position)))
+        | ("list", Some(RedisPageCursor::List(position)))
+        | ("set", Some(RedisPageCursor::Set(position)))
+        | ("zset", Some(RedisPageCursor::SortedSet(position))) => Ok(position),
+        _ => anyhow::bail!("Redis key type changed. Refresh to restart browsing."),
+    }
+}
+
+fn range_end(offset: u64) -> anyhow::Result<u64> {
+    offset
+        .checked_add(VALUE_PAGE_SIZE - 1)
+        .filter(|end| *end <= i64::MAX as u64)
+        .ok_or_else(|| anyhow::anyhow!("Redis page offset is outside the supported range"))
+}
+
+fn next_range_page(offset: u64, total: u64) -> Option<u64> {
+    offset
+        .checked_add(VALUE_PAGE_SIZE)
+        .filter(|next| *next < total)
+}
+
 fn parse_database_selector(database: &str) -> anyhow::Result<u8> {
     let number = database.strip_prefix("db").ok_or_else(|| {
         anyhow::anyhow!("Invalid Redis database selector {database:?}; expected db<N>")
@@ -566,6 +658,181 @@ mod tests {
     use super::{
         delete_key_command, parse_database_selector, select_database_command, set_key_command,
     };
+
+    #[test]
+    fn page_tokens_reject_type_changes_and_range_overflow() {
+        assert_eq!(
+            super::page_position("list", Some(super::RedisPageCursor::List(256))).unwrap(),
+            256
+        );
+        assert!(super::page_position("set", Some(super::RedisPageCursor::Hash(17))).is_err());
+        assert!(super::page_position("string", Some(super::RedisPageCursor::List(256))).is_err());
+        assert_eq!(super::range_end(0).unwrap(), 255);
+        assert!(super::range_end(i64::MAX as u64).is_err());
+        assert!(super::range_end(u64::MAX).is_err());
+        assert_eq!(super::next_range_page(0, 256), None);
+        assert_eq!(super::next_range_page(0, 257), Some(256));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ASTESIA_REDIS_PAGING_PORT pointing to a disposable localhost Redis server"]
+    async fn redis_collection_pages_preserve_coverage_order_and_mutation_identity() {
+        use super::{
+            ConnectionConfig, DatabaseDriver, DbType, RedisDriver, RedisMutation, RedisPageCursor,
+            RedisValue, VALUE_PAGE_SIZE,
+        };
+        use std::collections::HashSet;
+
+        let port = std::env::var("ASTESIA_REDIS_PAGING_PORT")
+            .expect("disposable Redis port")
+            .parse()
+            .expect("Redis port number");
+        let mut driver = RedisDriver::new(ConnectionConfig {
+            id: "redis-paging-smoke".to_string(),
+            name: "Disposable Redis paging".to_string(),
+            db_type: DbType::Redis,
+            host: "127.0.0.1".to_string(),
+            port,
+            username: String::new(),
+            password: String::new(),
+            database: Some("db0".to_string()),
+            color: None,
+        });
+        driver.connect().await.unwrap();
+        let mut connection = driver.selected_connection("db0").await.unwrap();
+        let prefix = format!("astesia-paging-{}", uuid::Uuid::new_v4());
+        let keys = ["hash", "list", "set", "zset"].map(|kind| format!("{prefix}-{kind}"));
+        let entries = (0..700)
+            .map(|index| format!("{index:04}-{}", "成员 空格".repeat(100)))
+            .collect::<Vec<_>>();
+        let mut fixtures = redis::pipe();
+        for (index, member) in entries.iter().enumerate() {
+            fixtures
+                .cmd("HSET")
+                .arg(&keys[0])
+                .arg(member)
+                .arg(format!("value-{index}"))
+                .ignore();
+            fixtures.cmd("RPUSH").arg(&keys[1]).arg(member).ignore();
+            fixtures.cmd("SADD").arg(&keys[2]).arg(member).ignore();
+            fixtures
+                .cmd("ZADD")
+                .arg(&keys[3])
+                .arg(index)
+                .arg(member)
+                .ignore();
+        }
+        fixtures.query_async::<()>(&mut connection).await.unwrap();
+        for (kind, key) in keys.iter().enumerate() {
+            let mut cursor = None;
+            let mut seen = HashSet::new();
+            let mut pages = 0;
+            loop {
+                let page = driver.get_redis_key_page("db0", key, cursor).await.unwrap();
+                assert_eq!(page.total_entries, 700);
+                assert!(
+                    page.value.entry_count() < 700,
+                    "collection must not be fully loaded"
+                );
+                match page.value {
+                    RedisValue::Hash(values) => {
+                        for (member, value) in values {
+                            let index = member[..4].parse::<usize>().unwrap();
+                            assert_eq!(value, format!("value-{index}"));
+                            seen.insert(member);
+                        }
+                    }
+                    RedisValue::List(values) => {
+                        assert!(values.len() <= VALUE_PAGE_SIZE as usize);
+                        for (index, member) in values.into_iter().enumerate() {
+                            assert_eq!(member, entries[page.offset as usize + index]);
+                            seen.insert(member);
+                        }
+                    }
+                    RedisValue::Set(values) => seen.extend(values),
+                    RedisValue::SortedSet(values) => {
+                        assert!(values.len() <= VALUE_PAGE_SIZE as usize);
+                        for (index, (member, score)) in values.into_iter().enumerate() {
+                            assert_eq!(member, entries[page.offset as usize + index]);
+                            assert_eq!(score, (page.offset as usize + index) as f64);
+                            seen.insert(member);
+                        }
+                    }
+                    _ => panic!("unexpected Redis page type"),
+                }
+                pages += 1;
+                assert!(pages < 20, "cursor traversal failed to terminate");
+                cursor = page.next_page;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert!(pages >= 3);
+            assert_eq!(seen, entries.iter().cloned().collect());
+            let identity = entries[350].clone();
+            let mutation = match kind {
+                0 => RedisMutation::HashDelete { field: identity },
+                1 => RedisMutation::ListRemove {
+                    count: 1,
+                    value: identity,
+                },
+                2 => RedisMutation::SetRemove { member: identity },
+                _ => RedisMutation::SortedSetRemove { member: identity },
+            };
+            assert_eq!(
+                driver.mutate_redis_key("db0", key, mutation).await.unwrap(),
+                1
+            );
+            assert_eq!(
+                driver
+                    .get_redis_key("db0", key)
+                    .await
+                    .unwrap()
+                    .total_entries,
+                699
+            );
+        }
+        redis::cmd("LTRIM")
+            .arg(&keys[1])
+            .arg(0)
+            .arg(0)
+            .query_async::<()>(&mut connection)
+            .await
+            .unwrap();
+        let empty = driver
+            .get_redis_key_page("db0", &keys[1], Some(RedisPageCursor::List(256)))
+            .await
+            .unwrap();
+        assert_eq!(empty.value.entry_count(), 0);
+        assert_eq!(empty.next_page, None);
+        let cursor = driver
+            .get_redis_key("db0", &keys[0])
+            .await
+            .unwrap()
+            .next_page;
+        assert!(cursor.is_some());
+        driver
+            .set_key("db0", &keys[0], "replacement", Some(60))
+            .await
+            .unwrap();
+        assert!(driver
+            .get_redis_key_page("db0", &keys[0], cursor)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("type changed"));
+        let string = driver.get_redis_key("db0", &keys[0]).await.unwrap();
+        assert_eq!(string.value, RedisValue::String("replacement".to_string()));
+        assert!(string.ttl_seconds.is_some_and(|ttl| ttl > 0 && ttl <= 60));
+        for key in &keys {
+            driver.delete_key("db0", key).await.unwrap();
+            let missing = driver.get_redis_key("db0", key).await.unwrap();
+            assert_eq!(missing.value, RedisValue::Missing);
+            assert_eq!(missing.next_page, None);
+            assert_eq!(missing.total_entries, 0);
+        }
+        driver.disconnect().await.unwrap();
+    }
 
     #[test]
     fn accepts_exact_redis_database_selectors() {

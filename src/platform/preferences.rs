@@ -77,9 +77,8 @@ pub(crate) struct NativePreferencesStore {
 
 impl NativePreferencesStore {
     pub(crate) fn new_default() -> Result<Self, String> {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| "无法确定应用数据目录".to_string())?
-            .join("com.astesia.app");
+        let data_dir = super::application_data_directory()
+            .ok_or_else(|| "无法确定应用数据目录".to_string())?;
         Ok(Self::new(data_dir.join("preferences.json")))
     }
 

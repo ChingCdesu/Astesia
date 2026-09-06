@@ -138,10 +138,7 @@ impl DataGridItem {
             || initial_text.contains(['\n', '\r'])
             || initial_text.chars().count() > 80;
         let editor = if expanded {
-            cx.new(|cx| {
-                let buffer = cx.new(|cx| Buffer::local(initial_text.clone(), cx));
-                Editor::for_buffer(buffer, None, window, cx)
-            })
+            cx.new(|cx| Editor::code(&initial_text, "json", window, cx))
         } else {
             cx.new(|cx| {
                 let mut editor = Editor::single_line(window, cx);
@@ -150,7 +147,7 @@ impl DataGridItem {
             })
         };
         let observation = cx.subscribe(&editor, |item, editor, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::BufferEdited) {
+            if matches!(event, EditorEvent::Change) {
                 let current_text = editor.read(cx).text(cx);
                 if let Some(editing) = &mut item.editing {
                     editing.null_requested = false;
@@ -395,6 +392,16 @@ impl DataGridItem {
     }
 
     pub(super) fn start_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_recovery_sql.is_some()
+            || self.transaction_busy
+            || (self.manual_transaction
+                && self
+                    .transaction
+                    .as_ref()
+                    .is_none_or(|transaction| transaction.is_closed()))
+        {
+            return;
+        }
         let request = match self.state.begin_save() {
             Ok(request) => request,
             Err(error) => {
@@ -410,11 +417,21 @@ impl DataGridItem {
 
         let application = self.application.clone();
         let save_request = request.clone();
-        let save =
-            gpui_tokio::Tokio::spawn(
-                cx,
-                async move { application.grids().save(&save_request).await },
-            );
+        let transaction = self.transaction.clone();
+        let isolation = self.transaction_isolation;
+        let save = crate::ui::runtime::spawn(cx, async move {
+            if let Some(transaction) = transaction.as_ref() {
+                application
+                    .grids()
+                    .save_in(&save_request, Some(transaction))
+                    .await
+            } else {
+                application
+                    .grids()
+                    .save_with_isolation(&save_request, isolation)
+                    .await
+            }
+        });
         cx.spawn(async move |item, cx| {
             let result = match save.await {
                 Ok(result) => result,
@@ -425,13 +442,27 @@ impl DataGridItem {
             };
             item.update(cx, |item, cx| {
                 let outcome = result.as_ref().ok().copied();
+                item.save_recovery_sql = result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.recovery_sql.clone());
                 if !item.state.finish_save(&request, result.map(|_| ())) {
                     return;
                 }
                 if let Some(outcome) = outcome {
                     let language = item.settings.read(cx).language();
-                    item.operation_notice =
-                        Some(GridNotice::Success(save_outcome_message(outcome, language)));
+                    item.operation_notice = Some(if item.manual_transaction {
+                        GridNotice::Warning(
+                            text(
+                                language,
+                                "更改已写入事务，尚未提交。",
+                                "Changes applied to the transaction; not committed.",
+                            )
+                            .to_string(),
+                        )
+                    } else {
+                        GridNotice::Success(save_outcome_message(outcome, language))
+                    });
                     item.load(cx);
                 } else {
                     cx.notify();
@@ -487,6 +518,14 @@ impl DataGridItem {
     }
 
     pub(super) fn confirm_discard_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.has_pending_changes())
+        {
+            self.confirm_rollback_transaction(window, cx);
+            return;
+        }
         if !self.has_unsaved_changes() || window.has_active_prompt() {
             return;
         }
@@ -512,7 +551,9 @@ impl DataGridItem {
             item.update_in(cx, |item, window, cx| {
                 item.editing = None;
                 item.operation_notice = None;
-                let reload = item.state.discard_changes() && item.state.page().is_none();
+                let unknown_outcome = item.save_recovery_sql.take().is_some();
+                let reload =
+                    item.state.discard_changes() && item.state.page().is_none() || unknown_outcome;
                 window.focus(&item.focus_handle, cx);
                 if reload {
                     item.load(cx);
@@ -541,8 +582,7 @@ impl DataGridItem {
                 "The connection session changed. Reopen the table data from the sidebar.",
             ),
         ) {
-            self.chart_generation = self.chart_generation.saturating_add(1);
-            self.chart_loading = false;
+            self.cancel_chart_load();
             cx.notify();
         }
     }

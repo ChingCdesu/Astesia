@@ -9,11 +9,11 @@ historical acceptance documents.
 ## Governance
 
 - Keep product terms in `CONTEXT.md`, product commitments in `PRODUCT.md`, Astesia-specific visual
-  extensions in `DESIGN.md`, and runtime architecture in ADRs. The pinned Zed UI source owns base
+  extensions in `DESIGN.md`, and runtime architecture in ADRs. The locked GPUI Kit source owns base
   components, theme roles, density, typography, elevation, interaction, and accessibility. The
   skill routes to those owners instead of duplicating them.
-- Reinspect the pinned Zed revision before changing `references/zed-design.md`; names and defaults
-  from another Zed revision are not evidence for this repository.
+- Inspect the locked component versions before changing `references/gpui-kit-design.md`;
+  names and defaults from another release are not evidence for this repository.
 - A new standard needs verified scope, rationale, evidence, exceptions, and human acceptance.
 - Keep unverified candidates in `references/coverage-gaps.md`; do not phrase them as rules.
 - Give accepted rules stable `rule/<id>` identifiers and keep each decision in one file.

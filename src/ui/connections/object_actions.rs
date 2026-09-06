@@ -1,5 +1,5 @@
-use gpui::{PromptButton, PromptLevel, Window};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{PromptButton, PromptLevel, Window};
 
 use super::{ConnectionProfilesEvent, ConnectionProfilesPanel, NoticeTone, PanelNotice};
 use crate::application::{DatabaseObjectKind, ObjectMutation, QueryTarget};
@@ -121,7 +121,7 @@ impl ConnectionProfilesPanel {
         let operation_target = target.clone();
         let kind = mutation.kind();
         let identity = mutation.display_identity();
-        let operation = gpui_tokio::Tokio::spawn(cx, async move {
+        let operation = crate::ui::runtime::spawn(cx, async move {
             application
                 .objects()
                 .execute(&operation_target, &mutation)

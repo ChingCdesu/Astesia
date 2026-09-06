@@ -29,9 +29,9 @@ The same Connection Profiles, credential bindings, revision checks, Usage Leases
 ## Capabilities and Constraints
 
 - The final `astesia` process is a standalone GPUI Shell with no Tauri or WebView dependency.
-- Rust 1.97.1 and Zed commit `399258feeaf90ad8a3a208c99221ee87b6452f38` are fixed baselines.
-- Astesia embeds a local Zed `Editor` without initializing Zed authentication, collaboration, telemetry, AI, marketplace, or network services.
-- Zed runtime data is isolated below Astesia's application data directory.
+- Rust 1.98.0 is the toolchain baseline; Cargo.lock owns GPUI Kit and GPUI versions.
+- Astesia uses GPUI Kit Editor and Input without initializing Zed services.
+- Existing Astesia application data and credentials remain authoritative.
 - The Application Core stays independent of GPUI and Tauri. Platform access is exposed through narrow interfaces such as events, sidecars, dialogs, files, and preferences.
 - Startup must surface unreadable or corrupt native state without replacing it with a newly initialized empty repository.
 - The first GPUI pass preserves behavior, shortcuts, destructive confirmations, and information architecture rather than matching CSS pixels.
@@ -47,7 +47,8 @@ The same Connection Profiles, credential bindings, revision checks, Usage Leases
 
 - Product capabilities and development contract: `README.md` and `AGENTS.md`.
 - Domain language and migration boundaries: `CONTEXT.md`.
-- Approved runtime decision: `docs/adr/0001-rebuild-the-desktop-shell-with-gpui.md`.
+- Approved runtime decisions: `docs/adr/0001-rebuild-the-desktop-shell-with-gpui.md` and
+  `docs/adr/0002-use-gpui-kit-for-the-desktop-shell.md`.
 - Completed delivery and acceptance contract: `docs/plans/gpui-ui-rebuild.md` and
   `docs/plans/gpui-milestone-8-acceptance.md`.
 - Incumbent interaction and visual evidence: `docs/plans/gpui-milestone-0-acceptance.md` and the recorded Legacy Shell commit.

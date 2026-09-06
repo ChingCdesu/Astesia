@@ -1,5 +1,5 @@
-use gpui::{Entity, FocusHandle, Focusable as _, Subscription};
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use gpui_kit::{Entity, FocusHandle, Subscription};
 
 use crate::application::{DropObjectTarget, QueryTarget};
 use crate::db::{FunctionInfo, ProcedureInfo, ViewInfo};
@@ -70,7 +70,7 @@ impl ObjectDefinition {
 
 pub(super) struct ObjectDefinitionItem {
     object: ObjectDefinition,
-    editor: Option<Entity<editor::Editor>>,
+    editor: Option<Entity<crate::ui::text_editor::Editor>>,
     invalidation_reason: Option<String>,
     focus_handle: FocusHandle,
     settings: Entity<ShellSettings>,
@@ -152,8 +152,8 @@ impl ObjectDefinitionItem {
 
 impl Render for ObjectDefinitionItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors().clone();
-        let status = cx.theme().status().clone();
+        let colors = cx.theme().colors();
+        let status = cx.theme().status();
         let language = self.settings.read(cx).language();
         let target_label = format!(
             "{} / {}",
@@ -211,7 +211,7 @@ impl Render for ObjectDefinitionItem {
                     .child(
                         Label::new(self.object.name.clone())
                             .size(LabelSize::Small)
-                            .weight(gpui::FontWeight::MEDIUM)
+                            .weight(gpui_kit::FontWeight::MEDIUM)
                             .truncate(),
                     )
                     .child(

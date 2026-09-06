@@ -144,10 +144,14 @@ impl CreateObjectDraft {
                 let host = input(window, cx, "%", text(language, "主机", "Host"), 6);
                 set_text(&host, "%", window, cx);
                 let password = cx.new(|cx| {
-                    InputField::new(window, cx, text(language, "输入密码", "Enter password"))
-                        .label(text(language, "密码", "Password"))
-                        .tab_index(7)
-                        .masked(true)
+                    InputField::password(
+                        window,
+                        cx,
+                        text(language, "输入密码", "Enter password"),
+                        7,
+                    )
+                    .label(text(language, "密码", "Password"))
+                    .tab_index(7)
                 });
                 Self::User(UserFields { host, password })
             }

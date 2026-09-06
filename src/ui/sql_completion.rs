@@ -1,24 +1,27 @@
+use super::text_editor::Editor;
+use crate::application::{QueryCompletionRequest, QueryCompletionService, QueryTarget};
+use gpui_kit::component::input::{CompletionProvider, Rope};
+#[cfg(test)]
+use gpui_kit::AppContext as _;
+use gpui_kit::{App, Entity, Task, Window};
+use lsp_types::{
+    CompletionContext, CompletionItem, CompletionResponse, CompletionTextEdit, Position, Range,
+    TextEdit,
+};
 use std::{
     rc::Rc,
     sync::{Arc, RwLock},
-};
-
-#[cfg(not(test))]
-use anyhow::anyhow;
-use editor::{CompletionContext, CompletionProvider, Editor};
-use gpui::{AppContext, Context, Entity, Task, Window};
-use language::{Anchor, Buffer, CodeLabel, ToOffset as _};
-use project::{Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource};
-
-use crate::application::{
-    QueryCompletion, QueryCompletionRequest, QueryCompletionService, QueryTarget,
 };
 
 #[derive(Clone)]
 pub(super) struct SqlCompletionHandle {
     state: Arc<RwLock<CompletionState>>,
 }
-
+#[derive(Clone, Default)]
+struct CompletionState {
+    epoch: u64,
+    target: Option<QueryTarget>,
+}
 impl SqlCompletionHandle {
     pub(super) fn set_target(&self, target: Option<QueryTarget>) {
         let mut state = self.state.write().expect("SQL completion state poisoned");
@@ -28,172 +31,149 @@ impl SqlCompletionHandle {
         }
     }
 }
-
 pub(super) fn install(
     service: QueryCompletionService,
     editor: &Entity<Editor>,
-    cx: &mut impl AppContext,
+    cx: &mut App,
 ) -> SqlCompletionHandle {
     let state = Arc::new(RwLock::new(CompletionState::default()));
     let provider = Rc::new(SqlCompletionProvider {
         service,
         state: state.clone(),
     });
-    editor.update(cx, |editor, _| {
-        editor.set_completion_provider(Some(provider));
-        editor.set_show_completions_on_input(Some(true));
-    });
+    if let Some(editor) = editor.read(cx).code_state().cloned() {
+        editor.update(cx, |editor, _| {
+            editor.lsp_mut().completion_provider = Some(provider)
+        });
+    }
     SqlCompletionHandle { state }
 }
-
-#[derive(Clone, Default)]
-struct CompletionState {
-    epoch: u64,
-    target: Option<QueryTarget>,
-}
-
 struct SqlCompletionProvider {
     service: QueryCompletionService,
     state: Arc<RwLock<CompletionState>>,
 }
-
 impl CompletionProvider for SqlCompletionProvider {
     fn completions(
         &self,
-        buffer: &Entity<Buffer>,
-        buffer_position: Anchor,
+        text: &Rope,
+        offset: usize,
         _: CompletionContext,
         _: &mut Window,
-        cx: &mut Context<Editor>,
-    ) -> Task<anyhow::Result<Vec<CompletionResponse>>> {
+        cx: &mut App,
+    ) -> Task<anyhow::Result<CompletionResponse>> {
         let state = self
             .state
             .read()
             .expect("SQL completion state poisoned")
             .clone();
         let Some(target) = state.target else {
-            return Task::ready(Ok(Vec::new()));
+            return Task::ready(Ok(CompletionResponse::Array(vec![])));
         };
-
-        let buffer = buffer.read(cx);
-        let offset = buffer_position.to_offset(buffer);
-        let prefix_length = buffer
-            .reversed_chars_at(buffer_position)
-            .take_while(|character| is_identifier_character(*character))
+        let text = text.to_string();
+        let prefix = &text[..offset];
+        let prefix_length = prefix
+            .chars()
+            .rev()
+            .take_while(|c| is_identifier_character(*c))
             .map(char::len_utf8)
             .sum::<usize>();
-        let replace_start = buffer.anchor_before(offset.saturating_sub(prefix_length));
-        let text_before_cursor = buffer.text_for_range(0..offset).collect::<String>();
+        let filter = prefix[prefix.len() - prefix_length..].to_lowercase();
+        let range = Range::new(
+            lsp_position(&text, offset - prefix_length),
+            lsp_position(&text, offset),
+        );
         let request = QueryCompletionRequest {
             target,
-            text_before_cursor,
+            text_before_cursor: prefix.to_owned(),
         };
         let service = self.service.clone();
         let current_state = self.state.clone();
         #[cfg(not(test))]
-        let load = {
-            let task = gpui_tokio::Tokio::spawn(cx, async move { service.complete(request).await });
-            cx.background_spawn(async move {
-                task.await
-                    .map_err(|error| anyhow!("SQL completion task ended unexpectedly: {error}"))
-            })
-        };
+        let load = super::runtime::spawn(cx, async move { service.complete(request).await });
         #[cfg(test)]
         let load =
             cx.background_spawn(
                 async move { Ok::<_, anyhow::Error>(service.complete(request).await) },
             );
-
-        cx.spawn(async move |_, _| {
-            let items = load.await?;
-            let is_current = current_state
+        cx.spawn(async move |_| {
+            let mut items = load.await?;
+            items.retain(|item| completion_matches(&item.label, &filter));
+            items.sort_by_key(|item| !item.label.to_lowercase().starts_with(&filter));
+            if current_state
                 .read()
                 .expect("SQL completion state poisoned")
                 .epoch
-                == state.epoch;
-            if !is_current {
-                return Ok(Vec::new());
+                != state.epoch
+            {
+                return Ok(CompletionResponse::Array(vec![]));
             }
-            let replace_range = replace_start..buffer_position;
-            let completions = items
-                .into_iter()
-                .map(|item| to_zed_completion(item, replace_range.clone(), replace_start))
-                .collect();
-            Ok(vec![CompletionResponse {
-                completions,
-                display_options: CompletionDisplayOptions::default(),
-                is_incomplete: false,
-            }])
+            Ok(CompletionResponse::Array(
+                items
+                    .into_iter()
+                    .map(|item| CompletionItem {
+                        filter_text: Some(
+                            item.label.chars().take(filter.chars().count()).collect(),
+                        ),
+                        label: item.label,
+                        detail: Some(item.detail),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range,
+                            new_text: item.new_text,
+                        })),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ))
         })
     }
-
-    fn is_completion_trigger(
-        &self,
-        _: &Entity<Buffer>,
-        _: Anchor,
-        text: &str,
-        _: bool,
-        _: &mut Context<Editor>,
-    ) -> bool {
+    fn is_completion_trigger(&self, _: usize, text: &str, _: &mut App) -> bool {
         text.chars()
             .last()
-            .is_some_and(|character| character == '.' || is_identifier_character(character))
+            .is_some_and(|c| c == '.' || is_identifier_character(c))
     }
 }
-
-fn to_zed_completion(
-    item: QueryCompletion,
-    replace_range: std::ops::Range<Anchor>,
-    match_start: Anchor,
-) -> Completion {
-    let display = format!("{}    {}", item.label, item.detail);
-    let label = CodeLabel::filtered(display, item.label.len(), Some(&item.label), Vec::new());
-    Completion {
-        replace_range,
-        new_text: item.new_text,
-        label,
-        documentation: None,
-        source: CompletionSource::Custom,
-        icon_path: None,
-        icon_color: None,
-        match_start: Some(match_start),
-        snippet_deduplication_key: None,
-        insert_text_mode: None,
-        confirm: None,
-        group: None,
-    }
+fn is_identifier_character(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '$' | '@')
 }
-
-fn is_identifier_character(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '_' | '$' | '@')
+fn lsp_position(text: &str, byte_offset: usize) -> Position {
+    let prefix = &text[..byte_offset];
+    let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
+    let character = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or("")
+        .encode_utf16()
+        .count() as u32;
+    Position::new(line, character)
+}
+fn completion_matches(label: &str, query: &str) -> bool {
+    let label = label.to_lowercase();
+    let mut remaining = label.chars();
+    query
+        .chars()
+        .all(|wanted| remaining.any(|candidate| candidate == wanted))
 }
 
 #[cfg(test)]
 mod tests {
-    use assets::Assets;
-    use gpui::{EntityInputHandler as _, Focusable as _, TestAppContext};
-
     use super::*;
+    #[test]
+    fn completion_positions_use_utf16_columns() {
+        let text = "SELECT '😀';\nSELECT 名称";
+        assert_eq!(lsp_position(text, "SELECT '😀".len()), Position::new(0, 10));
+        assert_eq!(lsp_position(text, text.len()), Position::new(1, 9));
+    }
+    use gpui_kit::{EntityInputHandler as _, Focusable as _, TestAppContext};
+
     use crate::{
-        application::Application,
-        connection_repository::SharedConnectionRepository,
-        credential_vault::test_support::MemoryCredentialVault,
-        db::DbType,
-        ui::{bind_editor_keys, sql_language},
+        application::Application, connection_repository::SharedConnectionRepository,
+        credential_vault::test_support::MemoryCredentialVault, db::DbType, ui::sql_language,
     };
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn completion_keyboard_flow_filters_accepts_and_dismisses(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            Assets.load_test_fonts(cx);
-            let settings = settings::SettingsStore::test(cx);
-            cx.set_global(settings);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(release_channel::AppVersion::load("0.0.0", None, None), cx);
-            gpui_tokio::init(cx);
-            editor::init(cx);
-            sql_language::init(cx);
-            bind_editor_keys(cx);
+            crate::ui::initialize_editor_runtime(crate::platform::ThemePreference::Light, cx)
         });
 
         let directory = tempfile::tempdir().expect("completion repository directory");
@@ -216,11 +196,21 @@ mod tests {
         window
             .update(cx, |editor, window, cx| {
                 window.focus(&editor.focus_handle(cx), cx);
-                editor.replace_text_in_range(None, "SEL", window, cx);
+                editor
+                    .code_state()
+                    .unwrap()
+                    .clone()
+                    .update(cx, |state, cx| {
+                        state.replace_text_in_range(None, "SEL", window, cx)
+                    });
             })
             .expect("editor window");
 
-        cx.simulate_keystrokes(window.into(), "ctrl-space");
+        window
+            .update(cx, |editor, window, cx| {
+                editor.show_completions(&super::super::text_editor::ShowCompletions, window, cx)
+            })
+            .unwrap();
         cx.run_until_parked();
         cx.simulate_keystrokes(window.into(), "enter");
         cx.run_until_parked();
@@ -228,10 +218,20 @@ mod tests {
 
         window
             .update(cx, |editor, window, cx| {
-                editor.replace_text_in_range(None, " FRO", window, cx);
+                editor
+                    .code_state()
+                    .unwrap()
+                    .clone()
+                    .update(cx, |state, cx| {
+                        state.replace_text_in_range(None, " FRO", window, cx)
+                    });
             })
             .expect("editor window");
-        cx.simulate_keystrokes(window.into(), "ctrl-space");
+        window
+            .update(cx, |editor, window, cx| {
+                editor.show_completions(&super::super::text_editor::ShowCompletions, window, cx)
+            })
+            .unwrap();
         cx.run_until_parked();
         cx.simulate_keystrokes(window.into(), "down");
         cx.simulate_keystrokes(window.into(), "escape");
@@ -246,7 +246,11 @@ mod tests {
             "SELECT FRO"
         );
 
-        cx.simulate_keystrokes(window.into(), "ctrl-space");
+        window
+            .update(cx, |editor, window, cx| {
+                editor.show_completions(&super::super::text_editor::ShowCompletions, window, cx)
+            })
+            .unwrap();
         cx.run_until_parked();
         cx.simulate_keystrokes(window.into(), "tab");
         assert_eq!(

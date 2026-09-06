@@ -1,7 +1,6 @@
 # Astesia
 
-Astesia is a native desktop database workspace built in Rust with GPUI and the embedded Zed
-Editor. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
+Astesia is a native desktop database workspace built in Rust with GPUI Kit. It connects to MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, MongoDB, and Redis.
 
 The native-runtime migration has completed Milestones 0-8. The Legacy Shell and Tauri/WebView build
 chain are gone, and the internal native package matrix is in place. See the
@@ -12,8 +11,7 @@ chain are gone, and the internal native package matrix is in place. See the
 
 - Native workspace, connection profiles, lazy connection lifecycle, notifications, command
   palette, shortcuts, localization, and light/dark/system appearance
-- SQL query tabs for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse using the embedded Zed
-  Editor, local SQL highlighting and completion, multi-statement execution, Explain, result
+- SQL query tabs for MySQL, PostgreSQL, SQLite, SQL Server, and ClickHouse using GPUI Kit Editor, local SQL highlighting and completion, multi-statement execution, Explain, result
   selection, and TSV copy
 - Capability-gated catalog browsing for all seven engines
 - SQL table structure, indexes, constraints, foreign keys, and qualified object definitions
@@ -29,15 +27,17 @@ chain are gone, and the internal native package matrix is in place. See the
 
 | Layer | Current technology |
 | --- | --- |
-| Desktop UI | GPUI and Zed UI |
-| Editor | Embedded Zed Editor with bundled Tree-sitter SQL |
+| Desktop UI | GPUI Kit |
+| Editor | GPUI Kit Editor with bundled Tree-sitter SQL |
 | Application Core | Rust and Tokio |
 | Database drivers | SQLx, Tiberius, MongoDB, Redis, and ClickHouse HTTP |
 | Local state and credentials | SQLite repository and platform credential vault |
 
 ## Native development
 
-The repository pins Rust 1.97.1 in `rust-toolchain.toml`.
+The repository pins Rust 1.98.0 in `rust-toolchain.toml`.
+See the [GPUI Kit migration acceptance](docs/plans/gpui-kit-migration-acceptance.md)
+for dependency changes, native verification, and remaining validation limits.
 
 ```bash
 cargo run --locked --bin astesia

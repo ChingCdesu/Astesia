@@ -8,11 +8,11 @@ impl ConnectionProfilesPanel {
 
     pub(in crate::ui) fn refresh_profiles(&mut self, cx: &mut Context<Self>) {
         let request = self.state.begin_refresh();
-        cx.notify();
+        self.notify_sidebar(cx);
 
         let application = self.application.clone();
         let load =
-            gpui_tokio::Tokio::spawn(
+            crate::ui::runtime::spawn(
                 cx,
                 async move { application.connections().snapshot().await },
             );
@@ -30,7 +30,7 @@ impl ConnectionProfilesPanel {
                         panel.emit_query_sessions(cx);
                     }
                     if applied != SnapshotApply::Superseded {
-                        cx.notify();
+                        panel.notify_sidebar(cx);
                     }
                 })
                 .ok();
@@ -41,18 +41,22 @@ impl ConnectionProfilesPanel {
     pub(super) fn select_profile(
         &mut self,
         profile_id: String,
-        _: &ClickEvent,
-        _: &mut Window,
+        event: &ClickEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.select_profile_id(profile_id, cx);
+        window.focus(&self.selected_profile_focus, cx);
+        if event.click_count() == 2 {
+            self.connect_selected(window, cx);
+        }
     }
 
     pub(super) fn select_profile_id(&mut self, profile_id: String, cx: &mut Context<Self>) {
         let changed = self.selected_profile_id.as_deref() != Some(&profile_id);
         self.selected_profile_id = Some(profile_id.clone());
         if changed {
-            cx.notify();
+            self.notify_sidebar(cx);
         }
         self.load_databases(profile_id, cx);
     }
@@ -69,7 +73,7 @@ impl ConnectionProfilesPanel {
         cx.emit(ConnectionProfilesEvent::CreateRequested);
     }
 
-    pub(super) fn edit_selected(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::ui) fn edit_selected(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.actions_blocked() {
             return;
         }
@@ -89,12 +93,7 @@ impl ConnectionProfilesPanel {
         )));
     }
 
-    pub(super) fn connect_selected(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(in crate::ui) fn connect_selected(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let Some(connection_id) = self
             .selected_profile()
             .filter(|profile| !profile.session.is_connected())
@@ -116,7 +115,8 @@ impl ConnectionProfilesPanel {
             return;
         };
         self.notice = None;
-        cx.notify();
+        self.failed_profiles.remove(&connection_id);
+        self.notify_sidebar(cx);
         self.run_profile_operation(
             request,
             ProfileOperationCommand::Connect { connection_id },
@@ -124,13 +124,8 @@ impl ConnectionProfilesPanel {
         );
     }
 
-    pub(super) fn disconnect_selected(
-        &mut self,
-        _: &ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.actions_blocked() {
+    pub(in crate::ui) fn disconnect_selected(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.profile_actions().disconnect {
             return;
         }
         let Some(connection_id) = self
@@ -149,7 +144,7 @@ impl ConnectionProfilesPanel {
         self.state.clear_database_state(&connection_id);
         self.invalidate_query_session(&connection_id, cx);
         self.notice = None;
-        cx.notify();
+        self.notify_sidebar(cx);
         self.run_profile_operation(
             request,
             ProfileOperationCommand::Disconnect { connection_id },
@@ -184,7 +179,7 @@ impl ConnectionProfilesPanel {
             ),
         };
         let application = self.application.clone();
-        let operation = gpui_tokio::Tokio::spawn(cx, async move {
+        let operation = crate::ui::runtime::spawn(cx, async move {
             application
                 .connections()
                 .perform_profile_operation(command)
@@ -205,7 +200,7 @@ impl ConnectionProfilesPanel {
                         ) != OperationApply::Discarded
                         {
                             panel.set_notice(NoticeTone::Error, unexpected_message);
-                            cx.notify();
+                            panel.notify_sidebar(cx);
                         }
                     }
                 })
@@ -229,6 +224,18 @@ impl ConnectionProfilesPanel {
         match apply {
             OperationApply::Discarded => return,
             OperationApply::Snapshot(SnapshotApply::Applied) => {
+                if matches!(
+                    &completion.outcome,
+                    ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Rejected(_)))
+                        | ProfileOperationOutcome::Connected(Err(_))
+                ) {
+                    self.failed_profiles.insert(connection_id.to_string());
+                } else if matches!(
+                    &completion.outcome,
+                    ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Succeeded))
+                ) {
+                    self.failed_profiles.remove(connection_id);
+                }
                 self.reconcile_selection();
                 self.reconcile_query_target(cx);
                 self.emit_query_sessions(cx);
@@ -247,7 +254,7 @@ impl ConnectionProfilesPanel {
                 self.refresh_profiles(cx);
             }
         }
-        cx.notify();
+        self.notify_sidebar(cx);
     }
 
     fn apply_operation_outcome(
@@ -265,7 +272,13 @@ impl ConnectionProfilesPanel {
             }
             ProfileOperationOutcome::Connected(Ok(ConnectionOutcome::Rejected(message)))
             | ProfileOperationOutcome::Connected(Err(message)) => {
-                self.set_notice(NoticeTone::Error, message);
+                self.set_notice(
+                    NoticeTone::Error,
+                    format!(
+                        "{}: {message}",
+                        text(language, "连接失败", "Connection failed")
+                    ),
+                );
                 false
             }
             ProfileOperationOutcome::Disconnected(report) => {
@@ -333,9 +346,8 @@ impl ConnectionProfilesPanel {
         }
     }
 
-    pub(super) fn confirm_delete_selected(
+    pub(in crate::ui) fn confirm_delete_selected(
         &mut self,
-        _: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -355,6 +367,7 @@ impl ConnectionProfilesPanel {
         }
         let connection_id = selected.profile.id.clone();
         let expected_revision = selected.profile.revision;
+        let connected = selected.session.is_connected();
         let language = self.settings.read(cx).language();
         let message = format!(
             "{} “{}”?",
@@ -364,11 +377,19 @@ impl ConnectionProfilesPanel {
         let answer = window.prompt(
             PromptLevel::Warning,
             &message,
-            Some(text(
-                language,
-                "保存的凭据也会被删除。此操作无法撤销。",
-                "Stored credentials will also be deleted. This cannot be undone.",
-            )),
+            Some(if connected {
+                text(
+                    language,
+                    "此连接的会话将被关闭，保存的凭据也会被删除。此操作无法撤销。\n数据库及其数据不会被删除。",
+                    "This connection's sessions will close and its stored credentials will be deleted. This cannot be undone.\nThe database and its data will remain.",
+                )
+            } else {
+                text(
+                    language,
+                    "保存的凭据也会被删除。此操作无法撤销。\n数据库及其数据不会被删除。",
+                    "Stored credentials will also be deleted. This cannot be undone.\nThe database and its data will remain.",
+                )
+            }),
             &[
                 PromptButton::ok(text(language, "删除", "Delete")),
                 PromptButton::cancel(text(language, "取消", "Cancel")),
@@ -405,7 +426,7 @@ impl ConnectionProfilesPanel {
         };
         self.invalidate_query_session(&connection_id, cx);
         self.notice = None;
-        cx.notify();
+        self.notify_sidebar(cx);
         self.run_profile_operation(
             request,
             ProfileOperationCommand::Delete {

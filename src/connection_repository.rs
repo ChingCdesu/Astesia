@@ -28,7 +28,6 @@ use mutations::CREDENTIAL_STAGING_SENTINEL;
 #[cfg(test)]
 use schema::{next_revision, remove_pending_credential_cleanup};
 
-const APP_IDENTIFIER: &str = "com.astesia.app";
 const DATABASE_FILENAME: &str = "connections.sqlite3";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -477,10 +476,10 @@ pub struct SharedConnectionRepository {
 }
 
 pub fn default_database_path() -> Result<PathBuf, ConnectionRepositoryError> {
-    let data_dir = dirs::data_dir().ok_or_else(|| {
+    let data_dir = crate::platform::application_data_directory().ok_or_else(|| {
         ConnectionRepositoryError::storage_unavailable("无法确定当前用户的 Astesia 数据目录")
     })?;
-    Ok(data_dir.join(APP_IDENTIFIER).join(DATABASE_FILENAME))
+    Ok(data_dir.join(DATABASE_FILENAME))
 }
 
 #[cfg(test)]

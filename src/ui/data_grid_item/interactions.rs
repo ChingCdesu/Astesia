@@ -6,15 +6,18 @@ impl DataGridItem {
             Ok(request) => request,
             Err(_) => return,
         };
+        self.cancel_chart_load();
         cx.notify();
 
         let application = self.application.clone();
         let load_request = request.clone();
-        let load =
-            gpui_tokio::Tokio::spawn(
-                cx,
-                async move { application.grids().load(&load_request).await },
-            );
+        let transaction = self.transaction.clone();
+        let load = crate::ui::runtime::spawn(cx, async move {
+            application
+                .grids()
+                .load_in(&load_request, transaction.as_ref())
+                .await
+        });
         cx.spawn(async move |item, cx| {
             let result = match load.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
@@ -36,7 +39,7 @@ impl DataGridItem {
     }
 
     pub(super) fn prepare_for_navigation(&mut self) -> bool {
-        if self.has_unsaved_changes() {
+        if self.has_local_changes() || self.transaction_busy || self.save_recovery_sql.is_some() {
             return false;
         }
         self.editing = None;
@@ -60,7 +63,7 @@ impl DataGridItem {
     }
 
     fn load_chart(&mut self, cx: &mut Context<Self>) {
-        self.chart_generation = self.chart_generation.saturating_add(1);
+        self.cancel_chart_load();
         let generation = self.chart_generation;
         self.chart_loading = true;
         self.chart_error = None;
@@ -69,11 +72,12 @@ impl DataGridItem {
         let target = self.state.target().clone();
         let table = self.state.table().clone();
         let query = self.state.query().clone();
-        let load =
-            gpui_tokio::Tokio::spawn(
-                cx,
-                async move { service.table_data(target, table, query).await },
-            );
+        let cancellation = ChartLoadCancellation::default();
+        let cancelled = cancellation.cancelled.clone();
+        self.chart_load = Some(cancellation);
+        let load = crate::ui::runtime::spawn(cx, async move {
+            service.table_data(target, table, query, &cancelled).await
+        });
         cx.spawn(async move |item, cx| {
             let result = match load.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
@@ -85,18 +89,19 @@ impl DataGridItem {
                 }
                 item.chart_loading = false;
                 match result {
-                    Ok(data) => {
+                    Ok(Some(data)) => {
                         item.chart_error = None;
                         if let Some(chart) = &item.chart {
                             chart.update(cx, |chart, cx| {
-                                chart.replace_data(data.columns, &data.rows, cx)
+                                chart.replace_data(data.columns, data.rows, cx)
                             });
                         } else {
-                            let model = ChartModel::from_names(data.columns, &data.rows);
+                            let model = ChartModel::from_names(data.columns, data.rows);
                             item.chart =
                                 Some(cx.new(|cx| ChartView::new(model, item.settings.clone(), cx)));
                         }
                     }
+                    Ok(None) => {}
                     Err(error) => item.chart_error = Some(error),
                 }
                 cx.notify();
@@ -104,6 +109,12 @@ impl DataGridItem {
             .ok();
         })
         .detach();
+    }
+
+    pub(super) fn cancel_chart_load(&mut self) {
+        self.chart_generation = self.chart_generation.saturating_add(1);
+        self.chart_load = None;
+        self.chart_loading = false;
     }
 
     pub(super) fn toggle_chart(
@@ -125,6 +136,7 @@ impl DataGridItem {
                 window.focus(&chart.read(cx).focus_handle(cx), cx);
             }
         } else {
+            self.cancel_chart_load();
             window.focus(&self.focus_handle, cx);
         }
         cx.notify();
@@ -152,7 +164,12 @@ impl DataGridItem {
         }
     }
 
-    pub(super) fn sort_column(&mut self, column_index: usize, cx: &mut Context<Self>) {
+    pub(super) fn sort_column(
+        &mut self,
+        column_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.prepare_for_navigation() {
             return;
         }
@@ -166,7 +183,10 @@ impl DataGridItem {
         };
         let sort = next_sort(&column, &self.state.query().sort);
         let filter = self.state.query().filter.clone();
+        let sort_text = GridSort::format_list(&sort);
         if self.state.set_query_options(filter, sort).unwrap_or(false) {
+            self.sort_editor
+                .update(cx, |editor, cx| editor.set_text(sort_text, window, cx));
             self.operation_notice = None;
             self.load(cx);
         }
@@ -195,7 +215,22 @@ impl DataGridItem {
             return;
         }
         let filter = self.filter_editor.read(cx).text(cx);
-        match self.state.set_filter(Some(filter)) {
+        let sort = match GridSort::parse_list(&self.sort_editor.read(cx).text(cx)) {
+            Ok(sort) => sort,
+            Err(error) => {
+                self.operation_notice = Some(GridNotice::Error(format!(
+                    "{}: {error}",
+                    text(
+                        self.settings.read(cx).language(),
+                        "排序无效",
+                        "Invalid ordering"
+                    )
+                )));
+                cx.notify();
+                return;
+            }
+        };
+        match self.state.set_query_options(Some(filter), sort) {
             Ok(true) => {
                 self.operation_notice = None;
                 self.load(cx);

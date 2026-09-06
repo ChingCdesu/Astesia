@@ -1,12 +1,13 @@
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::time::Instant;
 
 use super::{
     bytes_to_hex, f64_to_json, ColumnInfo, ConnectionConfig, ConstraintInfo, ConstraintKind,
-    DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, SqlDialect, StatementResult,
-    TableInfo, TableRef, TriggerInfo, ViewInfo,
+    DatabaseDriver, DbType, ForeignKeyInfo, IndexInfo, QueryResult, QueryRowCollector,
+    QueryRowSink, SqlDialect, StatementResult, TableInfo, TableRef, TriggerInfo, ViewInfo,
 };
 
 /// Decode the `i`-th column of a SQLite row into a JSON value, dispatching on the
@@ -41,53 +42,59 @@ fn sqlite_value_to_json(row: &SqliteRow, i: usize) -> serde_json::Value {
     }
 }
 
-async fn run_sqlite_query(conn: &mut SqliteConnection, sql: &str) -> anyhow::Result<QueryResult> {
+pub(super) async fn run_sqlite_query(
+    conn: &mut SqliteConnection,
+    sql: &str,
+) -> anyhow::Result<QueryResult> {
+    let mut collector = QueryRowCollector::new(None);
+    let result = stream_sqlite_query(conn, sql, &mut collector).await?;
+    Ok(collector.finish(result))
+}
+
+pub(super) async fn stream_sqlite_query(
+    conn: &mut SqliteConnection,
+    sql: &str,
+    sink: &mut dyn QueryRowSink,
+) -> anyhow::Result<QueryResult> {
     let start = Instant::now();
     let trimmed = sql.trim().to_uppercase();
-
     if trimmed.starts_with("SELECT")
         || trimmed.starts_with("PRAGMA")
         || trimmed.starts_with("EXPLAIN")
         || trimmed.starts_with("WITH ")
         || trimmed.starts_with("VALUES")
     {
-        let rows: Vec<SqliteRow> = sqlx::query(sql).fetch_all(&mut *conn).await?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        if rows.is_empty() {
-            return Ok(QueryResult {
-                execution_time_ms: elapsed,
-                ..Default::default()
-            });
+        let mut stream = sqlx::query(sql).fetch(&mut *conn);
+        let mut columns = Vec::new();
+        while let Some(row) = stream.try_next().await? {
+            if columns.is_empty() {
+                columns = row
+                    .columns()
+                    .iter()
+                    .map(|column| ColumnInfo {
+                        name: column.name().to_string(),
+                        data_type: column.type_info().name().to_string(),
+                        nullable: true,
+                        is_primary_key: false,
+                        default_value: None,
+                        comment: None,
+                    })
+                    .collect();
+                sink.columns(&columns).await;
+            }
+            if sink.wants_rows() {
+                sink.row(
+                    (0..row.columns().len())
+                        .map(|i| sqlite_value_to_json(&row, i))
+                        .collect(),
+                )
+                .await;
+            }
         }
-
-        let columns: Vec<ColumnInfo> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| ColumnInfo {
-                name: c.name().to_string(),
-                data_type: c.type_info().name().to_string(),
-                nullable: true,
-                is_primary_key: false,
-                default_value: None,
-                comment: None,
-            })
-            .collect();
-
-        let data_rows: Vec<Vec<serde_json::Value>> = rows
-            .iter()
-            .map(|row| {
-                (0..row.columns().len())
-                    .map(|i| sqlite_value_to_json(row, i))
-                    .collect()
-            })
-            .collect();
-
         Ok(QueryResult {
             columns,
-            rows: data_rows,
-            affected_rows: 0,
-            execution_time_ms: elapsed,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            ..Default::default()
         })
     } else {
         let result = sqlx::query(sql).execute(&mut *conn).await?;
@@ -324,6 +331,17 @@ impl DatabaseDriver for SqliteDriver {
         run_sqlite_query(&mut conn, sql).await
     }
 
+    async fn execute_query_stream(
+        &self,
+        _database: &str,
+        sql: &str,
+        sink: &mut dyn QueryRowSink,
+    ) -> anyhow::Result<QueryResult> {
+        let pool = self.pool()?;
+        let mut conn = pool.acquire().await?;
+        stream_sqlite_query(&mut conn, sql, sink).await
+    }
+
     async fn execute_statements(
         &self,
         _database: &str,
@@ -344,6 +362,22 @@ impl DatabaseDriver for SqliteDriver {
             }
         }
         Ok(results)
+    }
+
+    async fn begin_transaction(
+        &self,
+        _database: &str,
+        isolation: super::TransactionIsolation,
+    ) -> anyhow::Result<Box<dyn super::DatabaseTransaction>> {
+        anyhow::ensure!(
+            self.db_type().transaction_isolations().contains(&isolation),
+            "Unsupported transaction isolation"
+        );
+        let mut connection = self.pool()?.acquire().await?.detach();
+        run_sqlite_query(&mut connection, "BEGIN").await?;
+        Ok(Box::new(super::transaction::OwnedTransaction(
+            super::transaction::TransactionConnection::Sqlite(connection),
+        )))
     }
 
     async fn execute_mutation_batch(
@@ -598,6 +632,50 @@ mod tests {
             database: None,
             color: None,
         }
+    }
+
+    #[tokio::test]
+    async fn limited_queries_keep_a_truncation_sentinel_and_drain_mutations() {
+        let mut driver = SqliteDriver::new(config());
+        driver.connect().await.unwrap();
+        driver
+            .execute_query("main", "CREATE TABLE memory_rows (id INTEGER)")
+            .await
+            .unwrap();
+        let sql = "WITH RECURSIVE numbers(id) AS (VALUES(1) UNION ALL \
+                   SELECT id + 1 FROM numbers WHERE id < 100) \
+                   INSERT INTO memory_rows SELECT id FROM numbers RETURNING id";
+        let result = driver.execute_query_limited("main", sql, 2).await.unwrap();
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.columns[0].name, "id");
+        let count = driver
+            .execute_query("main", "SELECT COUNT(*) FROM memory_rows")
+            .await
+            .unwrap();
+        assert_eq!(count.rows[0][0], serde_json::json!(100));
+        let empty = driver
+            .execute_query_limited("main", "SELECT id FROM memory_rows WHERE 0", 2)
+            .await
+            .unwrap();
+        assert!(empty.rows.is_empty());
+        assert!(empty.columns.is_empty());
+        let changed = driver
+            .execute_query_limited("main", "UPDATE memory_rows SET id = id + 1", 2)
+            .await
+            .unwrap();
+        assert_eq!(changed.affected_rows, 100);
+    }
+
+    #[tokio::test]
+    async fn limited_queries_report_errors_after_the_retained_rows() {
+        let mut driver = SqliteDriver::new(config());
+        driver.connect().await.unwrap();
+        let sql = "WITH RECURSIVE numbers(id) AS (VALUES(1) UNION ALL \
+                   SELECT id + 1 FROM numbers WHERE id < 10) \
+                   SELECT CASE WHEN id = 10 THEN abs(-9223372036854775808) ELSE id END FROM numbers";
+        let result = driver.execute_query_limited("main", sql, 1).await;
+        assert!(result.is_err());
+        assert!(driver.execute_query("main", "SELECT 1").await.is_ok());
     }
 
     #[tokio::test]

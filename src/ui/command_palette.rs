@@ -1,7 +1,7 @@
-use editor::Editor;
-use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
-use workspace::ModalView;
-use zed_ui::prelude::*;
+use crate::ui::components::prelude::*;
+use crate::ui::modal::ModalView;
+use crate::ui::text_editor::Editor;
+use gpui_kit::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 
 use crate::platform::{ThemePreference, UiLanguage};
 
@@ -15,6 +15,10 @@ pub(super) enum WorkspaceCommand {
     PreviousTab,
     ToggleSidebar,
     RefreshConnections,
+    ConnectProfile,
+    DisconnectProfile,
+    EditProfile,
+    DeleteProfile,
     RestartApplication,
     SetTheme(ThemePreference),
     SetLanguage(UiLanguage),
@@ -44,12 +48,19 @@ impl CommandEntry {
 pub(super) struct CommandPalette {
     search: Entity<Editor>,
     language: UiLanguage,
+    profile_actions: super::connections::ProfileActions,
     selected_index: usize,
+    scroll_handle: gpui_kit::ScrollHandle,
     _search_observation: Subscription,
 }
 
 impl CommandPalette {
-    pub(super) fn new(language: UiLanguage, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        language: UiLanguage,
+        profile_actions: super::connections::ProfileActions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text(
@@ -61,13 +72,16 @@ impl CommandPalette {
         });
         let search_observation = cx.observe(&search, |palette, _, cx| {
             palette.selected_index = 0;
+            palette.scroll_handle.scroll_to_item(0);
             cx.notify();
         });
         window.focus(&search.read(cx).focus_handle(cx), cx);
         Self {
             search,
             language,
+            profile_actions,
             selected_index: 0,
+            scroll_handle: gpui_kit::ScrollHandle::new(),
             _search_observation: search_observation,
         }
     }
@@ -118,6 +132,34 @@ impl CommandPalette {
                 keywords: "refresh connections 刷新 连接",
             },
             CommandEntry {
+                command: WorkspaceCommand::ConnectProfile,
+                title: text(language, "连接选中配置", "Connect Selected Profile"),
+                category: text(language, "连接", "Connections"),
+                shortcut: None,
+                keywords: "Connect Selected Profile 连接选中配置",
+            },
+            CommandEntry {
+                command: WorkspaceCommand::DisconnectProfile,
+                title: text(language, "断开选中连接", "Disconnect Selected Profile"),
+                category: text(language, "连接", "Connections"),
+                shortcut: None,
+                keywords: "Disconnect Selected Profile 断开选中连接",
+            },
+            CommandEntry {
+                command: WorkspaceCommand::EditProfile,
+                title: text(language, "编辑选中连接…", "Edit Selected Profile…"),
+                category: text(language, "连接", "Connections"),
+                shortcut: None,
+                keywords: "Edit Selected Profile… 编辑选中连接…",
+            },
+            CommandEntry {
+                command: WorkspaceCommand::DeleteProfile,
+                title: text(language, "删除选中连接…", "Delete Selected Profile…"),
+                category: text(language, "连接", "Connections"),
+                shortcut: None,
+                keywords: "Delete Selected Profile… 删除选中连接…",
+            },
+            CommandEntry {
                 command: WorkspaceCommand::RestartApplication,
                 title: text(language, "重启 Astesia", "Restart Astesia"),
                 category: text(language, "应用", "Application"),
@@ -160,6 +202,15 @@ impl CommandPalette {
                 keywords: "language english 英文 语言",
             },
         ]
+        .into_iter()
+        .filter(|entry| match entry.command {
+            WorkspaceCommand::ConnectProfile => self.profile_actions.connect,
+            WorkspaceCommand::DisconnectProfile => self.profile_actions.disconnect,
+            WorkspaceCommand::EditProfile => self.profile_actions.edit,
+            WorkspaceCommand::DeleteProfile => self.profile_actions.delete,
+            _ => true,
+        })
+        .collect()
     }
 
     fn filtered_entries(&self, cx: &App) -> Vec<CommandEntry> {
@@ -170,6 +221,7 @@ impl CommandPalette {
         let count = self.filtered_entries(cx).len();
         if count > 0 {
             self.selected_index = (self.selected_index + 1) % count;
+            self.scroll_handle.scroll_to_item(self.selected_index);
             cx.notify();
         }
     }
@@ -183,6 +235,7 @@ impl CommandPalette {
         let count = self.filtered_entries(cx).len();
         if count > 0 {
             self.selected_index = (self.selected_index + count - 1) % count;
+            self.scroll_handle.scroll_to_item(self.selected_index);
             cx.notify();
         }
     }
@@ -201,7 +254,7 @@ impl CommandPalette {
     fn choose(
         &mut self,
         command: WorkspaceCommand,
-        _: &gpui::ClickEvent,
+        _: &gpui_kit::ClickEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -221,7 +274,7 @@ impl Render for CommandPalette {
             .unwrap_or_else(|| no_matches.to_string());
         v_flex()
             .id("command-palette")
-            .role(gpui::Role::ComboBox)
+            .role(gpui_kit::Role::ComboBox)
             .aria_label(text(self.language, "命令面板", "Command palette"))
             .aria_value(selected_value)
             .track_focus(&focus_handle)
@@ -231,28 +284,38 @@ impl Render for CommandPalette {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .w(px(560.0))
-            .max_h(px(520.0))
+            .h(px(420.0))
             .rounded_lg()
             .border_1()
             .border_color(colors.border)
             .bg(colors.elevated_surface_background)
-            .shadow_lg()
+            .shadow(crate::ui::components::ElevationIndex::ModalSurface.shadow(cx))
             .overflow_hidden()
             .child(
-                div()
-                    .h(px(44.0))
-                    .px_3()
-                    .py_2()
+                h_flex()
+                    .h(DynamicSpacing::Base48.rems(cx))
+                    .flex_none()
+                    .px(DynamicSpacing::Base20.rems(cx))
+                    .gap(DynamicSpacing::Base08.rems(cx))
                     .border_b_1()
                     .border_color(colors.border)
-                    .child(self.search.clone()),
+                    .child(div().flex_1().min_w_0().child(self.search.clone()))
+                    .child(
+                        Label::new("Esc")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .child(
                 v_flex()
                     .id("command-palette-results")
-                    .role(gpui::Role::ListBox)
+                    .role(gpui_kit::Role::ListBox)
                     .aria_label(text(self.language, "命令结果", "Command results"))
-                    .max_h(px(460.0))
+                    .flex_1()
+                    .min_h_0()
+                    .p(DynamicSpacing::Base08.rems(cx))
+                    .gap(DynamicSpacing::Base02.rems(cx))
+                    .track_scroll(&self.scroll_handle)
                     .overflow_y_scroll()
                     .when(entries.is_empty(), |element| {
                         element.child(
@@ -265,45 +328,48 @@ impl Render for CommandPalette {
                     .children(entries.into_iter().enumerate().map(|(index, entry)| {
                         let command = entry.command;
                         let selected = index == self.selected_index;
-                        h_flex()
+                        div()
                             .id(format!("command-palette-entry-{index}"))
-                            .role(gpui::Role::ListBoxOption)
-                            .aria_label(entry.accessibility_label())
-                            .aria_selected(selected)
-                            .when(selected, |element| element.aria_active_descendant())
                             .tab_index(0)
                             .key_context("CommandPaletteEntry")
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .cursor_pointer()
-                            .when(selected, |element| {
-                                element.bg(colors.ghost_element_selected)
-                            })
-                            .hover(|element| element.bg(colors.ghost_element_hover))
                             .on_action(cx.listener(move |_, _: &menu::Confirm, _, cx| {
                                 cx.emit(CommandSelected(command));
                             }))
-                            .on_click(cx.listener(move |palette, event, window, cx| {
-                                palette.choose(command, event, window, cx);
-                            }))
                             .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(Label::new(entry.title).size(LabelSize::Small))
-                                    .child(
-                                        Label::new(entry.category)
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    ),
+                                crate::ui::components::ListItem::new(format!(
+                                    "command-row-{index}"
+                                ))
+                                .inset(true)
+                                .aria_role(gpui_kit::Role::ListBoxOption)
+                                .aria_label(entry.accessibility_label())
+                                .toggle_state(selected)
+                                .when(selected, |row| row.aria_active_descendant())
+                                .on_click(cx.listener(move |palette, event, window, cx| {
+                                    palette.choose(command, event, window, cx);
+                                }))
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .py(DynamicSpacing::Base08.rems(cx))
+                                        .child(Label::new(entry.title).size(LabelSize::Small))
+                                        .child(
+                                            Label::new(entry.category)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .when_some(
+                                    entry.shortcut,
+                                    |row, shortcut| {
+                                        row.end_slot(
+                                            Label::new(shortcut)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                    },
+                                ),
                             )
-                            .children(entry.shortcut.map(|shortcut| {
-                                Label::new(shortcut)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                            }))
                     })),
             )
     }

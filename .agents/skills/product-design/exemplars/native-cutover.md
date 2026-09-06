@@ -1,5 +1,7 @@
 # Exemplar: native cutover
 
+The editor integration described here is historical; ADR-0002 now selects GPUI Kit.
+
 ## Decision worth repeating
 
 Astesia replaced the Legacy Shell with a standalone GPUI Shell while retaining one UI-independent

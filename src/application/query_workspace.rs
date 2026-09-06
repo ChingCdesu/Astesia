@@ -1,6 +1,7 @@
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
@@ -131,7 +132,7 @@ pub(crate) struct QueryWorkspaceState {
     target: Option<QueryTarget>,
     next_generation: u64,
     active_generation: Option<u64>,
-    results: Vec<StatementResult>,
+    results: Vec<Arc<StatementResult>>,
     active_result_index: usize,
     result_selection: QueryResultSelection,
     error: Option<QueryWorkspaceError>,
@@ -209,7 +210,7 @@ impl QueryWorkspaceState {
         self.active_generation.is_some()
     }
 
-    pub(crate) fn results(&self) -> &[StatementResult] {
+    pub(crate) fn results(&self) -> &[Arc<StatementResult>] {
         &self.results
     }
 
@@ -218,7 +219,13 @@ impl QueryWorkspaceState {
     }
 
     pub(crate) fn active_result(&self) -> Option<&StatementResult> {
-        self.results.get(self.active_result_index)
+        self.results
+            .get(self.active_result_index)
+            .map(AsRef::as_ref)
+    }
+
+    pub(crate) fn shared_active_result(&self) -> Option<Arc<StatementResult>> {
+        self.results.get(self.active_result_index).cloned()
     }
 
     pub(crate) fn error(&self) -> Option<&QueryWorkspaceError> {
@@ -345,7 +352,7 @@ impl QueryWorkspaceState {
                     .iter()
                     .position(|result| !result.success)
                     .unwrap_or(0);
-                self.results = results;
+                self.results = results.into_iter().map(Arc::new).collect();
                 self.error = None;
             }
             Err(message) => {
