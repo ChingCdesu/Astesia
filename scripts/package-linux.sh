@@ -4,7 +4,7 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 manifest="$repository_root/Cargo.toml"
-toolchain="1.97.1"
+toolchain="1.98.0"
 target="${1:-x86_64-unknown-linux-gnu}"
 
 case "$target" in

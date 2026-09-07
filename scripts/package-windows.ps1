@@ -12,7 +12,7 @@ if ($Target -ne 'x86_64-pc-windows-msvc') {
 
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $Manifest = Join-Path $RepositoryRoot 'Cargo.toml'
-$Toolchain = '1.97.1'
+$Toolchain = '1.98.0'
 $ManifestText = Get-Content -Raw $Manifest
 $VersionMatch = [regex]::Match($ManifestText, '(?m)^version = "([^"]+)"')
 if (-not $VersionMatch.Success) {
