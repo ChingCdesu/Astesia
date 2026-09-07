@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "astesia"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
