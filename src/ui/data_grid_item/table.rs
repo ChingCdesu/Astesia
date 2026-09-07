@@ -40,9 +40,10 @@ impl TableDelegate for GridTableDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let owner = self.owner.clone();
-        div()
+        h_flex()
             .id(("grid-header", index))
             .size_full()
+            .items_center()
             .px_2()
             .child(
                 Label::new(self.columns[index].name.clone())

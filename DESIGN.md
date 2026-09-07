@@ -32,7 +32,7 @@ The light and dark palettes in `src/ui/theme.rs` follow the [Figma Screens](http
 
 The active theme owns foreground, background, border, focus, selection, status, and typography.
 Workspace text uses the bundled Geist Mono family. Popup menus use the platform proportional UI
-font at normal weight, with Kit-owned inset selection, rounded surfaces, and separators between
+font at 12px and normal weight, with Kit-owned inset selection, rounded surfaces, and separators between
 action groups. Chinese text uses
 platform glyph fallback. Queries, identifiers, and code-like values retain the editor monospace font. Engine colors identify database types and never substitute for action or error semantics.
 State also needs readable text or an icon.
