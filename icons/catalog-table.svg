@@ -1,0 +1,15 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Type Icon / Table" clip-path="url(#clip0_0_217)">
+<path id="Vector" d="M9.375 1.5H2.625C2.00368 1.5 1.5 2.00368 1.5 2.625V9.375C1.5 9.99632 2.00368 10.5 2.625 10.5H9.375C9.99632 10.5 10.5 9.99632 10.5 9.375V2.625C10.5 2.00368 9.99632 1.5 9.375 1.5Z" stroke="#A9AFBC" stroke-width="1.2"/>
+<path id="Vector_2" d="M9.375 1.5H2.625C2.00368 1.5 1.5 2.00368 1.5 2.625V3.375C1.5 3.99632 2.00368 4.5 2.625 4.5H9.375C9.99632 4.5 10.5 3.99632 10.5 3.375V2.625C10.5 2.00368 9.99632 1.5 9.375 1.5Z" stroke="#A9AFBC" stroke-width="1.2"/>
+<path id="Vector_3" d="M1.5 4.5H10.5" stroke="#A9AFBC" stroke-width="1.2"/>
+<path id="Vector_4" d="M4.5 4.5V10.5" stroke="#A9AFBC" stroke-width="1.2"/>
+<path id="Vector_5" d="M7.5 4.5V10.5" stroke="#A9AFBC" stroke-width="1.2"/>
+<path id="Vector_6" d="M1.5 7.5H10.5" stroke="#A9AFBC" stroke-width="1.2"/>
+</g>
+<defs>
+<clipPath id="clip0_0_217">
+<rect width="12" height="12" fill="white"/>
+</clipPath>
+</defs>
+</svg>

@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-04T07:49:10Z",
+  "title": "Design System: Astesia",
+  "extensions": {
+    "colorMeta": {
+      "mysql": {
+        "role": "tertiary",
+        "displayName": "MySQL Teal",
+        "canonical": "#00758F",
+        "tonalRamp": []
+      },
+      "postgresql": {
+        "role": "tertiary",
+        "displayName": "PostgreSQL Blue",
+        "canonical": "#336791",
+        "tonalRamp": []
+      },
+      "sqlite": {
+        "role": "tertiary",
+        "displayName": "SQLite Navy",
+        "canonical": "#003B57",
+        "tonalRamp": []
+      },
+      "sql-server": {
+        "role": "tertiary",
+        "displayName": "SQL Server Red",
+        "canonical": "#CC2927",
+        "tonalRamp": []
+      },
+      "mongodb": {
+        "role": "tertiary",
+        "displayName": "MongoDB Green",
+        "canonical": "#47A248",
+        "tonalRamp": []
+      },
+      "redis": {
+        "role": "tertiary",
+        "displayName": "Redis Red",
+        "canonical": "#DC382D",
+        "tonalRamp": []
+      },
+      "clickhouse": {
+        "role": "tertiary",
+        "displayName": "ClickHouse Yellow",
+        "canonical": "#FFCC01",
+        "tonalRamp": []
+      }
+    },
+    "typographyMeta": {
+      "ui": {
+        "displayName": "Zed UI Font",
+        "purpose": "Interface text at the user's configured Zed UI scale."
+      },
+      "buffer": {
+        "displayName": "Zed Buffer Font",
+        "purpose": "Query editing and code-like values at the user's configured buffer size."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "minimum-desktop-window",
+        "value": "960px"
+      }
+    ]
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "A Zed Workspace for Databases",
+    "overview": "Astesia should feel like a focused database workflow that belongs inside Zed: native, compact, keyboard-first, theme-aware, and built from the same component behavior rather than a visual copy of one Zed screenshot. The pinned Zed UI source owns components, typography, density, semantic colors, elevation, focus, and interaction states. Astesia owns the database workspace composition, engine capabilities, bilingual product language, and engine identity colors.",
+    "keyCharacteristics": [
+      "Zed UI components and semantic theme roles form the visual foundation.",
+      "Compact multi-pane geometry keeps Connection Profiles, tabs, work, and status continuously visible.",
+      "UI scale and density come from Zed rather than fixed local pixels.",
+      "Engine color identifies database type; Zed semantic roles communicate actions and state."
+    ],
+    "rules": [
+      {
+        "name": "The Zed-Is-The-System Rule",
+        "body": "Use the pinned Zed theme role or component API, not a copied hex, radius, shadow, or state color.",
+        "section": "colors"
+      },
+      {
+        "name": "The Identity-Is-Not-Action Rule",
+        "body": "Engine color identifies database type. Actions and states continue to use Zed semantics.",
+        "section": "colors"
+      },
+      {
+        "name": "The State-Is-Written Rule",
+        "body": "Connection and error state includes text or an icon; color never carries the only meaning.",
+        "section": "colors"
+      },
+      {
+        "name": "The Continuous-State Rule",
+        "body": "Hiding the sidebar may enlarge the work area, but the active tab and runtime context stay visible.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do inspect the exact component in the pinned Zed checkout before changing a visual primitive.",
+      "Do use Zed components and semantic APIs so themes, UI scale, density, state, and accessibility remain live.",
+      "Do preserve Astesia's compact sidebar-tabs-work-status composition.",
+      "Do use engine identity colors only where database type is being communicated."
+    ],
+    "donts": [
+      "Don't reproduce Zed with hard-coded colors, pixel dimensions, radii, shadows, or interaction states.",
+      "Don't create a custom component when the pinned Zed UI library already owns the interaction.",
+      "Don't introduce marketing typography or decorative effects into the operator workspace.",
+      "Don't turn engine identity colors into action or status semantics."
+    ]
+  }
+}

@@ -1,0 +1,720 @@
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use crate::db::{DbType, ExplainMode, SqlScript, StatementResult};
+
+use super::query_result_selection::QueryResultSelection;
+use super::{
+    query_file::QueryFileState, QueryFileCompletion, QueryFileError, QueryFileRequest, RedisCommand,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryTarget {
+    pub connection_id: String,
+    pub connection_name: String,
+    pub database: String,
+    pub db_type: DbType,
+    pub session_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryExecutionScope {
+    All,
+    Current,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryDocument {
+    text: String,
+    selection: Range<usize>,
+}
+
+impl QueryDocument {
+    pub fn new(text: String, selection: Range<usize>) -> Self {
+        Self { text, selection }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QueryWorkspaceError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl QueryWorkspaceError {
+    fn target_required() -> Self {
+        Self {
+            code: "query_target_required",
+            message: "请先在已连接的 Connection Profile 下选择数据库。".to_string(),
+        }
+    }
+
+    fn unsupported_engine(db_type: DbType) -> Self {
+        Self {
+            code: "query_engine_unsupported",
+            message: format!("{db_type:?} 不支持 SQL 查询；请使用对应的数据浏览器。"),
+        }
+    }
+
+    fn redis_command(error: impl std::fmt::Display) -> Self {
+        Self {
+            code: "redis_command_invalid",
+            message: format!("Redis command is invalid: {error}"),
+        }
+    }
+
+    fn unsupported_explain(db_type: DbType) -> Self {
+        Self {
+            code: "query_explain_unsupported",
+            message: format!("{db_type:?} 不支持执行计划。"),
+        }
+    }
+
+    fn explain_requires_one_statement() -> Self {
+        Self {
+            code: "query_explain_requires_one_statement",
+            message: "执行计划一次只能分析一条 SQL 语句。".to_string(),
+        }
+    }
+
+    fn invalid_selection() -> Self {
+        Self {
+            code: "query_selection_invalid",
+            message: "编辑器选区已失效，请重新选择后再执行。".to_string(),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            code: "query_empty",
+            message: "没有可执行的查询或命令。".to_string(),
+        }
+    }
+
+    fn parse(error: impl std::fmt::Display) -> Self {
+        Self {
+            code: "query_parse_failed",
+            message: format!("SQL 解析失败：{error}"),
+        }
+    }
+
+    fn execution(message: String) -> Self {
+        Self {
+            code: "query_execution_failed",
+            message,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum QueryOperation {
+    Statements(Vec<String>),
+    Explain(String),
+    Redis {
+        source: String,
+        command: RedisCommand,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct QueryExecutionRequest {
+    generation: u64,
+    pub(crate) target: QueryTarget,
+    pub(crate) operation: QueryOperation,
+}
+
+#[derive(Default)]
+pub(crate) struct QueryWorkspaceState {
+    file: QueryFileState,
+    target: Option<QueryTarget>,
+    next_generation: u64,
+    active_generation: Option<u64>,
+    results: Vec<Arc<StatementResult>>,
+    active_result_index: usize,
+    result_selection: QueryResultSelection,
+    error: Option<QueryWorkspaceError>,
+}
+
+impl QueryWorkspaceState {
+    pub(crate) fn new(document_text: String) -> Self {
+        Self {
+            file: QueryFileState::new(document_text),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn file_path(&self) -> Option<&Path> {
+        self.file.path()
+    }
+
+    pub(crate) fn file_display_name(&self) -> Option<String> {
+        self.file.display_name()
+    }
+
+    pub(crate) fn is_file_dirty(&self) -> bool {
+        self.file.is_dirty()
+    }
+
+    pub(crate) fn is_file_busy(&self) -> bool {
+        self.file.is_busy()
+    }
+
+    pub(crate) fn file_error(&self) -> Option<&QueryFileError> {
+        self.file.error()
+    }
+
+    pub(crate) fn update_document_text(&mut self, text: String) -> bool {
+        self.file.update_text(text)
+    }
+
+    pub(crate) fn begin_open_file(&mut self, path: PathBuf) -> Option<QueryFileRequest> {
+        self.file.begin_open(path)
+    }
+
+    pub(crate) fn begin_save_file(&mut self, path: PathBuf) -> Option<QueryFileRequest> {
+        self.file.begin_save(path)
+    }
+
+    pub(crate) fn finish_file_operation(
+        &mut self,
+        request: &QueryFileRequest,
+        result: Result<QueryFileCompletion, QueryFileError>,
+    ) -> Option<QueryFileCompletion> {
+        self.file.finish(request, result)
+    }
+
+    pub(crate) fn set_file_error(&mut self, error: QueryFileError) {
+        self.file.set_error(error);
+    }
+
+    pub(crate) fn target(&self) -> Option<&QueryTarget> {
+        self.target.as_ref()
+    }
+
+    pub(crate) fn set_target(&mut self, target: Option<QueryTarget>) -> bool {
+        if self.target == target {
+            return false;
+        }
+
+        self.target = target;
+        self.active_generation = None;
+        self.reset_result_data();
+        self.error = None;
+        true
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.active_generation.is_some()
+    }
+
+    pub(crate) fn results(&self) -> &[Arc<StatementResult>] {
+        &self.results
+    }
+
+    pub(crate) fn active_result_index(&self) -> usize {
+        self.active_result_index
+    }
+
+    pub(crate) fn active_result(&self) -> Option<&StatementResult> {
+        self.results
+            .get(self.active_result_index)
+            .map(AsRef::as_ref)
+    }
+
+    pub(crate) fn shared_active_result(&self) -> Option<Arc<StatementResult>> {
+        self.results.get(self.active_result_index).cloned()
+    }
+
+    pub(crate) fn error(&self) -> Option<&QueryWorkspaceError> {
+        self.error.as_ref()
+    }
+
+    pub(crate) fn clear_results(&mut self) {
+        self.active_generation = None;
+        self.reset_result_data();
+        self.error = None;
+    }
+
+    pub(crate) fn select_result(&mut self, index: usize) -> bool {
+        if index >= self.results.len() || self.active_result_index == index {
+            return false;
+        }
+        self.active_result_index = index;
+        self.result_selection.clear();
+        true
+    }
+
+    pub(crate) fn has_result_selection(&self) -> bool {
+        self.result_selection.has_selection()
+    }
+
+    pub(crate) fn is_result_cell_selected(&self, row: usize, column: usize) -> bool {
+        self.result_selection.contains_cell(row, column)
+    }
+
+    pub(crate) fn is_result_row_selected(&self, row: usize) -> bool {
+        self.result_selection.contains_row(row)
+    }
+
+    pub(crate) fn select_result_cell(&mut self, row: usize, column: usize, extend: bool) -> bool {
+        let valid = self.active_result().is_some_and(|result| {
+            row < result.rows.len()
+                && column < result.columns.len()
+                && column < result.rows[row].len()
+        });
+        valid && self.result_selection.select_cell(row, column, extend)
+    }
+
+    pub(crate) fn select_result_row(&mut self, row: usize, extend: bool, toggle: bool) -> bool {
+        let valid = self
+            .active_result()
+            .is_some_and(|result| row < result.rows.len());
+        valid && self.result_selection.select_row(row, extend, toggle)
+    }
+
+    pub(crate) fn select_all_result_rows(&mut self) -> bool {
+        let row_count = self.active_result().map_or(0, |result| result.rows.len());
+        self.result_selection.select_all_rows(row_count)
+    }
+
+    pub(crate) fn clear_result_selection(&mut self) -> bool {
+        self.result_selection.clear()
+    }
+
+    pub(crate) fn result_selection_tsv(&self, include_headers: bool) -> Option<String> {
+        self.result_selection
+            .to_tsv(self.active_result()?, include_headers)
+    }
+
+    pub(crate) fn begin_execution(
+        &mut self,
+        document: QueryDocument,
+        scope: QueryExecutionScope,
+    ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
+        let preparation = self.prepare_execution(document, scope);
+        self.begin_prepared(preparation)
+    }
+
+    pub(crate) fn begin_explain(
+        &mut self,
+        document: QueryDocument,
+    ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
+        let preparation = self
+            .prepare_explain(document)
+            .map(|(target, statement)| (target, QueryOperation::Explain(statement)));
+        self.begin_prepared(preparation)
+    }
+
+    fn begin_prepared(
+        &mut self,
+        preparation: Result<(QueryTarget, QueryOperation), QueryWorkspaceError>,
+    ) -> Result<QueryExecutionRequest, QueryWorkspaceError> {
+        let (target, operation) = match preparation {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                self.error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("query execution generation exhausted");
+        self.active_generation = Some(self.next_generation);
+        self.reset_result_data();
+        self.error = None;
+        Ok(QueryExecutionRequest {
+            generation: self.next_generation,
+            target,
+            operation,
+        })
+    }
+
+    pub(crate) fn finish_execution(
+        &mut self,
+        request: &QueryExecutionRequest,
+        result: Result<Vec<StatementResult>, String>,
+    ) -> bool {
+        if self.active_generation != Some(request.generation)
+            || self.target.as_ref() != Some(&request.target)
+        {
+            return false;
+        }
+
+        self.active_generation = None;
+        self.result_selection.clear();
+        match result {
+            Ok(results) => {
+                self.active_result_index = results
+                    .iter()
+                    .position(|result| !result.success)
+                    .unwrap_or(0);
+                self.results = results.into_iter().map(Arc::new).collect();
+                self.error = None;
+            }
+            Err(message) => {
+                self.results.clear();
+                self.active_result_index = 0;
+                self.error = Some(QueryWorkspaceError::execution(message));
+            }
+        }
+        true
+    }
+
+    fn reset_result_data(&mut self) {
+        self.results.clear();
+        self.active_result_index = 0;
+        self.result_selection.clear();
+    }
+
+    fn prepare_execution(
+        &self,
+        document: QueryDocument,
+        scope: QueryExecutionScope,
+    ) -> Result<(QueryTarget, QueryOperation), QueryWorkspaceError> {
+        let target = self
+            .target
+            .clone()
+            .ok_or_else(QueryWorkspaceError::target_required)?;
+        if target.db_type == DbType::Redis {
+            let source = select_redis_command(document)?;
+            let command =
+                RedisCommand::parse(&source).map_err(QueryWorkspaceError::redis_command)?;
+            return Ok((target, QueryOperation::Redis { source, command }));
+        }
+        if !target.db_type.capabilities().sql {
+            return Err(QueryWorkspaceError::unsupported_engine(target.db_type));
+        }
+        let statements = select_statements(target.db_type, document, scope)?;
+        Ok((target, QueryOperation::Statements(statements)))
+    }
+
+    fn prepare_explain(
+        &self,
+        document: QueryDocument,
+    ) -> Result<(QueryTarget, String), QueryWorkspaceError> {
+        let target = self
+            .target
+            .clone()
+            .ok_or_else(QueryWorkspaceError::target_required)?;
+        if target.db_type.capabilities().explain == ExplainMode::None {
+            return Err(QueryWorkspaceError::unsupported_explain(target.db_type));
+        }
+        let mut statements =
+            select_statements(target.db_type, document, QueryExecutionScope::Current)?;
+        if statements.len() != 1 {
+            return Err(QueryWorkspaceError::explain_requires_one_statement());
+        }
+        Ok((
+            target,
+            statements.pop().expect("one Explain statement was checked"),
+        ))
+    }
+}
+
+fn select_redis_command(document: QueryDocument) -> Result<String, QueryWorkspaceError> {
+    validate_range(&document.text, &document.selection)?;
+    let source = if document.selection.is_empty() {
+        document.text
+    } else {
+        document.text[document.selection].to_string()
+    };
+    let source = source.trim().to_string();
+    if source.is_empty() {
+        Err(QueryWorkspaceError::empty())
+    } else {
+        Ok(source)
+    }
+}
+
+fn select_statements(
+    db_type: DbType,
+    document: QueryDocument,
+    scope: QueryExecutionScope,
+) -> Result<Vec<String>, QueryWorkspaceError> {
+    validate_range(&document.text, &document.selection)?;
+    if !document.selection.is_empty() {
+        return parse_statements(db_type, &document.text[document.selection]);
+    }
+
+    let script = SqlScript::parse(db_type, &document.text).map_err(QueryWorkspaceError::parse)?;
+    match scope {
+        QueryExecutionScope::All => non_empty(script.into_statements()),
+        QueryExecutionScope::Current => script
+            .statement_at(document.selection.start)
+            .map(|statement| vec![statement.to_string()])
+            .ok_or_else(QueryWorkspaceError::empty),
+    }
+}
+
+fn parse_statements(db_type: DbType, source: &str) -> Result<Vec<String>, QueryWorkspaceError> {
+    let statements = SqlScript::parse(db_type, source)
+        .map_err(QueryWorkspaceError::parse)?
+        .into_statements();
+    non_empty(statements)
+}
+
+fn non_empty(statements: Vec<String>) -> Result<Vec<String>, QueryWorkspaceError> {
+    if statements.is_empty() {
+        Err(QueryWorkspaceError::empty())
+    } else {
+        Ok(statements)
+    }
+}
+
+fn validate_range(source: &str, range: &Range<usize>) -> Result<(), QueryWorkspaceError> {
+    if range.start > range.end
+        || range.end > source.len()
+        || !source.is_char_boundary(range.start)
+        || !source.is_char_boundary(range.end)
+    {
+        return Err(QueryWorkspaceError::invalid_selection());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::db::ColumnInfo;
+
+    use super::*;
+
+    fn target(id: &str, generation: u64, db_type: DbType) -> QueryTarget {
+        QueryTarget {
+            connection_id: id.to_string(),
+            connection_name: id.to_string(),
+            database: "app".to_string(),
+            db_type,
+            session_generation: generation,
+        }
+    }
+
+    fn result(sql: &str, success: bool) -> StatementResult {
+        StatementResult {
+            sql: sql.to_string(),
+            success,
+            error: (!success).then(|| "failed".to_string()),
+            columns: vec![ColumnInfo {
+                name: "value".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                comment: None,
+            }],
+            rows: vec![vec![json!(1)]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+        }
+    }
+
+    #[test]
+    fn selection_takes_precedence_and_current_uses_the_cursor_statement() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
+        let sql = "SELECT 1;\n-- gap\nSELECT '二';".to_string();
+
+        let selected = state
+            .begin_execution(
+                QueryDocument::new(sql.clone(), 0..sql.find(';').unwrap()),
+                QueryExecutionScope::Current,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.operation,
+            QueryOperation::Statements(vec!["SELECT 1".to_string()])
+        );
+
+        let cursor = sql.find('二').unwrap();
+        let current = state
+            .begin_execution(
+                QueryDocument::new(sql, cursor..cursor),
+                QueryExecutionScope::Current,
+            )
+            .unwrap();
+        assert_eq!(
+            current.operation,
+            QueryOperation::Statements(vec!["SELECT '二'".to_string()])
+        );
+    }
+
+    #[test]
+    fn all_executes_every_dialect_aware_statement() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
+
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT ';'; SELECT 2;".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+
+        assert_eq!(
+            request.operation,
+            QueryOperation::Statements(vec!["SELECT ';'".to_string(), "SELECT 2".to_string()])
+        );
+    }
+
+    #[test]
+    fn explain_uses_the_selection_or_cursor_and_rejects_multiple_statements() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
+        let sql = "SELECT 1; SELECT 2;".to_string();
+
+        let cursor = sql.find('2').unwrap();
+        let request = state
+            .begin_explain(QueryDocument::new(sql.clone(), cursor..cursor))
+            .unwrap();
+        assert_eq!(
+            request.operation,
+            QueryOperation::Explain("SELECT 2".to_string())
+        );
+
+        let error = state
+            .begin_explain(QueryDocument::new(sql.clone(), 0..sql.len()))
+            .unwrap_err();
+        assert_eq!(error.code, "query_explain_requires_one_statement");
+
+        state.set_target(Some(target("mongo", 1, DbType::MongoDB)));
+        let error = state
+            .begin_explain(QueryDocument::new("GET key".to_string(), 0..0))
+            .unwrap_err();
+        assert_eq!(error.code, "query_explain_unsupported");
+    }
+
+    #[test]
+    fn target_changes_discard_in_flight_results() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::MySQL)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT 1".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+
+        state.set_target(Some(target("primary", 2, DbType::MySQL)));
+        assert!(!state.finish_execution(&request, Ok(vec![result("SELECT 1", true)])));
+        assert!(state.results().is_empty());
+    }
+
+    #[test]
+    fn completion_selects_the_first_failed_statement() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::SQLite)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT 1; SELECT 2".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+
+        assert!(state.finish_execution(
+            &request,
+            Ok(vec![result("SELECT 1", true), result("SELECT 2", false)])
+        ));
+        assert_eq!(state.active_result_index(), 1);
+        assert_eq!(state.active_result().unwrap().sql, "SELECT 2");
+    }
+
+    #[test]
+    fn result_selection_is_scoped_to_the_active_result() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::SQLite)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT 1; SELECT 2".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        state.finish_execution(
+            &request,
+            Ok(vec![result("SELECT 1", true), result("SELECT 2", true)]),
+        );
+
+        assert!(state.select_result_cell(0, 0, false));
+        assert_eq!(state.result_selection_tsv(true).unwrap(), "value\n1");
+        assert!(state.select_result(1));
+        assert!(!state.has_result_selection());
+        assert!(state.result_selection_tsv(false).is_none());
+    }
+
+    #[test]
+    fn invalid_selection_and_unsupported_targets_fail_before_execution() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::PostgreSQL)));
+        let error = state
+            .begin_execution(
+                QueryDocument::new("SELECT '二'".to_string(), 9..10),
+                QueryExecutionScope::All,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "query_selection_invalid");
+
+        state.set_target(Some(target("mongo", 1, DbType::MongoDB)));
+        let error = state
+            .begin_execution(
+                QueryDocument::new("{}".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "query_engine_unsupported");
+    }
+
+    #[test]
+    fn redis_targets_prepare_one_raw_command_without_sql_parsing() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("redis", 1, DbType::Redis)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new(
+                    "HSET 'key with space' field \"value with space\"".to_string(),
+                    0..0,
+                ),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        assert!(matches!(
+            request.operation,
+            QueryOperation::Redis { source, .. }
+                if source == "HSET 'key with space' field \"value with space\""
+        ));
+
+        let error = state
+            .begin_execution(
+                QueryDocument::new("SET key 'unterminated".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "redis_command_invalid");
+    }
+
+    #[test]
+    fn execution_failures_are_visible_and_a_new_run_clears_them() {
+        let mut state = QueryWorkspaceState::default();
+        state.set_target(Some(target("primary", 1, DbType::ClickHouse)));
+        let request = state
+            .begin_execution(
+                QueryDocument::new("SELECT 1".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        state.finish_execution(&request, Err("driver stopped".to_string()));
+        assert_eq!(state.error().unwrap().message, "driver stopped");
+
+        state
+            .begin_execution(
+                QueryDocument::new("SELECT 2".to_string(), 0..0),
+                QueryExecutionScope::All,
+            )
+            .unwrap();
+        assert!(state.error().is_none());
+        assert!(state.is_running());
+    }
+}
