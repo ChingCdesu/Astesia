@@ -753,6 +753,7 @@ impl DatabaseDriver for PostgresDriver {
                 let name: String = row.get("proname");
                 let identity_args: String = row.get("identity_args");
                 FunctionInfo {
+                    schema: Some(schema.clone()),
                     name: format!("{schema}.{name}({identity_args})"),
                     language: row.try_get::<String, _>("lanname").ok(),
                     return_type: row.try_get::<String, _>("return_type").ok(),

@@ -116,6 +116,7 @@ fn open_main_window(
                 cx,
             )
         });
+        AstesiaRoot::install_quit_handler(view.downgrade(), cx);
         cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
     })
     .expect("failed to open the Astesia window");

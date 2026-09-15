@@ -50,12 +50,14 @@ pub(super) struct SearchBar {
     open: bool,
     replace_mode: bool,
     case_insensitive: bool,
+    is_sql: bool,
     highlights: TextDecorationCollection,
     _subscriptions: Vec<Subscription>,
 }
 impl SearchBar {
     pub(super) fn new(
         editor: Entity<EditorState>,
+        is_sql: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -65,7 +67,12 @@ impl SearchBar {
             editor.create_decorations_collection(vec![], cx)
         });
         let subscriptions = vec![
-            cx.observe(&query, |bar, query, cx| {
+            cx.observe_in(&query, window, |bar, query, window, cx| {
+                if query.update(cx, |input, cx| {
+                    input.marked_text_range(window, cx).is_some()
+                }) {
+                    return;
+                }
                 let value = query.read(cx).value();
                 if bar.last_query != value {
                     bar.last_query = value;
@@ -91,6 +98,7 @@ impl SearchBar {
             open: false,
             replace_mode: false,
             case_insensitive: true,
+            is_sql,
             highlights,
             _subscriptions: subscriptions,
         }
@@ -130,6 +138,15 @@ impl SearchBar {
         self.editor.update(cx, |editor, cx| {
             editor.set_search_query(query, self.case_insensitive, cx)
         });
+        self.update_highlights(cx);
+    }
+    fn update_highlights(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .editor
+            .read(cx)
+            .search_session()
+            .matcher
+            .current_match_index();
         let ranges = self
             .editor
             .read(cx)
@@ -137,7 +154,7 @@ impl SearchBar {
             .matcher
             .matched_ranges();
         let style = HighlightStyle {
-            background_color: Some(cx.theme().selection),
+            background_color: Some(cx.theme().warning.opacity(0.16)),
             ..Default::default()
         };
         self.highlights.set(
@@ -145,7 +162,20 @@ impl SearchBar {
                 ranges
                     .iter()
                     .cloned()
-                    .map(|range| TextDecoration::new(range, style))
+                    .enumerate()
+                    .map(|(index, range)| {
+                        TextDecoration::new(
+                            range,
+                            if index == current {
+                                HighlightStyle {
+                                    background_color: Some(cx.theme().warning.opacity(0.42)),
+                                    ..Default::default()
+                                }
+                            } else {
+                                style
+                            },
+                        )
+                    })
                     .collect()
             } else {
                 vec![]
@@ -187,10 +217,22 @@ impl SearchBar {
         };
         window.focus(&next, cx);
     }
-    fn next(&mut self, _: &NextMatch, _: &mut Window, cx: &mut Context<Self>) {
+    fn next(&mut self, _: &NextMatch, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .query
+            .update(cx, |q, cx| q.marked_text_range(window, cx).is_some())
+        {
+            return;
+        }
         self.navigate(false, cx);
     }
-    fn previous(&mut self, _: &PreviousMatch, _: &mut Window, cx: &mut Context<Self>) {
+    fn previous(&mut self, _: &PreviousMatch, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .query
+            .update(cx, |q, cx| q.marked_text_range(window, cx).is_some())
+        {
+            return;
+        }
         self.navigate(true, cx);
     }
     pub(super) fn navigate(&mut self, previous: bool, cx: &mut Context<Self>) {
@@ -204,7 +246,7 @@ impl SearchBar {
                 editor.set_selected_range(range, cx);
             }
         });
-        cx.notify();
+        self.update_highlights(cx);
     }
     fn replace_one(&mut self, _: &ReplaceOne, window: &mut Window, cx: &mut Context<Self>) {
         self.replace(false, window, cx);
@@ -235,7 +277,15 @@ impl Render for SearchBar {
         let language = cx
             .try_global::<super::shell::UiLocale>()
             .map_or(UiLanguage::Chinese, |locale| locale.0);
-        let label = self.editor.read(cx).search_session().matcher.label();
+        let matcher = &self.editor.read(cx).search_session().matcher;
+        let no_matches = matcher.is_empty();
+        let label = if self.query.read(cx).value().is_empty() {
+            String::new()
+        } else if no_matches {
+            text(language, "无匹配", "No matches").to_owned()
+        } else {
+            matcher.label()
+        };
         let can_replace = self.editor.read(cx).is_replaceable();
         v_flex()
             .key_context("AstesiaSearch")
@@ -250,7 +300,9 @@ impl Render for SearchBar {
                     cx.stop_propagation();
                 }
             }))
-            .p_2()
+            .px_3()
+            .py(px(6.0))
+            .bg(cx.theme().sidebar)
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -263,16 +315,29 @@ impl Render for SearchBar {
             .on_action(cx.listener(Self::replace_all))
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap_2()
+                    .child(div().text_size(px(11.0)).child(if self.is_sql {
+                        text(language, "当前 SQL", "Current SQL")
+                    } else {
+                        text(language, "当前文档", "Current document")
+                    }))
                     .child(
                         Input::new(&self.query)
-                            .w(px(200.))
+                            .prefix(
+                                gpui_kit::component::Icon::new(
+                                    gpui_kit::component::IconName::Search,
+                                )
+                                .size(px(14.0)),
+                            )
+                            .suffix(div().text_size(px(11.0)).child(label))
+                            .small()
+                            .w(px(240.))
                             .aria_label(text(language, "查找", "Find")),
                     )
-                    .child(label)
                     .child(
                         Button::new("search-previous")
-                            .label("↑")
+                            .icon(gpui_kit::component::IconName::ChevronUp)
+                            .disabled(no_matches)
                             .small()
                             .ghost()
                             .accessibility_label(text(language, "上一个匹配", "Previous match"))
@@ -282,7 +347,8 @@ impl Render for SearchBar {
                     )
                     .child(
                         Button::new("search-next")
-                            .label("↓")
+                            .icon(gpui_kit::component::IconName::ChevronDown)
+                            .disabled(no_matches)
                             .small()
                             .ghost()
                             .accessibility_label(text(language, "下一个匹配", "Next match"))
@@ -372,7 +438,7 @@ mod tests {
         });
         let window = cx.add_window(|window, cx| {
             let editor = cx.new(|cx| EditorState::new(window, cx).default_value("name name"));
-            SearchBar::new(editor, window, cx)
+            SearchBar::new(editor, false, window, cx)
         });
         let bar = window.root(cx).unwrap();
         window

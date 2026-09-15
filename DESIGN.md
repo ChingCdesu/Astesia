@@ -117,3 +117,50 @@ connects it; activating a connected profile selects it without reconnecting.
 
 Verify native surfaces in Chinese and English, light/dark appearances, and compact/wide windows.
 Source checks establish API ownership; rendered and interaction claims require a running app.
+
+## In-place query search
+
+The SQL editor and query result grid own independent find terms and match positions.
+Cmd+F / Ctrl+F routes to the focused region. Each region shows its find bar above its
+content, a match count, case toggle, previous/next controls, and Close. Enter and
+Shift+Enter wrap through matches; Escape restores focus to the owning region.
+IME composition must complete before find input changes or navigation take effect.
+
+Result search is literal, follows row/column order, and searches only loaded cells using
+their displayed scalar/JSON values. It preserves row membership, query text, and grid
+selection. New execution results and result-tab changes invalidate the match cache.
+The cache must not retain a result after its owner releases it. Case-insensitive matching
+uses the same ASCII folding as the Kit editor; non-ASCII text remains literal.
+
+Design references: [result find](https://www.figma.com/design/okmpEaSEEhS2uX8VkuEhEY/Astesia?node-id=231-2789)
+and [editor find](https://www.figma.com/design/okmpEaSEEhS2uX8VkuEhEY/Astesia?node-id=242-3138).
+
+Text selections use a dedicated blue surface, separate from neutral list and table
+selection: `#365a83` in dark mode and `#b9d7fa` in light mode. The theme restoration
+boundary reapplies opaque selection to both Kit and input tokens after configuration
+loading, because Kit otherwise caps configured text-selection alpha at 0.3.
+
+Filled buttons explicitly bind their hover and active backgrounds to the workspace
+hover and selected surfaces. Selected engine tabs retain the primary text color;
+they must not inherit Kit's default primary-active palette on theme changes.
+
+## Schema-scoped tables and functions
+
+For engines with schemas, the database catalog shows each schema with collapsible
+Tables and Functions folder rows. These use the same tree-row height, indentation,
+selection, folder icon, disclosure, and count treatment as the rest of the catalog.
+Tables starts expanded; Functions starts collapsed. Each folder retains its own
+expansion state per database session and schema. A schema may contain no tables, and function results
+remain discoverable while table metadata is loading or fails. Collapsing a schema
+removes both sections and all their descendants from the virtual list.
+
+Function grouping uses `FunctionInfo.schema`, supplied by PostgreSQL and SQL Server
+catalog adapters, rather than parsing the display name. The function row omits its
+schema prefix within that parent but retains its argument signature. Definition and
+mutation actions retain the original qualified name. Create actions live in folder context menus and inherit the
+parent schema. Engines without schemas keep database-level function sections.
+
+Cmd+Q and the native Quit Astesia menu item dispatch the same application-scoped
+quit action, including while a text field or modal owns focus. The ready workspace
+prompts before discarding unsaved tabs; cancelling keeps the application open.
+Repeated requests do not stack native prompts. Startup/error states can quit directly.

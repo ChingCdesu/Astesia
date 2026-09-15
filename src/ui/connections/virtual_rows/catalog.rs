@@ -1,6 +1,7 @@
 use super::*;
 use crate::application::connection_workspace::{CatalogEntry, CatalogSection, ObjectListState};
 use std::collections::BTreeMap;
+mod schemas;
 
 impl ConnectionProfilesPanel {
     pub(super) fn append_catalog_rows(&self, target: &QueryTarget, rows: &mut Vec<SidebarRow>) {
@@ -18,6 +19,15 @@ impl ConnectionProfilesPanel {
                         .unwrap_or_else(|| div().into_any_element())
                 },
             ));
+        }
+        if target.db_type.capabilities().schemas {
+            self.append_schema_catalog_rows(target, catalog, rows);
+            for entry in catalog.entries() {
+                if !matches!(entry, CatalogEntry::Functions(_)) {
+                    self.append_secondary_rows(target, entry, rows);
+                }
+            }
+            return;
         }
         let primary = self
             .redis_search_result

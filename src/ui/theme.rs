@@ -32,6 +32,14 @@ pub(super) fn restore_selection_surfaces(cx: &mut App) {
     theme.table_active = selected;
     theme.tokens.list_active = selected.into();
     theme.tokens.table_active = selected.into();
+    // Kit caps configured text selection alpha at 0.3; inputs need an opaque, distinct surface.
+    theme.selection = gpui_kit::rgb(if theme.mode.is_dark() {
+        0x365a83
+    } else {
+        0xb9d7fa
+    })
+    .into();
+    theme.tokens.selection = theme.selection.into();
     Theme::sync_base(cx);
 }
 
@@ -99,7 +107,7 @@ fn config(mode: ThemeMode) -> ThemeConfig {
     colors.button_active = Some(selected.into());
     colors.secondary_active = Some(selected.into());
     colors.muted = Some(selected.into());
-    colors.selection = Some(selected.into());
+    colors.selection = Some(color("#b9d7fa", "#365a83").into());
     colors.success = Some(success.into());
     colors.warning = Some(warning.into());
     colors.danger = Some(error.into());
@@ -122,6 +130,8 @@ fn config(mode: ThemeMode) -> ThemeConfig {
     highlight.editor_active_line_number = Some(parse(text));
     highlight.editor_active_line = Some(parse(editor));
     colors.button_primary = Some(element.into());
+    colors.button_primary_hover = Some(hover.into());
+    colors.button_primary_active = Some(selected.into());
     colors.button_primary_foreground = Some(text.into());
     ThemeConfig {
         name: if mode.is_dark() {
@@ -189,6 +199,14 @@ mod tests {
                 assert_eq!(theme.list_active, rgb(selected).into());
                 assert_eq!(theme.tokens.tab_active.color, theme.tab_active);
                 assert_eq!(theme.tokens.list_active.color, theme.list_active);
+                assert_eq!(
+                    theme.tokens.button_primary_active.background,
+                    rgb(selected).into()
+                );
+                assert_eq!(theme.button_primary_foreground, theme.foreground);
+                let selection = rgb(if mode.is_dark() { 0x365a83 } else { 0xb9d7fa }).into();
+                assert_eq!(theme.selection, selection);
+                assert_eq!(theme.tokens.selection.background, selection.into());
             }
         });
     }

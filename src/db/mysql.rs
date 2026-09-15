@@ -538,6 +538,7 @@ impl DatabaseDriver for MySqlDriver {
             .iter()
             .map(|row| -> anyhow::Result<_> {
                 Ok(FunctionInfo {
+                    schema: None,
                     name: mysql_catalog_text(row, "ROUTINE_NAME")?,
                     language: Some("SQL".to_string()),
                     return_type: mysql_optional_catalog_text(row, "DTD_IDENTIFIER")?,

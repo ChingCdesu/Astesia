@@ -30,7 +30,11 @@ actions!(
         SaveQueryFile,
         CopyQueryResults,
         SelectAllQueryResults,
-        ClearQueryResultSelection
+        ClearQueryResultSelection,
+        FindQueryResults,
+        CloseResultSearch,
+        NextResultMatch,
+        PreviousResultMatch
     ]
 );
 
@@ -40,6 +44,17 @@ const QUERY_EDITOR_CONTEXT: &str = "QueryItem > QueryEditor > Input";
 
 pub(super) fn bind_query_item_keys(cx: &mut App) {
     cx.bind_keys([
+        gpui_kit::KeyBinding::new("cmd-f", FindQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("ctrl-f", FindQueryResults, Some("QueryResultGrid")),
+        gpui_kit::KeyBinding::new("cmd-f", FindQueryResults, Some("QueryResultSearch")),
+        gpui_kit::KeyBinding::new("ctrl-f", FindQueryResults, Some("QueryResultSearch")),
+        gpui_kit::KeyBinding::new("escape", CloseResultSearch, Some("QueryResultSearch")),
+        gpui_kit::KeyBinding::new("enter", NextResultMatch, Some("QueryResultSearch")),
+        gpui_kit::KeyBinding::new(
+            "shift-enter",
+            PreviousResultMatch,
+            Some("QueryResultSearch"),
+        ),
         gpui_kit::KeyBinding::new("cmd-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
         gpui_kit::KeyBinding::new("ctrl-enter", ExecuteQuery, Some(QUERY_EDITOR_CONTEXT)),
         gpui_kit::KeyBinding::new(
@@ -68,6 +83,8 @@ pub(super) struct QueryItem {
     application: Arc<Application>,
     editor: Entity<Editor>,
     result_focus: FocusHandle,
+    result_search: result_search::ResultSearch,
+    _result_search_observation: Subscription,
     completion: SqlCompletionHandle,
     state: QueryWorkspaceState,
     selected_schema: Option<String>,
@@ -87,6 +104,7 @@ pub(super) struct QueryItem {
 }
 
 mod context_picker;
+mod result_search;
 mod result_view;
 
 pub(super) struct QueryContextChanged {
@@ -99,7 +117,7 @@ impl QueryItem {
         application: Arc<Application>,
         editor: Entity<Editor>,
         settings: Entity<ShellSettings>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_text = editor.read(cx).text(cx);
@@ -118,7 +136,11 @@ impl QueryItem {
             }
         });
         let settings_observation = cx.observe(&settings, |_, _, cx| cx.notify());
+        let result_search = result_search::ResultSearch::new(window, cx);
+        let result_search_observation = result_search.observe(window, cx);
         Self {
+            result_search,
+            _result_search_observation: result_search_observation,
             application,
             editor,
             result_focus: cx.focus_handle(),
@@ -667,6 +689,7 @@ impl Render for QueryItem {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let language = self.settings.read(cx).language();
+        self.refresh_result_search(cx);
         let busy = self.state.is_running();
         let file_busy = self.file_operation_busy();
         let file_error = self.state.file_error().map(|error| {
@@ -879,6 +902,24 @@ impl Render for QueryItem {
                     )
                     .when(can_chart, |bar| {
                         bar.child(
+                            query_toolbar_action(
+                                "find-results",
+                                IconName::Search,
+                                text(
+                                    language,
+                                    "查找结果 · ⌘F / Ctrl+F",
+                                    "Find results · ⌘F / Ctrl+F",
+                                ),
+                            )
+                            .on_click(cx.listener(
+                                |item, _, window, cx| {
+                                    item.open_result_search(&FindQueryResults, window, cx)
+                                },
+                            )),
+                        )
+                    })
+                    .when(can_chart, |bar| {
+                        bar.child(
                             Button::new(
                                 "toggle-query-chart",
                                 if self.showing_chart {
@@ -927,6 +968,7 @@ impl Render for QueryItem {
                     }),
             )
             .children(self.render_result_tabs(cx))
+            .children(self.render_result_search(cx))
             .child(div().flex_1().min_h_0().child(self.render_results(cx)));
 
         content.children(self.context_menu.as_ref().map(|(menu, position, _)| {

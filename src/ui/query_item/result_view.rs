@@ -358,14 +358,25 @@ impl QueryItem {
                                             .when(selected, |element| {
                                                 element.bg(colors.ghost_element_selected)
                                             })
+                                            .when(
+                                                item.is_current_result_match(
+                                                    row_index,
+                                                    column_index,
+                                                ),
+                                                |el| {
+                                                    el.border_1()
+                                                        .border_color(colors.border_focused)
+                                                },
+                                            )
                                             .child(
-                                                Label::new(
+                                                item.result_cell_text(
+                                                    row_index,
+                                                    column_index,
                                                     row.get(column_index)
                                                         .map(display_value)
                                                         .unwrap_or_default(),
-                                                )
-                                                .size(LabelSize::XSmall)
-                                                .truncate(),
+                                                    cx,
+                                                ),
                                             )
                                             .on_click(cx.listener(
                                                 move |item, event, window, cx| {
@@ -385,6 +396,7 @@ impl QueryItem {
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(&self.result_search.rows)
         .w_full()
         .flex_1();
 
@@ -392,6 +404,7 @@ impl QueryItem {
             .id("query-result-grid")
             .track_focus(&self.result_focus)
             .key_context("QueryResultGrid")
+            .on_action(cx.listener(Self::open_result_search))
             .on_action(cx.listener(Self::copy_query_results))
             .on_action(cx.listener(Self::select_all_query_results))
             .on_action(cx.listener(Self::clear_query_result_selection))
@@ -399,6 +412,7 @@ impl QueryItem {
             .bg(colors.editor_background)
             .font_family(cx.theme().mono_font_family.clone())
             .overflow_x_scroll()
+            .track_scroll(&self.result_search.horizontal)
             .child(
                 v_flex()
                     .w(grid_width)

@@ -201,3 +201,71 @@ impl ConnectionProfilesPanel {
         cx.notify();
     }
 }
+
+impl ConnectionProfilesPanel {
+    pub(in super::super) fn open_catalog_folder_menu(
+        &mut self,
+        target: QueryTarget,
+        schema: Option<String>,
+        kind: DatabaseObjectKind,
+        position: gpui_kit::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::application::object_kind_can_create;
+        use crate::ui::components::{ContextMenu, ContextMenuEntry};
+        use crate::ui::object_mutation_form::ObjectMutationFormMode;
+        if !object_kind_can_create(target.db_type, kind) {
+            cx.notify();
+            return;
+        }
+        let language = self.settings.read(cx).language();
+        let label = if kind == DatabaseObjectKind::Function {
+            text(language, "新建函数…", "Create Function…")
+        } else {
+            text(language, "新建表…", "Create Table…")
+        };
+        let owner = cx.entity().downgrade();
+        let busy = self.actions_blocked();
+        let menu = ContextMenu::build(window, cx, |menu, _, _| {
+            menu.item(
+                ContextMenuEntry::new(label)
+                    .disabled(busy)
+                    .handler(move |_, cx| {
+                        owner
+                            .update(cx, |panel, cx| {
+                                if panel.state.query_target_is_live(&target) {
+                                    panel.request_object_mutation(
+                                        ObjectMutationFormMode::Create {
+                                            target: target.clone(),
+                                            kind,
+                                            schema: schema.clone(),
+                                        },
+                                        cx,
+                                    );
+                                }
+                            })
+                            .ok();
+                    }),
+            )
+        });
+        let previous = window.focused(cx);
+        window.focus(&menu.focus_handle(cx), cx);
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            move |panel, menu, _: &gpui_kit::DismissEvent, window, cx| {
+                if menu.focus_handle(cx).contains_focused(window, cx) {
+                    if let Some(previous) = &previous {
+                        window.focus(previous, cx);
+                    }
+                }
+                panel.context_menu = None;
+                cx.notify();
+            },
+        );
+        self.profile_menu_state = None;
+        self.context_menu = Some((menu, position, subscription));
+        cx.notify();
+    }
+}

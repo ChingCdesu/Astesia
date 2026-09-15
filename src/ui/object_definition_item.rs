@@ -287,6 +287,7 @@ mod tests {
         let function = ObjectDefinition::function(
             target(),
             &FunctionInfo {
+                schema: None,
                 name: "billing.total".to_string(),
                 language: Some("plpgsql".to_string()),
                 return_type: Some("numeric".to_string()),
