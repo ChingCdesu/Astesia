@@ -198,7 +198,7 @@ fn selecting_another_profile_does_not_replace_the_active_database_status() {
     assert_eq!(status.session, ConnectionSessionStatus::Connected);
 }
 
-fn sidebar_test_window(
+pub(super) fn sidebar_test_window(
     cx: &mut gpui_kit::TestAppContext,
 ) -> (
     gpui_kit::WindowHandle<ConnectionProfilesPanel>,

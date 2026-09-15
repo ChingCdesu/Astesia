@@ -384,6 +384,7 @@ impl DatabaseDriver for ClickHouseDriver {
             .iter()
             .filter_map(|row| {
                 Some(FunctionInfo {
+                    schema: None,
                     name: row.first().and_then(value_to_string)?,
                     language: Some("SQL".to_string()),
                     return_type: None,

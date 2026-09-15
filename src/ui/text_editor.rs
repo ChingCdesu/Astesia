@@ -37,7 +37,9 @@ impl Editor {
             }
             cx.notify();
         });
-        let search = cx.new(|cx| super::editor_search::SearchBar::new(state.clone(), window, cx));
+        let search = cx.new(|cx| {
+            super::editor_search::SearchBar::new(state.clone(), language == "sql", window, cx)
+        });
         let last_value = state.read(cx).value();
         let observation = cx.observe_in(&state, window, |this, state, window, cx| {
             let value = state.read(cx).value();

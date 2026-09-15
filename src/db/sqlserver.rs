@@ -602,6 +602,13 @@ impl DatabaseDriver for SqlServerDriver {
         let functions: Vec<FunctionInfo> = rows
             .iter()
             .map(|row| FunctionInfo {
+                schema: Some(
+                    row.try_get::<&str, _>(0)
+                        .ok()
+                        .flatten()
+                        .unwrap_or("dbo")
+                        .to_owned(),
+                ),
                 name: format!(
                     "{}.{}",
                     row.try_get::<&str, _>(0).ok().flatten().unwrap_or("dbo"),

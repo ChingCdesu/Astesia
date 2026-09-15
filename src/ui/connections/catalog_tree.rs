@@ -29,6 +29,31 @@ impl CatalogTableKey {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct CatalogFolderKey {
+    connection: String,
+    generation: u64,
+    database: String,
+    schema: Option<String>,
+    kind: crate::application::DatabaseObjectKind,
+}
+
+impl CatalogFolderKey {
+    pub(super) fn new(
+        target: &QueryTarget,
+        schema: Option<String>,
+        kind: crate::application::DatabaseObjectKind,
+    ) -> Self {
+        Self {
+            connection: target.connection_id.clone(),
+            generation: target.session_generation,
+            database: target.database.clone(),
+            schema,
+            kind,
+        }
+    }
+}
+
 pub(super) enum CatalogDetail {
     Loading(u64),
     Ready(TableStructureSnapshot),
@@ -92,6 +117,8 @@ impl ConnectionProfilesPanel {
             .retain(|key| live.contains(&(key.connection.clone(), key.generation)));
         self.collapsed_details
             .retain(|(key, _)| live.contains(&(key.connection.clone(), key.generation)));
+        self.catalog_folder_expansion
+            .retain(|key, _| live.contains(&(key.connection.clone(), key.generation)));
         self.collapsed_schemas
             .retain(|(connection, generation, _, _)| {
                 live.contains(&(connection.clone(), *generation))
@@ -296,6 +323,9 @@ impl ConnectionProfilesPanel {
 }
 
 pub(super) fn catalog_icon(kind: &str) -> Icon {
+    if kind == "folder" {
+        return Icon::new(IconName::FolderOpen).color(Color::Accent);
+    }
     let path = match kind {
         "database" => "icons/astesia/catalog-database.svg",
         "schema" => "icons/astesia/catalog-schema.svg",
@@ -369,6 +399,30 @@ pub(super) fn column_row(
         label,
         "column",
         CatalogDisclosure::Inline(None),
+        Some(content),
+        None,
+        cx,
+    )
+}
+
+pub(super) fn tree_folder_row(
+    id: String,
+    label: &str,
+    count: usize,
+    expanded: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let content = h_flex()
+        .gap_1p5()
+        .min_w_0()
+        .child(Label::new(label.to_owned()).truncate())
+        .child(Label::new(count.to_string()).color(Color::Muted))
+        .into_any_element();
+    tree_row_with_disclosure(
+        id,
+        format!("{label} {count}"),
+        "folder",
+        CatalogDisclosure::Inline(Some(expanded)),
         Some(content),
         None,
         cx,

@@ -14,7 +14,7 @@ pub(crate) use policy::{
     trigger_uses_function_reference, ObjectCreationPolicy,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum DatabaseObjectKind {
     Database,
     Schema,

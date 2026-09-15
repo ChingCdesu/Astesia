@@ -37,6 +37,7 @@ use super::{
 actions!(
     astesia_workspace,
     [
+        QuitApplication,
         ToggleCommandPalette,
         NewQueryTab,
         CloseActiveQueryTab,
@@ -48,6 +49,7 @@ actions!(
 );
 
 pub(super) fn bind_workspace_keys(cx: &mut App) {
+    cx.bind_keys([gpui_kit::KeyBinding::new("cmd-q", QuitApplication, None)]);
     cx.bind_keys([
         gpui_kit::KeyBinding::new(
             "cmd-shift-p",
@@ -86,6 +88,7 @@ pub(super) fn bind_workspace_keys(cx: &mut App) {
 
 mod item;
 mod operations;
+mod quit;
 mod settings_menu;
 mod tab_bar;
 mod title_bar;

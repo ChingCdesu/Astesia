@@ -188,6 +188,8 @@ pub struct ViewInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionInfo {
     pub name: String,
+    #[serde(default)]
+    pub schema: Option<String>,
     pub language: Option<String>,
     pub return_type: Option<String>,
     pub definition: Option<String>,

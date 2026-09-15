@@ -157,6 +157,107 @@ impl ConnectionProfilesPanel {
         rows
     }
 
+    pub(super) fn render_schema_function(
+        &self,
+        target: &QueryTarget,
+        function: &crate::db::FunctionInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let prefix = function.schema.as_ref().map(|schema| format!("{schema}."));
+        let label = prefix
+            .as_ref()
+            .and_then(|prefix| function.name.strip_prefix(prefix))
+            .unwrap_or(&function.name)
+            .to_owned();
+        self.render_definition_row(
+            0,
+            label,
+            DatabaseObjectKind::Function,
+            ObjectDefinition::function(target.clone(), function),
+            cx,
+        )
+    }
+
+    fn render_definition_row(
+        &self,
+        index: usize,
+        label: String,
+        kind: DatabaseObjectKind,
+        action_object: ObjectDefinition,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let target = action_object.target.clone();
+        let click_object = action_object.clone();
+        let drop_target = target.clone();
+        let drop_mutation = ObjectMutation::Drop(action_object.drop_target());
+        h_flex()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .id(format!(
+                        "definition-object-{}-{}-{index}",
+                        target.connection_id, target.database
+                    ))
+                    .role(gpui_kit::Role::Button)
+                    .tab_index(0)
+                    .key_context("SchemaObjectRow")
+                    .aria_label(label.clone())
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1p5()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(cx.theme().colors().border.opacity(0.0))
+                    .cursor_pointer()
+                    .focus_visible(|element| {
+                        element.border_color(cx.theme().colors().border_focused)
+                    })
+                    .hover(|element| element.bg(cx.theme().colors().ghost_element_hover))
+                    .on_action(cx.listener(move |panel, _: &menu::Confirm, _, cx| {
+                        panel.request_object_definition(action_object.clone(), cx);
+                    }))
+                    .on_click(
+                        cx.listener(move |panel, event: &gpui_kit::ClickEvent, _, cx| {
+                            if event.click_count() > 1 {
+                                return;
+                            }
+                            panel.request_object_definition(click_object.clone(), cx);
+                        }),
+                    )
+                    .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
+                    .child(
+                        Label::new(label)
+                            .size(LabelSize::XSmall)
+                            .truncate()
+                            .flex_1(),
+                    ),
+            )
+            .when(object_kind_can_drop(target.db_type, kind), |element| {
+                element.child(
+                    IconButton::new(format!("drop-definition-{kind:?}-{index}"), IconName::Trash)
+                        .icon_size(IconSize::XSmall)
+                        .disabled(self.object_operation_in_progress)
+                        .tooltip(Tooltip::text(text(
+                            self.settings.read(cx).language(),
+                            "删除对象",
+                            "Drop object",
+                        )))
+                        .on_click(cx.listener(move |panel, _, window, cx| {
+                            panel.confirm_drop_object(
+                                drop_target.clone(),
+                                drop_mutation.clone(),
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_definition_section<T>(
         &self,
         target: &QueryTarget,
@@ -203,92 +304,13 @@ impl ConnectionProfilesPanel {
                     rows.push(catalog_empty_row("—"));
                 } else {
                     rows.extend(items.iter().enumerate().map(|(index, item)| {
-                        let label = display(item);
-                        let action_object = object(target.clone(), item);
-                        let click_object = action_object.clone();
-                        let drop_target = target.clone();
-                        let drop_mutation = ObjectMutation::Drop(action_object.drop_target());
-                        h_flex()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                h_flex()
-                                    .id(format!(
-                                        "definition-object-{}-{}-{index}",
-                                        target.connection_id, target.database
-                                    ))
-                                    .role(gpui_kit::Role::Button)
-                                    .tab_index(0)
-                                    .key_context("SchemaObjectRow")
-                                    .aria_label(label.clone())
-                                    .min_w_0()
-                                    .flex_1()
-                                    .gap_1p5()
-                                    .px_1()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(cx.theme().colors().border.opacity(0.0))
-                                    .cursor_pointer()
-                                    .focus_visible(|element| {
-                                        element.border_color(cx.theme().colors().border_focused)
-                                    })
-                                    .hover(|element| {
-                                        element.bg(cx.theme().colors().ghost_element_hover)
-                                    })
-                                    .on_action(cx.listener(
-                                        move |panel, _: &menu::Confirm, _, cx| {
-                                            panel.request_object_definition(
-                                                action_object.clone(),
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .on_click(cx.listener(
-                                        move |panel, event: &gpui_kit::ClickEvent, _, cx| {
-                                            if event.click_count() > 1 {
-                                                return;
-                                            }
-                                            panel.request_object_definition(
-                                                click_object.clone(),
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .child(div().size(px(3.0)).rounded_full().bg(rgb(0x71717a)))
-                                    .child(
-                                        Label::new(label)
-                                            .size(LabelSize::XSmall)
-                                            .truncate()
-                                            .flex_1(),
-                                    ),
-                            )
-                            .when(object_kind_can_drop(target.db_type, kind), |element| {
-                                element.child(
-                                    IconButton::new(
-                                        format!("drop-definition-{kind:?}-{index}"),
-                                        IconName::Trash,
-                                    )
-                                    .icon_size(IconSize::XSmall)
-                                    .disabled(self.object_operation_in_progress)
-                                    .tooltip(Tooltip::text(text(
-                                        self.settings.read(cx).language(),
-                                        "删除对象",
-                                        "Drop object",
-                                    )))
-                                    .on_click(cx.listener(
-                                        move |panel, _, window, cx| {
-                                            panel.confirm_drop_object(
-                                                drop_target.clone(),
-                                                drop_mutation.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                                )
-                            })
-                            .into_any_element()
+                        self.render_definition_row(
+                            index,
+                            display(item),
+                            kind,
+                            object(target.clone(), item),
+                            cx,
+                        )
                     }));
                 }
                 rows
